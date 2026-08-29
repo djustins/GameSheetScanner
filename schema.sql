@@ -142,6 +142,28 @@ CREATE TABLE IF NOT EXISTS evaluations (
     created_at   TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Official season schedule, uploaded as a CSV and persisted here so it
+-- survives a restart and stays comparable against stored games without
+-- re-uploading. Scoped per division like teams/games. Re-uploading the same
+-- schedule updates times/round/location for a (division, date, home, away)
+-- match instead of creating a duplicate row, since schedules do get revised.
+-- Whether a row is "accounted for" is never stored here — it's re-evaluated
+-- live against the games table on every read, so it can't go stale.
+CREATE TABLE IF NOT EXISTS schedule_games (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    division_id  INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
+    order_num    INTEGER,
+    round        TEXT,
+    game_date    TEXT NOT NULL,        -- ISO 'YYYY-MM-DD'
+    home_team    TEXT NOT NULL,
+    away_team    TEXT NOT NULL,
+    start_time   TEXT,
+    end_time     TEXT,
+    location     TEXT,
+    field        TEXT,
+    UNIQUE(division_id, game_date, home_team, away_team)
+);
+
 -- Handy views for stat lookups
 
 CREATE VIEW IF NOT EXISTS player_goal_stats AS

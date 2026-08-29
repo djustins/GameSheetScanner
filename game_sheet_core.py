@@ -850,29 +850,78 @@ def find_game_by_source_file(conn: sqlite3.Connection, source_file: str) -> dict
     return g
 
 
-def find_unaccounted_games(
-    conn: sqlite3.Connection, division_id: int, schedule_rows: list[dict]
-) -> list[dict]:
-    """Given rows from an official schedule (each a dict with at least
-    "game_date", "home_team", "away_team"), return the subset that have no
-    matching game already stored in this division — i.e. games still
-    waiting on a scanned sheet. A schedule row counts as accounted for if
-    some stored game shares its date and its two teams (regardless of which
-    side is home/away, since a transcribed sheet occasionally has them
-    swapped relative to the official schedule)."""
+def import_schedule(conn: sqlite3.Connection, division_id: int, schedule_rows: list[dict]) -> int:
+    """Persist an uploaded season schedule for this division. Each row needs
+    at least "game_date", "home_team", "away_team"; "order", "round",
+    "start_time", "end_time", "location", "field" are optional. Upserted by
+    (division_id, date, home, away) so re-uploading a corrected CSV updates
+    round/time/location in place instead of creating duplicate rows —
+    schedules do get revised mid-season. Rows missing date/home/away are
+    skipped. Returns how many rows were saved."""
+    saved = 0
+    for row in schedule_rows:
+        date = normalize_date(row.get("game_date"))
+        home = normalize_text(row.get("home_team"))
+        away = normalize_text(row.get("away_team"))
+        if not date or not home or not away:
+            continue
+        conn.execute(
+            """INSERT INTO schedule_games
+               (division_id, order_num, round, game_date, home_team, away_team,
+                start_time, end_time, location, field)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(division_id, game_date, home_team, away_team) DO UPDATE SET
+                   order_num = excluded.order_num, round = excluded.round,
+                   start_time = excluded.start_time, end_time = excluded.end_time,
+                   location = excluded.location, field = excluded.field""",
+            (
+                division_id, row.get("order"), row.get("round"), date, home, away,
+                row.get("start_time"), row.get("end_time"), row.get("location"), row.get("field"),
+            ),
+        )
+        saved += 1
+    conn.commit()
+    return saved
+
+
+def list_schedule(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+    """The division's persisted schedule, each row annotated with
+    "accounted_for" — whether a stored game shares its date and its two
+    teams (regardless of which side is home/away, since a transcribed sheet
+    occasionally has them swapped relative to the official schedule).
+    Computed fresh against the current games table on every call, so
+    inserting, editing, or deleting a game is reflected immediately without
+    re-uploading the schedule."""
     stored = conn.execute(
         "SELECT game_date, home_team, away_team FROM games WHERE division_id = ?", (division_id,)
     ).fetchall()
     played = {(date, frozenset((home, away))) for date, home, away in stored}
 
-    unaccounted = []
-    for row in schedule_rows:
-        date = normalize_date(row.get("game_date"))
-        home = normalize_text(row.get("home_team"))
-        away = normalize_text(row.get("away_team"))
-        if (date, frozenset((home, away))) not in played:
-            unaccounted.append(row)
-    return unaccounted
+    rows = conn.execute(
+        """SELECT id, order_num, round, game_date, home_team, away_team,
+                  start_time, end_time, location, field
+           FROM schedule_games WHERE division_id = ?
+           ORDER BY game_date, order_num""",
+        (division_id,),
+    ).fetchall()
+    cols = ["id", "order_num", "round", "game_date", "home_team", "away_team",
+            "start_time", "end_time", "location", "field"]
+    result = []
+    for values in rows:
+        r = dict(zip(cols, values))
+        r["accounted_for"] = (r["game_date"], frozenset((r["home_team"], r["away_team"]))) in played
+        r["game_date"] = display_date(r["game_date"])
+        r["home_team"] = display_text(r["home_team"])
+        r["away_team"] = display_text(r["away_team"])
+        result.append(r)
+    return result
+
+
+def clear_schedule(conn: sqlite3.Connection, division_id: int):
+    """Delete the division's entire persisted schedule (e.g. the wrong CSV
+    was uploaded) so a corrected one can be uploaded clean."""
+    conn.execute("DELETE FROM schedule_games WHERE division_id = ?", (division_id,))
+    conn.commit()
 
 
 def load_game(conn: sqlite3.Connection, game_id: int) -> tuple[dict | None, str | None]:

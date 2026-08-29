@@ -16,8 +16,10 @@ standalone Python script — running `app.py` directly with `python` will not wo
 3. The extraction opens in an editable form so you can review and correct it before
    saving — nothing is written to the database until you confirm.
 4. Confirmed data is inserted into `hockey.db`. The app also has standings, player
-   stats, team rosters, an Excel export, and a Schedule tab that compares an uploaded
-   season-schedule CSV against stored games to show which ones still need a sheet.
+   stats, team rosters, an Excel export, and a Schedule tab: upload a season-schedule
+   CSV once and it's saved to the database, then compared against stored games (by
+   date and matchup) every time you view it — so which games still need a sheet stays
+   current as games are added, edited, or removed, with no need to re-upload.
 
 ## Setup
 
@@ -69,6 +71,9 @@ python edit_game.py --game-id 5 --db hockey.db
 - **player_goal_stats** / **player_assist_stats** — views that roll goals/assists up
   per player per game, so you can build season totals with a `GROUP BY player_number`
   across games.
+- **schedule_games** — one row per scheduled matchup from an uploaded CSV: date,
+  home/away team, round, times, location. Whether it's "accounted for" isn't stored
+  here — it's computed live against `games` every time the Schedule tab is viewed.
 
 ## Notes / things to watch for
 

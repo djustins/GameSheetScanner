@@ -1279,12 +1279,25 @@ with tab_schedule:
     st.header("Schedule")
     st.caption(
         "Upload the season's official schedule (a CSV with Date/Home Team/Away Team "
-        "columns) to see which scheduled games haven't had a sheet entered yet."
+        "columns) to see which scheduled games haven't had a sheet entered yet. The "
+        "schedule is saved to the database, so this stays up to date as games are "
+        "added, edited, or removed — no need to re-upload."
     )
     if working_division_id is None:
         st.warning("No division selected. Add one in the Divisions tab first.")
     else:
-        schedule_csv = st.file_uploader("Upload schedule CSV", type=["csv"], key="schedule_csv")
+        upload_col, clear_col = st.columns([4, 1])
+        with upload_col:
+            schedule_csv = st.file_uploader(
+                "Upload schedule CSV", type=["csv"], key=f"schedule_csv_{working_division_id}",
+            )
+        with clear_col:
+            with st.popover("🗑️ Clear schedule"):
+                st.caption("Removes this division's entire saved schedule — e.g. if the wrong CSV was uploaded.")
+                if st.button("Clear", key="clear_schedule_btn", type="primary"):
+                    core.clear_schedule(conn, working_division_id)
+                    st.rerun()
+
         if schedule_csv is not None:
             schedule_df = None
             try:
@@ -1300,30 +1313,38 @@ with tab_schedule:
                     st.error(f"CSV is missing expected column(s): {', '.join(sorted(missing_cols))}")
                 else:
                     schedule_rows = [
-                        {**row, "game_date": row["Date"], "home_team": row["Home Team"],
-                         "away_team": row["Away Team"]}
+                        {
+                            "order": row.get("Order"), "round": row.get("Round"),
+                            "game_date": row.get("Date"), "home_team": row.get("Home Team"),
+                            "away_team": row.get("Away Team"), "start_time": row.get("Start Time"),
+                            "end_time": row.get("End Time"), "location": row.get("Location"),
+                            "field": row.get("Field"),
+                        }
                         for row in schedule_df.to_dict("records")
                     ]
-                    unaccounted = core.find_unaccounted_games(conn, working_division_id, schedule_rows)
+                    saved = core.import_schedule(conn, working_division_id, schedule_rows)
+                    st.success(f"Saved {saved} scheduled game(s) to the database.")
 
-                    total = len(schedule_rows)
-                    done = total - len(unaccounted)
-                    st.progress(
-                        done / total if total else 0,
-                        text=f"{done}/{total} scheduled games accounted for",
-                    )
+        schedule = core.list_schedule(conn, working_division_id)
+        if not schedule:
+            st.info("No schedule uploaded yet for this division.")
+        else:
+            total = len(schedule)
+            done = sum(1 for r in schedule if r["accounted_for"])
+            st.progress(done / total if total else 0, text=f"{done}/{total} scheduled games accounted for")
 
-                    if unaccounted:
-                        st.subheader(f"⚠️ {len(unaccounted)} game(s) not yet accounted for")
-                        display_cols = [
-                            c for c in ["Round", "Date", "Away Team", "Home Team", "Start Time", "Location"]
-                            if c in schedule_df.columns
-                        ]
-                        st.dataframe(
-                            pd.DataFrame(unaccounted)[display_cols], width="stretch", hide_index=True,
-                        )
-                    else:
-                        st.success("Every scheduled game has been entered.")
+            unaccounted = [r for r in schedule if not r["accounted_for"]]
+            if unaccounted:
+                st.subheader(f"⚠️ {len(unaccounted)} game(s) not yet accounted for")
+                display_df = pd.DataFrame(unaccounted)[
+                    ["round", "game_date", "away_team", "home_team", "start_time", "location"]
+                ].rename(columns={
+                    "round": "Round", "game_date": "Date", "away_team": "Away Team",
+                    "home_team": "Home Team", "start_time": "Start Time", "location": "Location",
+                })
+                st.dataframe(display_df, width="stretch", hide_index=True)
+            else:
+                st.success("Every scheduled game has been entered.")
 
 # ---------------------------------------------------------------------------
 # Tab 4: standings

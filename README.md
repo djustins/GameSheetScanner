@@ -3,24 +3,43 @@
 Scans handwritten Team Pittsburgh Ball Hockey game sheets (PDF or photo) and stores
 the stats — goals, assists, penalties, shootout results — in a local SQLite database.
 
+**This is a Streamlit web app.** Run it with `streamlit run app.py`, not as a
+standalone Python script — running `app.py` directly with `python` will not work.
+
 ## How it works
 
-1. You give the script one or more scanned game sheet files (PDF, PNG, or JPG).
+1. In the app, you upload one or more scanned game sheet files (PDF, PNG, or JPG) —
+   multi-page PDFs can be split into individual sheets first.
 2. Each sheet is sent to Claude (vision) with a prompt tailored to this exact game
    sheet layout, which returns structured JSON: teams, colors, final score, goal-by-goal
    detail, penalties, and shootout rounds (circled numbers = goals).
-3. By default you get a quick on-screen summary to review before anything is saved —
-   type `y` to accept, `e` to paste corrected JSON, or `s` to skip that sheet.
-4. Accepted data is inserted into `hockey.db` (or whatever `--db` path you choose).
+3. The extraction opens in an editable form so you can review and correct it before
+   saving — nothing is written to the database until you confirm.
+4. Confirmed data is inserted into `hockey.db`. The app also has standings, player
+   stats, team rosters, and an Excel export.
 
 ## Setup
 
 ```bash
-pip install anthropic
+pip install -r requirements.txt
 export ANTHROPIC_API_KEY=sk-ant-...    # your own API key
 ```
 
 ## Usage
+
+```bash
+streamlit run app.py
+```
+
+This opens the app in your browser. From there you can upload/split game sheets,
+review and save extractions, correct previously-stored games, and browse standings
+and stats.
+
+### Command-line scripts
+
+The extraction/DB logic lives in `game_sheet_core.py` (no Streamlit dependency), so
+the same logic also backs a couple of terminal scripts useful for batch work or
+scripting:
 
 ```bash
 # Process one sheet, reviewing before it's saved
@@ -31,6 +50,10 @@ python process_game_sheet.py scans/*.pdf --db hockey.db
 
 # Skip the review step (trust the extraction, insert directly)
 python process_game_sheet.py game1.pdf --db hockey.db --no-review
+
+# List stored games and their ids, then correct one from the terminal
+python edit_game.py --list --db hockey.db
+python edit_game.py --game-id 5 --db hockey.db
 ```
 
 ## Database layout (`schema.sql`)

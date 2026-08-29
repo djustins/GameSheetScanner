@@ -1,0 +1,6 @@
+anthropic
+pypdf
+pymupdf
+streamlit
+pandas
+openpyxl

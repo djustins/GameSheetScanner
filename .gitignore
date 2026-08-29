@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Databases — real league data; never publish this
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Real uploaded/scanned game sheets and CLI batch-processing folders
+source/
+
+# Streamlit secrets (API keys etc.) — config.toml itself is fine to commit
+.streamlit/secrets.toml
+
+# Process logs
+*.log
+
+# Claude Code local machine settings (not meant to be shared)
+.claude/settings.local.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+split_pdf.py

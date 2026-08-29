@@ -88,3 +88,8 @@ python edit_game.py --game-id 5 --db hockey.db
   SELECT player_number, SUM(goals) FROM player_goal_stats
   WHERE player_number = '14' GROUP BY player_number;
   ```
+
+## To Do
+
+- [ ] Analyze Team Stats
+- [ ] Analyze Player Stats

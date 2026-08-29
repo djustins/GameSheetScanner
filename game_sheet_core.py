@@ -96,7 +96,9 @@ def display_text(s: str | None) -> str | None:
 
 # Game dates are stored as ISO 'YYYY-MM-DD' so they sort/compare correctly
 # (a plain "7/14/26" string doesn't), and shown back as M/D/YYYY.
-_DATE_INPUT_FORMATS = ["%m/%d/%y", "%m/%d/%Y", "%Y-%m-%d", "%m-%d-%y", "%m-%d-%Y"]
+_DATE_INPUT_FORMATS = [
+    "%m/%d/%y", "%m/%d/%Y", "%Y-%m-%d", "%m-%d-%y", "%m-%d-%Y", "%m.%d.%y", "%m.%d.%Y",
+]
 
 
 def normalize_date(s: str | None) -> str | None:
@@ -385,17 +387,30 @@ def _migrate(conn: sqlite3.Connection):
     _migrate_players_split(conn)
 
     # Seed the division the existing (pre-division-scoping) data belongs to,
-    # and use its id to backfill anything that predates division scoping.
-    default_division_id = add_division(conn, 2026, "Summer", "Penguin", "U10")
+    # and use its id to backfill anything that predates division scoping —
+    # but only when there's actually legacy data to migrate, so a brand-new,
+    # division-less database doesn't get seeded with a division nobody asked
+    # for (that used to happen unconditionally on every init_db() call).
+    needs_legacy_division = (
+        "division_id" not in {row[1] for row in conn.execute("PRAGMA table_info(teams)")}
+        or conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='teams_old'"
+        ).fetchone() is not None
+        or conn.execute("SELECT 1 FROM games WHERE division_id IS NULL LIMIT 1").fetchone() is not None
+    )
+    default_division_id = None
+    if needs_legacy_division:
+        default_division_id = add_division(conn, 2026, "Summer", "Penguin", "U10")
+        _migrate_teams_division_id(conn, default_division_id)
 
-    _migrate_teams_division_id(conn, default_division_id)
     _fix_dangling_fks(conn)
     _merge_duplicate_teams(conn)
     _normalize_identity_case(conn)
     _normalize_dates(conn)
     _fix_division_typos(conn)
 
-    conn.execute("UPDATE games SET division_id = ? WHERE division_id IS NULL", (default_division_id,))
+    if default_division_id is not None:
+        conn.execute("UPDATE games SET division_id = ? WHERE division_id IS NULL", (default_division_id,))
 
     # Auto-register any team appearing in games but not yet in teams, scoped
     # to that same game's division.

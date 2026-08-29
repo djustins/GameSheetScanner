@@ -170,6 +170,28 @@ def division_label(age_group: str) -> str:
     return f"{age_group} ({category})" if category else age_group
 
 
+def render_add_division_form(conn, key_prefix: str = ""):
+    """Year/Season/Age Group inputs + Add Division button — shared by the
+    Divisions tab and the top-of-page prompt shown when there are none yet.
+    key_prefix keeps the two instances' widget keys from colliding."""
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        new_div_year = st.number_input(
+            "Year", min_value=2000, max_value=2100, value=2026, step=1, key=f"{key_prefix}new_div_year"
+        )
+    with dcol2:
+        new_div_season = st.selectbox(
+            "Season", ["Summer", "Fall", "Winter", "Spring"], key=f"{key_prefix}new_div_season"
+        )
+    new_div_age_group = st.selectbox(
+        "Age Group", list(core.AGE_GROUPS), key=f"{key_prefix}new_div_age_group", format_func=division_label,
+    )
+    st.caption(f"Category: {core.AGE_GROUPS[new_div_age_group]}")
+    if st.button("Add Division", key=f"{key_prefix}add_division_btn", type="primary"):
+        core.add_division(conn, int(new_div_year), new_div_season, new_div_age_group)
+        st.rerun()
+
+
 def get_client(api_key: str) -> anthropic.Anthropic | None:
     if not api_key:
         return None
@@ -403,7 +425,8 @@ def render_game_form(prefix: str, data: dict, conn, division_id: int) -> dict:
     "winner" field."""
     c1, c2 = st.columns(2)
     game_date = c1.text_input(
-        "Game date", value=core.display_date(data.get("game_date")) or "", key=f"{prefix}_game_date"
+        "Game date", value=core.display_date(core.normalize_date(data.get("game_date"))) or "",
+        key=f"{prefix}_game_date",
     )
     div_options, div_index = division_options(data.get("division"))
     division = c2.selectbox(
@@ -860,8 +883,11 @@ with division_col:
             "Working Division", options=list(div_labels), format_func=lambda i: div_labels[i],
             key="working_division_id",
         )
-    else:
-        st.caption("No divisions yet — add one in the Divisions tab.")
+
+if not all_divisions:
+    st.info("No divisions in the database yet — create one to get started.")
+    with st.popover("➕ Create your first division"):
+        render_add_division_form(conn, key_prefix="top_")
 
 tab_process, tab_edit, tab_standings, tab_stats, tab_rosters, tab_players, tab_divisions = st.tabs(
     ["Process New Sheets", "Games", "Standings", "Player Stats",
@@ -1459,19 +1485,4 @@ with tab_divisions:
             st.divider()
 
     with st.popover("➕ Add Division"):
-        dcol1, dcol2 = st.columns(2)
-        with dcol1:
-            new_div_year = st.number_input(
-                "Year", min_value=2000, max_value=2100, value=2026, step=1, key="new_div_year"
-            )
-        with dcol2:
-            new_div_season = st.selectbox(
-                "Season", ["Summer", "Fall", "Winter", "Spring"], key="new_div_season"
-            )
-        new_div_age_group = st.selectbox(
-            "Age Group", list(core.AGE_GROUPS), key="new_div_age_group", format_func=division_label,
-        )
-        st.caption(f"Category: {core.AGE_GROUPS[new_div_age_group]}")
-        if st.button("Add Division", key="add_division_btn", type="primary"):
-            core.add_division(conn, int(new_div_year), new_div_season, new_div_age_group)
-            st.rerun()
+        render_add_division_form(conn)

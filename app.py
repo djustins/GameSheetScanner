@@ -22,6 +22,7 @@ Requires:
 
 import base64
 import os
+import platform
 import subprocess
 import zipfile
 from io import BytesIO
@@ -171,6 +172,21 @@ def get_client(api_key: str) -> anthropic.Anthropic | None:
     if not api_key:
         return None
     return anthropic.Anthropic(api_key=api_key)
+
+
+def gui_dialogs_available() -> bool:
+    """Whether this process can pop up native dialogs (tkinter file picker,
+    Windows Explorer). False on a hosted deployment like Streamlit Community
+    Cloud, which runs headless on Linux with no display and no tkinter —
+    installing tkinter there wouldn't help, since there's still no display
+    for it to open a window on."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def browse_for_db_file() -> str | None:
@@ -630,30 +646,45 @@ if "db_path_input" not in st.session_state:
 db_path = st.session_state["db_path_input"]
 
 st.sidebar.markdown("**Database file**")
-if st.sidebar.button(
-    f"📂 {db_path or '(click to choose a database file)'}", key="db_path_button",
-    help="Click to browse for an existing database file", width="stretch",
-):
-    picked = browse_for_db_file()
-    if picked:
-        st.session_state["db_path_input"] = picked
-        st.rerun()
-
-open_col, create_col = st.sidebar.columns(2)
-with open_col:
-    if st.button("📁 Locate", key="open_loc_btn", help="Open this file's folder in File Explorer"):
-        if db_path.strip():
-            open_file_location(db_path)
-        else:
-            st.sidebar.error("No database file set.")
-with create_col:
-    with st.popover("🆕 New"):
-        new_db_name = st.text_input("New database filename or path", value="hockey.db", key="new_db_filename")
-        if st.button("Create", key="create_db_btn", type="primary"):
-            new_path = new_db_name.strip() or "hockey.db"
-            st.session_state["db_path_input"] = new_path
-            st.session_state["db_just_created"] = str(Path(new_path).resolve())
+if gui_dialogs_available():
+    if st.sidebar.button(
+        f"📂 {db_path or '(click to choose a database file)'}", key="db_path_button",
+        help="Click to browse for an existing database file", width="stretch",
+    ):
+        picked = browse_for_db_file()
+        if picked:
+            st.session_state["db_path_input"] = picked
             st.rerun()
+
+    open_col, create_col = st.sidebar.columns(2)
+    with open_col:
+        if st.button("📁 Locate", key="open_loc_btn", help="Open this file's folder in File Explorer"):
+            if db_path.strip():
+                open_file_location(db_path)
+            else:
+                st.sidebar.error("No database file set.")
+    with create_col:
+        with st.popover("🆕 New"):
+            new_db_name = st.text_input("New database filename or path", value="hockey.db", key="new_db_filename")
+            if st.button("Create", key="create_db_btn", type="primary"):
+                new_path = new_db_name.strip() or "hockey.db"
+                st.session_state["db_path_input"] = new_path
+                st.session_state["db_just_created"] = str(Path(new_path).resolve())
+                st.rerun()
+else:
+    typed_path = st.sidebar.text_input(
+        "Database path", value=db_path, key="db_path_text",
+        help="No native file browser on a hosted deployment — type a path, "
+             "or use Upload/Download below.",
+    )
+    if typed_path != db_path:
+        st.session_state["db_path_input"] = typed_path
+        st.rerun()
+    if st.sidebar.button("🆕 Create", key="create_db_btn"):
+        new_path = typed_path.strip() or "hockey.db"
+        st.session_state["db_path_input"] = new_path
+        st.session_state["db_just_created"] = str(Path(new_path).resolve())
+        st.rerun()
 
 with st.sidebar.expander("☁️ Load / Save database file"):
     st.caption(
@@ -679,11 +710,23 @@ if not db_path.strip():
     st.info("Click the database field above to browse, or use New to create one.")
     st.stop()
 
-if st.session_state.pop("db_just_created", None):
-    st.sidebar.success(f"Created database at:\n\n{Path(db_path).resolve()}")
+just_created = st.session_state.pop("db_just_created", None)
+resolved_db_path = Path(db_path).resolve()
 
-Path(db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
-st.sidebar.caption(f"Using: {Path(db_path).resolve()}")
+if not just_created and not resolved_db_path.exists():
+    st.sidebar.caption(f"Not found: {resolved_db_path}")
+    st.info(
+        f"No database exists yet at:\n\n{resolved_db_path}\n\n"
+        "Use **New** (or type a path and hit **Create**) to create it, "
+        "Browse to pick a different existing file, or Upload one below."
+    )
+    st.stop()
+
+if just_created:
+    st.sidebar.success(f"Created database at:\n\n{resolved_db_path}")
+
+resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+st.sidebar.caption(f"Using: {resolved_db_path}")
 api_key = st.sidebar.text_input(
     "ANTHROPIC_API_KEY",
     value=os.environ.get("ANTHROPIC_API_KEY", ""),

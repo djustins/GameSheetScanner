@@ -597,8 +597,32 @@ def render_game_form(prefix: str, data: dict, conn, division_id: int) -> dict:
         winner_team = home_team if ot_winner == "home" else away_team
         loser_team = home_team if ot_loser == "home" else away_team
         st.info(f"Decided in a shootout — **OT Winner:** {winner_team}  ·  **OT Loser:** {loser_team}")
+    elif shootout_attempts and home_final_score != away_final_score:
+        st.warning(
+            "Shootout attempts are recorded, but the score above isn't tied — a shootout only "
+            "happens after a tied game. This won't save until the score is tied (so it counts "
+            "as a shootout win/loss) or the shootout attempts are removed."
+        )
 
     return merged
+
+
+def game_form_error(merged: dict) -> str | None:
+    """Pre-save validation for a render_game_form() result — surfaced as
+    st.error before the user clicks save, rather than only after hitting the
+    ValueError core.insert_game()/update_game() raise for the same problems.
+    Both checks live in game_sheet_core so the CLI scripts enforce them too;
+    this just reuses that logic for a friendlier in-form message."""
+    if merged["winner"] == "tie":
+        return (
+            "Games can't end in a tie — fix the score, add shootout results, "
+            "or pick a winner below before saving."
+        )
+    try:
+        core.validate_shootout(merged)
+    except ValueError as e:
+        return str(e)
+    return None
 
 
 def render_player_panel(
@@ -1163,11 +1187,9 @@ with tab_process:
                             accept_col, skip_col = st.columns(2)
                             with accept_col:
                                 if st.button("Accept & Save", key=f"accept_{idx}", type="primary"):
-                                    if merged["winner"] == "tie":
-                                        st.error(
-                                            "Games can't end in a tie — fix the score, add shootout "
-                                            "results, or pick a winner below before saving."
-                                        )
+                                    form_error = game_form_error(merged)
+                                    if form_error:
+                                        st.error(form_error)
                                     else:
                                         try:
                                             replace_target = st.session_state.get(replace_key)
@@ -1216,11 +1238,9 @@ with tab_edit:
             )
             manual_merged = render_game_form("add_new", {}, conn, working_division_id)
             if st.button("Save new game", key="add_new_save", type="primary"):
-                if manual_merged["winner"] == "tie":
-                    st.error(
-                        "Games can't end in a tie — fix the score, add shootout results, "
-                        "or pick a winner below before saving."
-                    )
+                form_error = game_form_error(manual_merged)
+                if form_error:
+                    st.error(form_error)
                 else:
                     try:
                         new_game_id, already_existed = core.insert_game(
@@ -1257,19 +1277,44 @@ with tab_edit:
 
         if st.session_state.get("edit_game_id") == game_id and "edit_data" in st.session_state:
             merged = render_game_form(f"edit_{game_id}", st.session_state.edit_data, conn, working_division_id)
-            if st.button("Save changes", type="primary"):
-                if merged["winner"] == "tie":
-                    st.error(
-                        "Games can't end in a tie — fix the score, add shootout results, "
-                        "or pick a winner below before saving."
-                    )
-                else:
-                    try:
-                        core.update_game(conn, game_id, merged, working_division_id)
-                        st.success(f"Updated game_id={game_id}.")
+            delete_confirm_key = f"confirm_delete_game_{game_id}"
+            save_col, delete_col = st.columns(2)
+            with save_col:
+                if st.button("Save changes", type="primary"):
+                    form_error = game_form_error(merged)
+                    if form_error:
+                        st.error(form_error)
+                    else:
+                        try:
+                            core.update_game(conn, game_id, merged, working_division_id)
+                            st.success(f"Updated game_id={game_id}.")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+            with delete_col:
+                if st.button("🗑️ Delete this game", key=f"delete_game_{game_id}"):
+                    st.session_state[delete_confirm_key] = True
+                    st.rerun()
+
+            if st.session_state.get(delete_confirm_key):
+                st.warning(
+                    f"Permanently delete game_id={game_id} "
+                    f"({merged['home_team'] or 'Home'} vs {merged['away_team'] or 'Away'})? "
+                    "This can't be undone — its goals, penalties, and shootout attempts go with it."
+                )
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    if st.button("Yes, delete", key=f"confirm_yes_delete_game_{game_id}", type="primary"):
+                        core.delete_game(conn, game_id)
+                        st.session_state.pop(delete_confirm_key, None)
+                        for key in ("edit_game_id", "edit_source_file", "edit_data"):
+                            st.session_state.pop(key, None)
+                        st.success(f"Deleted game_id={game_id}.")
                         st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
+                with cancel_col:
+                    if st.button("Cancel", key=f"confirm_no_delete_game_{game_id}"):
+                        st.session_state.pop(delete_confirm_key, None)
+                        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Tab 3: schedule

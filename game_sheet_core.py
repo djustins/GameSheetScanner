@@ -318,6 +318,24 @@ def resolve_winner(data: dict) -> str | None:
     return compute_winner(data)
 
 
+def validate_shootout(data: dict):
+    """Raise ValueError if shootout attempts are recorded but regulation
+    didn't actually end tied. A shootout only happens after a tied game —
+    without this check, a score that doesn't match the shootout (e.g. a typo
+    in the score, or shootout rows left over from correcting a game that
+    used to be tied) would silently fall through compute_ot_result() as
+    "no shootout decided this", counting it as a plain regulation win/loss
+    instead of the separate shootout win/loss it actually is."""
+    if not data.get("shootout_attempts"):
+        return
+    if data.get("home_final_score") != data.get("away_final_score"):
+        raise ValueError(
+            "Shootout attempts are recorded, but the score isn't tied — a shootout only "
+            "happens after a tied game. Fix the score, or remove the shootout attempts "
+            "if this game wasn't actually decided by one."
+        )
+
+
 def compute_ot_result(data: dict) -> tuple[str | None, str | None]:
     """Return (ot_winner, ot_loser) — 'home'/'away' each — if the game was decided
     by a shootout (regulation ended tied and there are shootout attempts), else
@@ -787,6 +805,7 @@ def insert_game(conn: sqlite3.Connection, data: dict, source_file: str, working_
     winner = resolve_winner(data)
     if winner == "tie":
         raise ValueError("Games can't end in a tie — add shootout results or correct the score.")
+    validate_shootout(data)
     ot_winner, ot_loser = compute_ot_result(data)
     cur = conn.execute(
         """INSERT OR IGNORE INTO games
@@ -1008,6 +1027,7 @@ def update_game(conn: sqlite3.Connection, game_id: int, data: dict, working_divi
     winner = resolve_winner(data)
     if winner == "tie":
         raise ValueError("Games can't end in a tie — add shootout results or correct the score.")
+    validate_shootout(data)
     ot_winner, ot_loser = compute_ot_result(data)
 
     conn.execute(
@@ -1032,6 +1052,16 @@ def update_game(conn: sqlite3.Connection, game_id: int, data: dict, working_divi
 
     conn.commit()
     register_players_from_game(conn, data, division_id)
+
+
+def delete_game(conn: sqlite3.Connection, game_id: int):
+    """Permanently remove a game and its goals/penalties/shootout_attempts
+    (cascaded via foreign keys — see schema.sql). Games aren't soft-deleted/
+    recycled like divisions: a single mis-entered game is easy enough to
+    re-process from its sheet if removed by mistake, so a straight delete
+    keeps this simple."""
+    conn.execute("DELETE FROM games WHERE id = ?", (game_id,))
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------

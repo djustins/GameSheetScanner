@@ -664,17 +664,17 @@ theme_mode = st.sidebar.radio("Theme", ["Dark", "Light"], horizontal=True, key="
 inject_theme_css(theme_mode)
 render_sidebar_logo(theme_mode)
 
-st.markdown(
-    f"""
-    <div style="position: fixed; bottom: 6px; left: 10px; z-index: 1000;
-                font-size: 0.7rem; color: rgba(150, 150, 150, 0.6); pointer-events: none;">
-        v{APP_VERSION}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 st.sidebar.title("Settings")
+
+# Rendered early (before any of the st.stop() calls below, e.g. when no
+# database is selected yet) so it's always visible regardless of app state —
+# a version marker that disappears in some states isn't very useful. Full
+# pixel-pinning to the sidebar's visual bottom edge would require overriding
+# Streamlit's internal flex layout, which turned out to corrupt other
+# sidebar widgets' rendering, so this settles for "always visible, near the
+# top" over a real display-breaking hack.
+st.sidebar.caption(f"v{APP_VERSION}")
+
 if "db_path_input" not in st.session_state:
     st.session_state["db_path_input"] = str(DEFAULT_DB_PATH)
 
@@ -697,8 +697,16 @@ if gui_dialogs_available():
         else:
             st.sidebar.error("No database file set.")
 else:
+    # A widget's `value=` is only honored the first time it's created — once
+    # session_state["db_path_text"] exists, Streamlit keeps showing that on
+    # every later rerun and ignores `value=` entirely. Without this, Load/
+    # Create/Browse updating db_path_input got silently reverted right back
+    # on the very next line below, since typed_path would still read the
+    # stale pre-upload path and immediately overwrite db_path_input with it.
+    if st.session_state.get("db_path_text") != db_path:
+        st.session_state["db_path_text"] = db_path
     typed_path = st.sidebar.text_input(
-        "Database path", value=db_path, key="db_path_text",
+        "Database path", key="db_path_text",
         help="No native file browser on a hosted deployment — type a path, "
              "or use Load/Save below.",
     )
@@ -711,7 +719,7 @@ else:
 # to get a database as a local install.
 create_col, save_col, load_col = st.sidebar.columns(3)
 with create_col:
-    with st.popover("🆕 Create", width="stretch"):
+    with st.popover("➕ New", width="stretch"):
         new_db_name = st.text_input(
             "New database filename or path",
             value=db_path if not gui_dialogs_available() else "hockey.db",
@@ -747,7 +755,7 @@ with load_col:
 
 if not db_path.strip():
     st.sidebar.caption("No database selected.")
-    st.info("Click the database field above to browse, or use Create/Load below.")
+    st.info("Click the database field above to browse, or use New/Load below.")
     st.stop()
 
 just_created = st.session_state.pop("db_just_created", None)
@@ -757,7 +765,7 @@ if not just_created and not resolved_db_path.exists():
     st.sidebar.caption(f"Not found: {resolved_db_path}")
     st.info(
         f"No database exists yet at:\n\n{resolved_db_path}\n\n"
-        "Use **Create** to make a new one, **Load** to upload a database file you "
+        "Use **New** to create one, **Load** to upload a database file you "
         "downloaded before"
         + (", or Browse to pick a different existing file on this machine." if gui_dialogs_available() else ".")
     )
@@ -909,10 +917,16 @@ with tab_process:
     st.header("Process New Sheets")
     if working_division_id is None:
         st.warning("No division selected. Add one in the Divisions tab first.")
+    # Keyed with a version counter so Clear/Cancel below can force the
+    # uploader widget itself to reset (bumping the key makes Streamlit treat
+    # it as a brand-new widget) — otherwise the browser keeps showing the
+    # previously-picked files even after the queue/session state is cleared.
+    st.session_state.setdefault("sheet_uploader_version", 0)
     uploaded = st.file_uploader(
         "Upload game sheet scan(s) (PDF or image)",
         type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
         accept_multiple_files=True,
+        key=f"sheet_uploader_{st.session_state.sheet_uploader_version}",
     )
 
     if uploaded or st.session_state.get("queue"):
@@ -972,6 +986,7 @@ with tab_process:
                             del st.session_state[key]
                     for key in ("queue", "upload_key", "queue_index"):
                         st.session_state.pop(key, None)
+                    st.session_state.sheet_uploader_version += 1
                     st.rerun()
         elif duplicates:
             # An embedded "window": a bordered, tinted panel that gates the
@@ -1023,6 +1038,7 @@ with tab_process:
                                 del st.session_state[key]
                         for key in ("queue", "upload_key", "queue_index"):
                             st.session_state.pop(key, None)
+                        st.session_state.sheet_uploader_version += 1
                         st.rerun()
                 with bcol2:
                     if st.button("Skip All", key="dup_skip_all", type="primary"):

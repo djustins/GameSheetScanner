@@ -949,7 +949,24 @@ with tab_process:
             if g is not None and f"replace_target_{idx}" not in st.session_state
         ]
 
-        if duplicates:
+        if duplicates and len(duplicates) == len(queue):
+            # Every uploaded file already exists in the database — nothing to
+            # review, so skip the per-item panel and just offer to clear the
+            # batch instead of making the user click through each one.
+            with st.container(border=True, key="dup_panel"):
+                st.subheader("⚠️ All Sheets Are Duplicates")
+                st.caption(
+                    f"All {len(queue)} uploaded file(s) already exist in the database — "
+                    "nothing new to process."
+                )
+                if st.button("Clear", key="dup_clear_all", type="primary"):
+                    for key in list(st.session_state.keys()):
+                        if key.startswith(("data_", "proc_", "replace_target_")):
+                            del st.session_state[key]
+                    for key in ("queue", "upload_key", "queue_index"):
+                        st.session_state.pop(key, None)
+                    st.rerun()
+        elif duplicates:
             # An embedded "window": a bordered, tinted panel that gates the
             # rest of the queue until every duplicate has a decision, instead
             # of scattering warnings across a summary list and each item again

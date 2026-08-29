@@ -1125,6 +1125,38 @@ with tab_edit:
         rows = []
     else:
         rows = core.list_games(conn, working_division_id)
+
+    if working_division_id is not None:
+        with st.expander("➕ Add Game Manually"):
+            st.caption(
+                "For a game whose sheet is missing, lost, or never scanned — enter its "
+                "stats by hand instead of processing a sheet."
+            )
+            manual_merged = render_game_form("add_new", {}, conn, working_division_id)
+            if st.button("Save new game", key="add_new_save", type="primary"):
+                if manual_merged["winner"] == "tie":
+                    st.error(
+                        "Games can't end in a tie — fix the score, add shootout results, "
+                        "or pick a winner below before saving."
+                    )
+                else:
+                    try:
+                        new_game_id, already_existed = core.insert_game(
+                            conn, manual_merged, source_file="(manual entry)",
+                            working_division_id=working_division_id,
+                        )
+                        for key in list(st.session_state.keys()):
+                            if key.startswith("add_new_"):
+                                del st.session_state[key]
+                        st.success(
+                            f"Added game_id={new_game_id} manually."
+                            + (" (Matching game already existed — stats were re-inserted.)"
+                               if already_existed else "")
+                        )
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+
     if not rows:
         st.write("No games in the database yet.")
     else:

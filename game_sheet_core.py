@@ -889,9 +889,18 @@ def list_schedule(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     "accounted_for" — whether a stored game shares its date and its two
     teams (regardless of which side is home/away, since a transcribed sheet
     occasionally has them swapped relative to the official schedule).
-    Computed fresh against the current games table on every call, so
-    inserting, editing, or deleting a game is reflected immediately without
-    re-uploading the schedule."""
+    Computed fresh against the current games table on every call — no
+    caching anywhere in this path — so inserting, editing (including a
+    home/away swap), or deleting a game is reflected the moment this is
+    called again, without re-uploading the schedule.
+
+    Team names are resolved through the same fuzzy match used for every
+    other team-name field (normalize_team_name) before comparing, not
+    compared as literal text — the schedule's spelling for a team (e.g.
+    "Kings" from the CSV) can otherwise differ just enough from that team's
+    actual stored spelling (a first-sheet typo that became canonical, extra
+    whitespace, etc.) that an exact-string match silently never fires even
+    though the game is plainly right there in the Games tab."""
     stored = conn.execute(
         "SELECT game_date, home_team, away_team FROM games WHERE division_id = ?", (division_id,)
     ).fetchall()
@@ -909,7 +918,9 @@ def list_schedule(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     result = []
     for values in rows:
         r = dict(zip(cols, values))
-        r["accounted_for"] = (r["game_date"], frozenset((r["home_team"], r["away_team"]))) in played
+        home_key = normalize_team_name(conn, division_id, r["home_team"])
+        away_key = normalize_team_name(conn, division_id, r["away_team"])
+        r["accounted_for"] = (r["game_date"], frozenset((home_key, away_key))) in played
         r["game_date"] = display_date(r["game_date"])
         r["home_team"] = display_text(r["home_team"])
         r["away_team"] = display_text(r["away_team"])

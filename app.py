@@ -419,6 +419,57 @@ def render_team_field(container, label: str, field_key: str, current_value: str 
     return value
 
 
+def swap_home_away(prefix: str):
+    """Flip every home/away-scoped piece of this form's state: team names
+    (via the same _pending mechanism render_team_field uses for its
+    suggestion button), colors, scores, each goal's side, each penalty/
+    shootout row's Side widget, and the Winner pick. For when a scoresheet
+    turns out to have had home and away backwards — everything entered
+    against the wrong side needs to move to the right one, not just the
+    team names."""
+    home_team_key, away_team_key = f"{prefix}_home_team", f"{prefix}_away_team"
+    st.session_state[f"{home_team_key}_pending"] = st.session_state.get(away_team_key, "")
+    st.session_state[f"{away_team_key}_pending"] = st.session_state.get(home_team_key, "")
+
+    home_color_key, away_color_key = f"{prefix}_home_color", f"{prefix}_away_color"
+    st.session_state[home_color_key], st.session_state[away_color_key] = (
+        st.session_state.get(away_color_key, ""), st.session_state.get(home_color_key, ""),
+    )
+
+    home_score_key, away_score_key = f"{prefix}_home_score", f"{prefix}_away_score"
+    st.session_state[home_score_key], st.session_state[away_score_key] = (
+        st.session_state.get(away_score_key, 0), st.session_state.get(home_score_key, 0),
+    )
+    # Flip the auto-score-from-goals bookkeeping in lockstep with the score
+    # swap above, so a game that was auto-scoring doesn't get bumped into
+    # manual mode just because this function moved the numbers between keys
+    # (the auto-sync check below would otherwise read that as "user typed
+    # something else by hand").
+    last_synced_key = f"{prefix}_score_last_synced"
+    last_synced = st.session_state.get(last_synced_key)
+    if last_synced is not None:
+        st.session_state[last_synced_key] = (last_synced[1], last_synced[0])
+
+    # Goals have no per-row Side widget (side is fixed by which "+ Add goal"
+    # button created the row) — flipping the row dicts themselves is enough,
+    # since the editor groups by that field on every render.
+    for row in st.session_state.get(f"{prefix}_goals", []):
+        row["side"] = "away" if row.get("side", "home") == "home" else "home"
+
+    # Penalties/shootout rows DO have a Side selectbox, keyed independently
+    # per row — its widget key is what actually needs to change, not just
+    # the row dict (which the widget overwrites right back on every render).
+    for editor_key in (f"{prefix}_penalties", f"{prefix}_shootout"):
+        for row in st.session_state.get(editor_key, []):
+            side_widget_key = f"{editor_key}_{row['_id']}_side"
+            current = st.session_state.get(side_widget_key, row.get("side", "home"))
+            st.session_state[side_widget_key] = "away" if current == "home" else "home"
+
+    winner_key = f"{prefix}_winner"
+    if st.session_state.get(winner_key) in ("home", "away"):
+        st.session_state[winner_key] = "away" if st.session_state[winner_key] == "home" else "home"
+
+
 def render_game_form(prefix: str, data: dict, conn, division_id: int) -> dict:
     """Render an editable form for one game record and return the current
     (live, possibly-edited) data dict matching the extraction schema plus a
@@ -487,6 +538,14 @@ def render_game_form(prefix: str, data: dict, conn, division_id: int) -> dict:
         st.session_state[home_score_key] = int(data.get("home_final_score") or 0)
     if away_score_key not in st.session_state:
         st.session_state[away_score_key] = int(data.get("away_final_score") or 0)
+
+    if st.button(
+        "🔄 Swap Home/Away", key=f"{prefix}_swap_sides",
+        help="Use if the scoresheet had home and away backwards — swaps teams, "
+             "colors, scores, and every goal/penalty/shootout entry to the other side.",
+    ):
+        swap_home_away(prefix)
+        st.rerun()
 
     st.markdown("##### Home")
     hc1, hc2, hc3 = st.columns(3)

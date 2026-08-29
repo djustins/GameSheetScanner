@@ -1,6 +1,7 @@
 anthropic
 pypdf
 pymupdf
+Pillow
 streamlit
 pandas
 openpyxl

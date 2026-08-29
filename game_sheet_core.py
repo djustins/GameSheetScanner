@@ -211,8 +211,38 @@ def guess_mime(filename: str) -> str | None:
     return mime
 
 
+_EXIF_ORIENTATION_TAG = 0x0112
+
+
+def normalize_image_orientation(data: bytes, mime: str | None) -> bytes:
+    """Bake a photo's EXIF orientation tag into its actual pixel data. Phone
+    cameras commonly save a sideways/upside-down sensor image plus an EXIF
+    tag saying how to rotate it for display — a phone gallery or browser
+    applies that automatically, but Claude's vision only sees the raw,
+    un-rotated pixels, which makes handwriting much harder to read. Passes
+    everything else (PDFs, images with no orientation tag) through
+    unchanged, and never raises — a rotation nicety shouldn't block
+    extraction if something about the image is unusual."""
+    if mime not in ("image/jpeg", "image/png", "image/webp"):
+        return data
+    try:
+        from PIL import Image, ImageOps
+
+        img = Image.open(BytesIO(data))
+        if img.getexif().get(_EXIF_ORIENTATION_TAG, 1) == 1:
+            return data
+        transposed = ImageOps.exif_transpose(img)
+        buf = BytesIO()
+        transposed.save(buf, format=img.format)
+        return buf.getvalue()
+    except Exception:
+        return data
+
+
 def build_content_block(data: bytes, mime: str | None) -> dict:
     """Build an Anthropic API content block (image or document) from raw bytes."""
+    if mime in ("image/png", "image/jpeg", "image/webp"):
+        data = normalize_image_orientation(data, mime)
     b64 = base64.standard_b64encode(data).decode("utf-8")
     if mime == "application/pdf":
         return {"type": "document", "source": {"type": "base64", "media_type": mime, "data": b64}}

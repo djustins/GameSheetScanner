@@ -690,59 +690,64 @@ if gui_dialogs_available():
         if picked:
             st.session_state["db_path_input"] = picked
             st.rerun()
-
-    open_col, create_col = st.sidebar.columns(2)
-    with open_col:
-        if st.button("📁 Locate", key="open_loc_btn", help="Open this file's folder in File Explorer"):
-            if db_path.strip():
-                open_file_location(db_path)
-            else:
-                st.sidebar.error("No database file set.")
-    with create_col:
-        with st.popover("🆕 New"):
-            new_db_name = st.text_input("New database filename or path", value="hockey.db", key="new_db_filename")
-            if st.button("Create", key="create_db_btn", type="primary"):
-                new_path = new_db_name.strip() or "hockey.db"
-                st.session_state["db_path_input"] = new_path
-                st.session_state["db_just_created"] = str(Path(new_path).resolve())
-                st.rerun()
+    if st.sidebar.button("📁 Locate", key="open_loc_btn", help="Open this file's folder in File Explorer",
+                          width="stretch"):
+        if db_path.strip():
+            open_file_location(db_path)
+        else:
+            st.sidebar.error("No database file set.")
 else:
     typed_path = st.sidebar.text_input(
         "Database path", value=db_path, key="db_path_text",
         help="No native file browser on a hosted deployment — type a path, "
-             "or use Upload/Download below.",
+             "or use Load/Save below.",
     )
     if typed_path != db_path:
         st.session_state["db_path_input"] = typed_path
         st.rerun()
-    if st.sidebar.button("🆕 Create", key="create_db_btn"):
-        new_path = typed_path.strip() or "hockey.db"
-        st.session_state["db_path_input"] = new_path
-        st.session_state["db_just_created"] = str(Path(new_path).resolve())
-        st.rerun()
 
-with st.sidebar.expander("☁️ Load / Save database file"):
-    st.caption(
-        "For a hosted deployment (no local file browsing there): upload a "
-        "previously-downloaded database to work from it, and download it "
-        "again afterward to keep your changes — this app only works for one "
-        "person at a time this way, since there's no merging of edits from "
-        "two people working from separate copies."
-    )
-    uploaded_db = st.file_uploader("Upload a database file (.db)", type=["db"], key="db_upload")
-    if uploaded_db is not None:
-        upload_marker = (uploaded_db.name, uploaded_db.size)
-        if st.session_state.get("db_upload_marker") != upload_marker:
-            upload_path = (Path(__file__).parent / "uploaded_hockey.db").resolve()
-            upload_path.write_bytes(uploaded_db.getvalue())
-            st.session_state["db_upload_marker"] = upload_marker
-            st.session_state["db_path_input"] = str(upload_path)
+# Create / Save / Load — always available regardless of platform, so a
+# hosted deployment (no local file browsing there) has the same three ways
+# to get a database as a local install.
+create_col, save_col, load_col = st.sidebar.columns(3)
+with create_col:
+    with st.popover("🆕 Create", width="stretch"):
+        new_db_name = st.text_input(
+            "New database filename or path",
+            value=db_path if not gui_dialogs_available() else "hockey.db",
+            key="new_db_filename",
+        )
+        if st.button("Create", key="create_db_btn", type="primary"):
+            new_path = new_db_name.strip() or "hockey.db"
+            st.session_state["db_path_input"] = new_path
+            st.session_state["db_just_created"] = str(Path(new_path).resolve())
             st.rerun()
-    download_db_placeholder = st.empty()
+with save_col:
+    save_db_placeholder = st.empty()
+    if not Path(db_path).exists():
+        save_db_placeholder.button("💾 Save", key="save_db_btn_disabled", width="stretch", disabled=True,
+                                    help="Nothing to save yet — create or load a database first.")
+with load_col:
+    with st.popover("📤 Load", width="stretch"):
+        st.caption(
+            "Upload a previously-downloaded database file to work from it — "
+            "this app only works for one person at a time this way, since "
+            "there's no merging of edits from two people working from "
+            "separate copies."
+        )
+        uploaded_db = st.file_uploader("Upload a database file (.db)", type=["db"], key="db_upload")
+        if uploaded_db is not None:
+            upload_marker = (uploaded_db.name, uploaded_db.size)
+            if st.session_state.get("db_upload_marker") != upload_marker:
+                upload_path = (Path(__file__).parent / "uploaded_hockey.db").resolve()
+                upload_path.write_bytes(uploaded_db.getvalue())
+                st.session_state["db_upload_marker"] = upload_marker
+                st.session_state["db_path_input"] = str(upload_path)
+                st.rerun()
 
 if not db_path.strip():
     st.sidebar.caption("No database selected.")
-    st.info("Click the database field above to browse, or use New to create one.")
+    st.info("Click the database field above to browse, or use Create/Load below.")
     st.stop()
 
 just_created = st.session_state.pop("db_just_created", None)
@@ -752,8 +757,9 @@ if not just_created and not resolved_db_path.exists():
     st.sidebar.caption(f"Not found: {resolved_db_path}")
     st.info(
         f"No database exists yet at:\n\n{resolved_db_path}\n\n"
-        "Use **New** (or type a path and hit **Create**) to create it, "
-        "Browse to pick a different existing file, or Upload one below."
+        "Use **Create** to make a new one, **Load** to upload a database file you "
+        "downloaded before"
+        + (", or Browse to pick a different existing file on this machine." if gui_dialogs_available() else ".")
     )
     st.stop()
 
@@ -775,10 +781,11 @@ if fitz is None:
 conn = core.init_db(db_path)
 
 if Path(db_path).exists():
-    download_db_placeholder.download_button(
-        "💾 Download current database", data=Path(db_path).read_bytes(),
+    save_db_placeholder.download_button(
+        "💾 Save", data=Path(db_path).read_bytes(),
         file_name=Path(db_path).name or "hockey.db", mime="application/x-sqlite3",
-        help="Save your current database file locally so you can upload it again next time.",
+        help="Download your current database file locally so you can Load it again next time.",
+        key="save_db_btn", width="stretch",
     )
 
 # Resolved here (before the Working Division selectbox widget itself is

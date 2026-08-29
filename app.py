@@ -38,6 +38,8 @@ import game_sheet_core as core
 DEFAULT_DB_PATH = Path(__file__).parent / "hockey.db"
 LOGO_PATH = Path(__file__).parent / "logo.png"
 _LOGO_B64 = base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii") if LOGO_PATH.exists() else None
+VERSION_PATH = Path(__file__).parent / "VERSION"
+APP_VERSION = VERSION_PATH.read_text().strip() if VERSION_PATH.exists() else "0.0.0"
 
 try:
     import pymupdf as fitz
@@ -638,6 +640,16 @@ def render_player_panel(
 theme_mode = st.sidebar.radio("Theme", ["Dark", "Light"], horizontal=True, key="theme_mode")
 inject_theme_css(theme_mode)
 render_sidebar_logo(theme_mode)
+
+st.markdown(
+    f"""
+    <div style="position: fixed; bottom: 6px; left: 10px; z-index: 1000;
+                font-size: 0.7rem; color: rgba(150, 150, 150, 0.6); pointer-events: none;">
+        v{APP_VERSION}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.sidebar.title("Settings")
 if "db_path_input" not in st.session_state:

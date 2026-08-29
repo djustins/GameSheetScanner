@@ -127,6 +127,25 @@ def display_date(s: str | None) -> str | None:
         return s
 
 
+def _symmetric_ratio(a: str, b: str) -> float:
+    """difflib's SequenceMatcher.ratio() is order-dependent in edge cases —
+    e.g. "perun" vs "penguin" scores 0.5 one way and 0.67 the other — because
+    its matching-block search seeds from whichever string is passed as seq2.
+    Taking the max of both orderings gives a stable similarity score."""
+    return max(
+        difflib.SequenceMatcher(None, a, b).ratio(),
+        difflib.SequenceMatcher(None, b, a).ratio(),
+    )
+
+
+def _best_fuzzy_match(value: str, candidates: list[str], cutoff: float = 0.6) -> str | None:
+    """The candidate closest to value by symmetric ratio, or None if nothing
+    clears cutoff."""
+    scored = [(c, _symmetric_ratio(value.lower(), c.lower())) for c in candidates]
+    best = max(scored, key=lambda cs: cs[1], default=None)
+    return best[0] if best and best[1] >= cutoff else None
+
+
 def match_age_group(value: str | None) -> str | None:
     """Best-effort match of free text (extraction/typos/case) to a known age
     group name from AGE_GROUPS, e.g. "Pegin" -> "Penguin". Returns None if
@@ -139,8 +158,7 @@ def match_age_group(value: str | None) -> str | None:
     exact = next((n for n in names if n.lower() == value.lower()), None)
     if exact:
         return exact
-    close = difflib.get_close_matches(value, names, n=1, cutoff=0.6)
-    return close[0] if close else None
+    return _best_fuzzy_match(value, names)
 
 
 def normalize_division(value: str | None) -> str | None:
@@ -169,9 +187,8 @@ def match_team_name(conn: sqlite3.Connection, division_id: int, value: str | Non
     exact = next((n for n in existing if n.lower() == value.lower()), None)
     if exact:
         return display_text(exact)
-    lower_to_name = {n.lower(): n for n in existing}
-    close = difflib.get_close_matches(value.lower(), list(lower_to_name), n=1, cutoff=0.6)
-    return display_text(lower_to_name[close[0]]) if close else None
+    match = _best_fuzzy_match(value, existing)
+    return display_text(match) if match else None
 
 
 def normalize_team_name(conn: sqlite3.Connection, division_id: int, value: str | None) -> str | None:

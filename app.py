@@ -904,8 +904,8 @@ if not all_divisions:
     with st.popover("➕ Create your first division"):
         render_add_division_form(conn, key_prefix="top_")
 
-tab_process, tab_edit, tab_standings, tab_stats, tab_rosters, tab_players, tab_divisions = st.tabs(
-    ["Process New Sheets", "Games", "Standings", "Player Stats",
+tab_process, tab_edit, tab_schedule, tab_standings, tab_stats, tab_rosters, tab_players, tab_divisions = st.tabs(
+    ["Process New Sheets", "Games", "Schedule", "Standings", "Player Stats",
      "Team Rosters", "Players", "Divisions"]
 )
 
@@ -1213,7 +1213,61 @@ with tab_edit:
                         st.error(str(e))
 
 # ---------------------------------------------------------------------------
-# Tab 3: standings
+# Tab 3: schedule
+# ---------------------------------------------------------------------------
+
+with tab_schedule:
+    st.header("Schedule")
+    st.caption(
+        "Upload the season's official schedule (a CSV with Date/Home Team/Away Team "
+        "columns) to see which scheduled games haven't had a sheet entered yet."
+    )
+    if working_division_id is None:
+        st.warning("No division selected. Add one in the Divisions tab first.")
+    else:
+        schedule_csv = st.file_uploader("Upload schedule CSV", type=["csv"], key="schedule_csv")
+        if schedule_csv is not None:
+            schedule_df = None
+            try:
+                schedule_df = pd.read_csv(schedule_csv)
+                schedule_df.columns = [c.strip() for c in schedule_df.columns]
+            except Exception as e:
+                st.error(f"Couldn't read that CSV: {e}")
+
+            if schedule_df is not None:
+                required_cols = {"Date", "Home Team", "Away Team"}
+                missing_cols = required_cols - set(schedule_df.columns)
+                if missing_cols:
+                    st.error(f"CSV is missing expected column(s): {', '.join(sorted(missing_cols))}")
+                else:
+                    schedule_rows = [
+                        {**row, "game_date": row["Date"], "home_team": row["Home Team"],
+                         "away_team": row["Away Team"]}
+                        for row in schedule_df.to_dict("records")
+                    ]
+                    unaccounted = core.find_unaccounted_games(conn, working_division_id, schedule_rows)
+
+                    total = len(schedule_rows)
+                    done = total - len(unaccounted)
+                    st.progress(
+                        done / total if total else 0,
+                        text=f"{done}/{total} scheduled games accounted for",
+                    )
+
+                    if unaccounted:
+                        st.subheader(f"⚠️ {len(unaccounted)} game(s) not yet accounted for")
+                        display_cols = [
+                            c for c in ["Round", "Date", "Away Team", "Home Team", "Start Time", "Location"]
+                            if c in schedule_df.columns
+                        ]
+                        st.dataframe(
+                            pd.DataFrame(unaccounted)[display_cols], width="stretch", hide_index=True,
+                        )
+                    else:
+                        st.success("Every scheduled game has been entered.")
+
+# ---------------------------------------------------------------------------
+# Tab 4: standings
 # ---------------------------------------------------------------------------
 
 with tab_standings:
@@ -1230,7 +1284,7 @@ with tab_standings:
         st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------------------
-# Tab 4: player stats
+# Tab 5: player stats
 # ---------------------------------------------------------------------------
 
 with tab_stats:
@@ -1302,7 +1356,7 @@ with tab_stats:
                         )
 
 # ---------------------------------------------------------------------------
-# Tab 5: team rosters
+# Tab 6: team rosters
 # ---------------------------------------------------------------------------
 
 with tab_rosters:
@@ -1425,7 +1479,7 @@ with tab_rosters:
                 st.dataframe(stats_df, width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------------------
-# Tab 6: players (global profiles, persisting across every division/season)
+# Tab 7: players (global profiles, persisting across every division/season)
 # ---------------------------------------------------------------------------
 
 with tab_players:
@@ -1494,7 +1548,7 @@ with tab_players:
                         st.rerun()
 
 # ---------------------------------------------------------------------------
-# Tab 7: divisions
+# Tab 8: divisions
 # ---------------------------------------------------------------------------
 
 with tab_divisions:

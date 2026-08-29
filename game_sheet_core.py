@@ -820,6 +820,31 @@ def find_game_by_source_file(conn: sqlite3.Connection, source_file: str) -> dict
     return g
 
 
+def find_unaccounted_games(
+    conn: sqlite3.Connection, division_id: int, schedule_rows: list[dict]
+) -> list[dict]:
+    """Given rows from an official schedule (each a dict with at least
+    "game_date", "home_team", "away_team"), return the subset that have no
+    matching game already stored in this division — i.e. games still
+    waiting on a scanned sheet. A schedule row counts as accounted for if
+    some stored game shares its date and its two teams (regardless of which
+    side is home/away, since a transcribed sheet occasionally has them
+    swapped relative to the official schedule)."""
+    stored = conn.execute(
+        "SELECT game_date, home_team, away_team FROM games WHERE division_id = ?", (division_id,)
+    ).fetchall()
+    played = {(date, frozenset((home, away))) for date, home, away in stored}
+
+    unaccounted = []
+    for row in schedule_rows:
+        date = normalize_date(row.get("game_date"))
+        home = normalize_text(row.get("home_team"))
+        away = normalize_text(row.get("away_team"))
+        if (date, frozenset((home, away))) not in played:
+            unaccounted.append(row)
+    return unaccounted
+
+
 def load_game(conn: sqlite3.Connection, game_id: int) -> tuple[dict | None, str | None]:
     """Return (data, source_file) for the given game id, matching the same
     structure extract_game_sheet() produces (plus the stored "winner"), or

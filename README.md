@@ -16,7 +16,8 @@ standalone Python script — running `app.py` directly with `python` will not wo
 3. The extraction opens in an editable form so you can review and correct it before
    saving — nothing is written to the database until you confirm.
 4. Confirmed data is inserted into `hockey.db`. The app also has standings, player
-   stats, team rosters, and an Excel export.
+   stats, team rosters, an Excel export, and a Schedule tab that compares an uploaded
+   season-schedule CSV against stored games to show which ones still need a sheet.
 
 ## Setup
 

@@ -284,27 +284,44 @@ def extract_game_sheet(client: anthropic.Anthropic, content_block: dict) -> dict
 # Game logic
 # ---------------------------------------------------------------------------
 
+def shootout_winner(shootout_attempts: list[dict]) -> str | None:
+    """'home'/'away' if the shootout has a decisive winner (more scored
+    attempts on that side), else None — no attempts, or the recorded
+    attempts are themselves tied (incomplete/not fully transcribed)."""
+    home_so = sum(1 for s in shootout_attempts if s.get("side") == "home" and s.get("scored"))
+    away_so = sum(1 for s in shootout_attempts if s.get("side") == "away" and s.get("scored"))
+    if home_so > away_so:
+        return "home"
+    if away_so > home_so:
+        return "away"
+    return None
+
+
 def compute_winner(data: dict) -> str | None:
-    """Determine the game winner: 'home', 'away', or 'tie'. If regulation ended
-    tied and there are shootout attempts, the shootout decides it. Returns None
-    if scores aren't both known yet."""
+    """Determine the game winner: 'home', 'away', or 'tie'. If there are
+    shootout attempts, the shootout decides it whenever the final score is
+    consistent with that: either a true regulation tie (shootout tracked
+    entirely separately), or the shootout winner's score exactly one goal
+    ahead — the common real-world box-score convention of showing a
+    shootout winner as e.g. "5-4" rather than the true 4-4 tie. Otherwise
+    falls back to a plain score comparison. Returns None if scores aren't
+    both known yet."""
     home = data.get("home_final_score")
     away = data.get("away_final_score")
     if home is None or away is None:
         return None
+
+    shootout = data.get("shootout_attempts") or []
+    if shootout:
+        so_winner = shootout_winner(shootout)
+        if so_winner == "home" and home - away in (0, 1):
+            return "home"
+        if so_winner == "away" and away - home in (0, 1):
+            return "away"
+
     if home > away:
         return "home"
     if away > home:
-        return "away"
-
-    shootout = data.get("shootout_attempts") or []
-    if not shootout:
-        return "tie"
-    home_so_goals = sum(1 for s in shootout if s.get("side") == "home" and s.get("scored"))
-    away_so_goals = sum(1 for s in shootout if s.get("side") == "away" and s.get("scored"))
-    if home_so_goals > away_so_goals:
-        return "home"
-    if away_so_goals > home_so_goals:
         return "away"
     return "tie"
 
@@ -319,34 +336,50 @@ def resolve_winner(data: dict) -> str | None:
 
 
 def validate_shootout(data: dict):
-    """Raise ValueError if shootout attempts are recorded but regulation
-    didn't actually end tied. A shootout only happens after a tied game —
-    without this check, a score that doesn't match the shootout (e.g. a typo
-    in the score, or shootout rows left over from correcting a game that
-    used to be tied) would silently fall through compute_ot_result() as
-    "no shootout decided this", counting it as a plain regulation win/loss
-    instead of the separate shootout win/loss it actually is."""
-    if not data.get("shootout_attempts"):
+    """Raise ValueError if shootout attempts are recorded but don't
+    reconcile with the score: either regulation must have actually ended
+    tied, or the score must show the shootout winner exactly one goal
+    ahead (the standard box-score convention, e.g. "5-4" for a game that
+    was really 4-4 before the shootout) — and the shootout itself must
+    actually have a winner. Without this check, a real mismatch (e.g. a
+    typo in the score, or shootout rows left over from correcting a game
+    that used to be tied) would silently fall through compute_ot_result()
+    as "no shootout decided this", counting it as a plain regulation
+    win/loss instead of the separate shootout win/loss it actually is."""
+    shootout = data.get("shootout_attempts") or []
+    if not shootout:
         return
-    if data.get("home_final_score") != data.get("away_final_score"):
+    home = data.get("home_final_score")
+    away = data.get("away_final_score")
+    if home is not None and away is not None and abs(home - away) > 1:
         raise ValueError(
-            "Shootout attempts are recorded, but the score isn't tied — a shootout only "
-            "happens after a tied game. Fix the score, or remove the shootout attempts "
-            "if this game wasn't actually decided by one."
+            "Shootout attempts are recorded, but the score is more than one goal apart — "
+            "a shootout only happens after a tied game (the final score may show the "
+            "winner with one bonus goal added, e.g. 5-4, but not more than that). Fix the "
+            "score, or remove the shootout attempts if this game wasn't actually decided by one."
+        )
+    if shootout_winner(shootout) is None:
+        raise ValueError(
+            "Shootout attempts are recorded, but the shootout itself doesn't show a winner — "
+            "check which attempts were marked as scored before saving."
         )
 
 
 def compute_ot_result(data: dict) -> tuple[str | None, str | None]:
-    """Return (ot_winner, ot_loser) — 'home'/'away' each — if the game was decided
-    by a shootout (regulation ended tied and there are shootout attempts), else
-    (None, None). Used to award shootout-loss points distinctly from a regulation
-    loss."""
+    """Return (ot_winner, ot_loser) — 'home'/'away' each — if the game was
+    decided by a shootout (the score is consistent with a tie, per
+    compute_winner()'s rules, and there are shootout attempts), else
+    (None, None). Used to award shootout-loss points distinctly from a
+    regulation loss."""
     winner = resolve_winner(data)
     if winner not in ("home", "away"):
         return None, None
-    if not data.get("shootout_attempts"):
+    shootout = data.get("shootout_attempts") or []
+    if not shootout:
         return None, None
-    if data.get("home_final_score") != data.get("away_final_score"):
+    home = data.get("home_final_score") or 0
+    away = data.get("away_final_score") or 0
+    if abs(home - away) > 1:
         return None, None
     loser = "away" if winner == "home" else "home"
     return winner, loser
@@ -501,6 +534,33 @@ def _migrate(conn: sqlite3.Connection):
             "UPDATE games SET winner = ?, ot_winner = ?, ot_loser = ? WHERE id = ?",
             (winner, ot_winner, ot_loser, game_id),
         )
+
+    # Re-check ot_winner/ot_loser for games that went to a shootout but got
+    # stuck with ot_winner=NULL under an older, too-strict compute_ot_result
+    # that required the score to be an exact tie — it now also accepts the
+    # shootout winner's score shown one goal ahead (e.g. "5-4" for a game
+    # that was really 4-4 before the shootout), the standard box-score
+    # convention. Without this, those games kept counting as a plain
+    # regulation win/loss (3/0 points) instead of a shootout win/loss (2/1),
+    # and never showed up in the OTW/OTL standings columns.
+    shootout_games = conn.execute(
+        "SELECT id, home_final_score, away_final_score, winner FROM games "
+        "WHERE went_to_shootout = 1 AND ot_winner IS NULL"
+    ).fetchall()
+    for game_id, home_score, away_score, winner in shootout_games:
+        shootout = conn.execute(
+            "SELECT side, scored FROM shootout_attempts WHERE game_id = ?", (game_id,)
+        ).fetchall()
+        data = {
+            "home_final_score": home_score, "away_final_score": away_score, "winner": winner,
+            "shootout_attempts": [{"side": s, "scored": bool(sc)} for s, sc in shootout],
+        }
+        ot_winner, ot_loser = compute_ot_result(data)
+        if ot_winner:
+            conn.execute(
+                "UPDATE games SET ot_winner = ?, ot_loser = ? WHERE id = ?",
+                (ot_winner, ot_loser, game_id),
+            )
 
     # Backfill roster entries for players who appeared in games scanned
     # before auto-registration existed.

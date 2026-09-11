@@ -746,7 +746,13 @@ def render_evaluation_progress_chart(evaluations: list[dict]):
         .mark_line(point={"size": 80, "filled": True}, strokeWidth=2, color="#FFC72C")
         .encode(
             x=alt.X("season_label:N", sort=season_order, title=None, axis=alt.Axis(labelAngle=-30)),
-            y=alt.Y("grade:O", sort=GRADE_TIERS, scale=alt.Scale(domain=GRADE_TIERS), title=None),
+            y=alt.Y(
+                "grade:O", sort=GRADE_TIERS, scale=alt.Scale(domain=GRADE_TIERS), title=None,
+                # Ordinal axes don't grid by default the way numeric ones do —
+                # turn it on so a horizontal line runs behind each grade tier,
+                # making it easy to trace a point straight across to its A/B/C/D.
+                axis=alt.Axis(grid=True, gridDash=[3, 3]),
+            ),
             tooltip=[alt.Tooltip("division:N", title="Division"), alt.Tooltip("grade:N", title="Grade")],
         )
         .properties(height=180)

@@ -1860,11 +1860,12 @@ with tab_players:
                     key="players_tab_division_filter",
                 )
             with filter_col3:
-                eval_filter = st.selectbox(
-                    "Has an evaluation for", options=[None] + list(division_name_by_id),
-                    format_func=lambda i: "Any / no filter" if i is None else division_name_by_id[i],
+                eval_filter = st.multiselect(
+                    "Has an evaluation for", options=list(division_name_by_id),
+                    format_func=lambda i: division_name_by_id[i],
                     key="players_tab_eval_filter",
-                    help="e.g. pick a past season's division to find players who were already rated then.",
+                    help="Pick one or more divisions/seasons — matches anyone rated in at least one of them. "
+                         "e.g. pick past seasons' divisions to find players who were already rated in either.",
                 )
 
             filtered_players = players_list
@@ -1873,8 +1874,10 @@ with tab_players:
                 filtered_players = [p for p in filtered_players if needle in p["name"].lower()]
             if division_filter is not None:
                 filtered_players = [p for p in filtered_players if p["current_division_id"] == division_filter]
-            if eval_filter is not None:
-                evaluated_ids = core.list_evaluated_player_ids(conn, eval_filter)
+            if eval_filter:
+                evaluated_ids: set[int] = set()
+                for division_id in eval_filter:
+                    evaluated_ids |= core.list_evaluated_player_ids(conn, division_id)
                 filtered_players = [p for p in filtered_players if p["id"] in evaluated_ids]
 
             st.caption(f"Showing {len(filtered_players)} of {len(players_list)} players.")

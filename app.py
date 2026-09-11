@@ -71,6 +71,11 @@ SEASON_ORDER = {"Spring": 0, "Summer": 1, "Fall": 2, "Winter": 3}
 # left off the chart, though it still shows in the evaluations list.
 GRADE_TIERS = ["A", "B", "C", "D"]
 
+# Sentinel distinguishing "no prefetched value was passed" from "the
+# prefetched value is legitimately empty/None" for season_grade_input's and
+# position_input's `prefetched` parameter below.
+_UNSET = object()
+
 # Team Pittsburgh Ball Hockey's actual black/gold/white branding (teampgh.com):
 # gold nav/accent bars and buttons, black hero sections, white content areas,
 # black body text. Both modes below reflect real sections of their own site.
@@ -580,7 +585,10 @@ def game_form_error(merged: dict) -> str | None:
     return None
 
 
-def season_grade_input(conn, player_id: int, division_id: int, team_id: int | None, key: str, **text_input_kwargs):
+def season_grade_input(
+    conn, player_id: int, division_id: int, team_id: int | None, key: str,
+    prefetched=_UNSET, **text_input_kwargs,
+):
     """A "Season Grade" text input backed by core.set_season_grade, usable
     both from the Player Panel and the Team Rosters grid. Both render on
     every script run (st.tabs() executes every tab's body regardless of
@@ -589,8 +597,13 @@ def season_grade_input(conn, player_id: int, division_id: int, team_id: int | No
     session_state would let whichever surface has a stale value silently
     overwrite the other's edit — including deleting a grade someone just
     set — on the very next rerun. Resyncing session_state here whenever
-    the DB value changed out from under this widget avoids that."""
-    current_grade = core.get_season_grade(conn, player_id, division_id) or ""
+    the DB value changed out from under this widget avoids that.
+
+    `prefetched`, if given (even None/""), skips the individual
+    get_season_grade() round trip — pass it when the caller already batch-
+    fetched grades for a whole roster (core.get_season_grades_for_division)
+    to avoid one query per row."""
+    current_grade = (core.get_season_grade(conn, player_id, division_id) if prefetched is _UNSET else prefetched) or ""
     synced_key = f"{key}__synced"
     if st.session_state.get(synced_key) != current_grade:
         st.session_state[key] = current_grade
@@ -605,12 +618,17 @@ def season_grade_input(conn, player_id: int, division_id: int, team_id: int | No
 POSITION_OPTIONS = ["", "Forward", "Defense", "Goalie"]
 
 
-def position_input(conn, player_id: int, division_id: int, team_id: int, key: str, **selectbox_kwargs):
+def position_input(
+    conn, player_id: int, division_id: int, team_id: int, key: str, prefetched=_UNSET, **selectbox_kwargs,
+):
     """A "Position" dropdown backed by core.set_position, for one specific
     player+team+division. Mirrors season_grade_input's session_state resync
     trick since this can likewise render in more than one place (Player
-    Panel, Team Rosters grid) within the same script run."""
-    current_position = core.get_position(conn, player_id, division_id, team_id) or ""
+    Panel, Team Rosters grid) within the same script run. `prefetched`
+    mirrors season_grade_input's — pass core.get_positions_for_team()'s
+    result to skip the individual get_position() round trip in a roster
+    loop."""
+    current_position = (core.get_position(conn, player_id, division_id, team_id) if prefetched is _UNSET else prefetched) or ""
     synced_key = f"{key}__synced"
     if st.session_state.get(synced_key) != current_position:
         st.session_state[key] = current_position
@@ -662,7 +680,7 @@ def render_create_player_popover(
                     contact_phone=new_cph.strip() or None, contact_email=new_cem.strip() or None,
                 )
                 entry = conn.execute(
-                    "SELECT id FROM roster_entries WHERE team_id = ? AND number = ?",
+                    "SELECT id FROM roster_entries WHERE team_id = %s AND number = %s",
                     (team_id, number),
                 ).fetchone()
                 if entry:
@@ -672,16 +690,19 @@ def render_create_player_popover(
                 st.rerun()
 
 
-def player_label(conn, player: dict) -> str:
+def player_label(conn, player: dict, prefetched_history: list[dict] | None = _UNSET) -> str:
     """A player's label for pickers: name plus their current jersey
     number/team, if they have one — so two players sharing a name (e.g. a
     duplicate accidentally created for the wrong roster number) can still
-    be told apart well enough to pick the right one to delete."""
+    be told apart well enough to pick the right one to delete.
+
+    `prefetched_history` mirrors position_input's/season_grade_input's —
+    pass core.player_division_histories()' result (keyed by player id) when
+    labeling many players at once (the Players tab's picker) to avoid one
+    player_division_history() round trip per player."""
     if player["current_division_id"] is not None:
-        entries = [
-            h for h in core.player_division_history(conn, player["id"])
-            if h["division_id"] == player["current_division_id"]
-        ]
+        history = core.player_division_history(conn, player["id"]) if prefetched_history is _UNSET else prefetched_history
+        entries = [h for h in history if h["division_id"] == player["current_division_id"]]
         if entries:
             numbers = ", ".join(f"#{h['number']} {h['team_name']}" for h in entries)
             return f"{player['name']} ({numbers})"
@@ -1757,10 +1778,20 @@ with tab_rosters:
                     "player's position on this team, and their most recent evaluation for this division "
                     "(see the player's Evaluations popover for full grade history)."
                 )
-                roster_rows = core.list_roster(conn, roster_team_id)
+                # Reuses `roster` (already fetched above for the data editor)
+                # instead of a second list_roster() round trip.
+                roster_rows = roster
                 if not roster_rows:
                     st.caption("No players on this roster yet.")
                 else:
+                    # Batch-fetched once for the whole grid instead of one
+                    # get_position()/get_season_grade() round trip per row —
+                    # over a remote connection that N+1 pattern was slow
+                    # enough to make every interaction anywhere in the app
+                    # feel sluggish, since every tab's body runs every rerun.
+                    positions_by_player = core.get_positions_for_team(conn, working_division_id, roster_team_id)
+                    grades_by_player = core.get_season_grades_for_division(conn, working_division_id)
+
                     detail_cols = st.columns([1, 3, 1.5, 1.5])
                     detail_cols[0].markdown("**Number**")
                     detail_cols[1].markdown("**Name**")
@@ -1782,12 +1813,14 @@ with tab_rosters:
                                 position_input(
                                     conn, entry["player_id"], working_division_id, roster_team_id,
                                     key=f"roster_position_{roster_team_id}_{entry['id']}",
+                                    prefetched=positions_by_player.get(entry["player_id"]),
                                     label_visibility="collapsed",
                                 )
                             with row_cols[3]:
                                 season_grade_input(
                                     conn, entry["player_id"], working_division_id, roster_team_id,
                                     key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
+                                    prefetched=grades_by_player.get(entry["player_id"]),
                                     label_visibility="collapsed",
                                 )
 
@@ -1937,7 +1970,10 @@ with tab_players:
             if not filtered_players:
                 st.write("No players match these filters.")
             else:
-                player_options = {p["id"]: player_label(conn, p) for p in filtered_players}
+                histories = core.player_division_histories(conn, [p["id"] for p in filtered_players])
+                player_options = {
+                    p["id"]: player_label(conn, p, histories.get(p["id"], [])) for p in filtered_players
+                }
                 player_ids = list(player_options)
 
                 # Previous/Next live inside render_player_panel, alongside Save/

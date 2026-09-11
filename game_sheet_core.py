@@ -1388,6 +1388,58 @@ def player_division_history(conn: PGConnection, player_id: int) -> list[dict]:
     ]
 
 
+def player_division_histories(conn: PGConnection, player_ids: list[int]) -> dict[int, list[dict]]:
+    """Same data as player_division_history, for every id in player_ids at
+    once — one query instead of one per player. Used wherever a list of
+    many players needs their history (e.g. the Players tab's picker
+    labels), since that N+1 pattern was slow enough over a remote database
+    connection to make the whole app feel unresponsive on every rerun."""
+    if not player_ids:
+        return {}
+    rows = conn.execute(
+        """SELECT re.player_id, d.id, d.year, d.season, d.age_group, d.category, t.name, re.number, t.id
+           FROM roster_entries re
+           JOIN teams t ON t.id = re.team_id
+           JOIN divisions d ON d.id = t.division_id
+           WHERE re.player_id = ANY(%s)
+           ORDER BY re.player_id, d.year DESC, d.season""",
+        (player_ids,),
+    ).fetchall()
+    result: dict[int, list[dict]] = {}
+    for r in rows:
+        result.setdefault(r[0], []).append({
+            "division_id": r[1], "year": r[2], "season": display_text(r[3]),
+            "age_group": r[4], "category": r[5], "team_name": display_text(r[6]), "number": r[7],
+            "team_id": r[8],
+        })
+    return result
+
+
+def get_positions_for_team(conn: PGConnection, division_id: int, team_id: int) -> dict[int, str]:
+    """Every position already set for this team/division, player_id ->
+    position, in one query — used to batch-populate Team Rosters' Position
+    column instead of one get_position() round trip per row."""
+    rows = conn.execute(
+        "SELECT player_id, position FROM player_positions WHERE division_id = %s AND team_id = %s",
+        (division_id, team_id),
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def get_season_grades_for_division(conn: PGConnection, division_id: int) -> dict[int, str]:
+    """Every player's most recent evaluation grade for this division,
+    player_id -> grade, in one query — used to batch-populate Team
+    Rosters' Season Grade column instead of one get_season_grade() round
+    trip per row."""
+    rows = conn.execute(
+        """SELECT DISTINCT ON (player_id) player_id, grade
+           FROM evaluations WHERE division_id = %s
+           ORDER BY player_id, created_at DESC, id DESC""",
+        (division_id,),
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
 def list_evaluated_player_ids(conn: PGConnection, division_id: int) -> set[int]:
     """Every player_id with at least one evaluation recorded for this
     division — used to filter for "has a rating on file for division X",

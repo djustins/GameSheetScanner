@@ -1904,10 +1904,71 @@ if user["is_admin"]:
     with tab_users:
         st.header("User Management")
         st.caption(
-            "Admins always see every page, including this one, regardless of the checkboxes below. "
-            "Everyone else only sees the pages checked off for them."
+            "Admins always see every page, including this one, no matter what role they have. "
+            "Everyone else sees whatever pages their assigned role grants."
         )
 
+        roles = core.list_roles(conn)
+        role_options: list[int | None] = [None] + [r["id"] for r in roles]
+
+        def _role_label(role_id: int | None) -> str:
+            if role_id is None:
+                return "— No role (no page access) —"
+            match = next((r for r in roles if r["id"] == role_id), None)
+            return match["name"] if match else "(deleted role)"
+
+        # -----------------------------------------------------------------
+        # Roles — configure a bundle of pages once, then assign it to
+        # however many users share that access level, instead of picking
+        # pages one by one for every person.
+        # -----------------------------------------------------------------
+
+        st.subheader("Roles")
+        if not roles:
+            st.write("No roles yet — create one below, then assign it to users.")
+        for role in roles:
+            with st.expander(f"{role['name']} ({len(role['pages'])} page{'s' if len(role['pages']) != 1 else ''})"):
+                edit_role_name = st.text_input("Role name", value=role["name"], key=f"role_name_{role['id']}")
+                edit_role_pages = st.multiselect(
+                    "Pages", options=list(core.PAGES), default=role["pages"],
+                    format_func=lambda k: core.PAGES[k], key=f"role_pages_{role['id']}",
+                )
+                role_save_col, role_delete_col = st.columns(2)
+                with role_save_col:
+                    if st.button("Save", key=f"role_save_{role['id']}"):
+                        core.update_role(conn, role["id"], name=edit_role_name, pages=edit_role_pages)
+                        st.success("Saved.")
+                        st.rerun()
+                with role_delete_col:
+                    if st.button("Delete role", key=f"role_delete_{role['id']}"):
+                        core.delete_role(conn, role["id"])
+                        st.warning(f"Deleted. Anyone with the {role['name']} role now has no page access.")
+                        st.rerun()
+
+        with st.popover("➕ Add Role"):
+            new_role_name = st.text_input("Role name", key="new_role_name")
+            new_role_pages = st.multiselect(
+                "Pages", options=list(core.PAGES), format_func=lambda k: core.PAGES[k], key="new_role_pages"
+            )
+            if st.button("Create Role", type="primary", key="create_role_btn"):
+                if not new_role_name.strip():
+                    st.error("Enter a role name.")
+                elif any(r["name"].lower() == new_role_name.strip().lower() for r in roles):
+                    st.error("A role with that name already exists.")
+                else:
+                    core.add_role(conn, new_role_name, pages=new_role_pages)
+                    st.success(f"Created role {new_role_name}.")
+                    for _k in ("new_role_name", "new_role_pages"):
+                        st.session_state.pop(_k, None)
+                    st.rerun()
+
+        st.divider()
+
+        # -----------------------------------------------------------------
+        # Users
+        # -----------------------------------------------------------------
+
+        st.subheader("Users")
         active_users = core.list_users(conn)
         deactivated_users = [u for u in core.list_users(conn, include_deleted=True) if u["deleted_at"]]
         active_admin_count = sum(1 for u in active_users if u["is_admin"])
@@ -1926,9 +1987,9 @@ if user["is_admin"]:
                     disabled=last_admin,
                     help="Can't remove the last admin's own admin access." if last_admin else None,
                 )
-                edit_pages = st.multiselect(
-                    "Pages", options=list(core.PAGES), default=row_user["pages"],
-                    format_func=lambda k: core.PAGES[k], key=f"user_pages_{row_user['id']}",
+                edit_role_id = st.selectbox(
+                    "Role", options=role_options, format_func=_role_label,
+                    index=role_options.index(row_user["role_id"]), key=f"user_role_{row_user['id']}",
                     disabled=edit_admin,
                     help="Ignored while Admin is checked — admins get every page." if edit_admin else None,
                 )
@@ -1937,7 +1998,7 @@ if user["is_admin"]:
                 with save_col:
                     if st.button("Save", key=f"user_save_{row_user['id']}"):
                         core.update_user(conn, row_user["id"], display_name=edit_name, is_admin=edit_admin)
-                        core.set_user_pages(conn, row_user["id"], edit_pages)
+                        core.set_user_role(conn, row_user["id"], edit_role_id)
                         st.success("Saved.")
                         st.rerun()
                 with reset_col:
@@ -1984,9 +2045,9 @@ if user["is_admin"]:
                 )
 
             new_user_is_admin = st.checkbox("Admin (full access)", key="new_user_is_admin")
-            new_user_pages = st.multiselect(
-                "Pages", options=list(core.PAGES), format_func=lambda k: core.PAGES[k],
-                key="new_user_pages", disabled=new_user_is_admin,
+            new_user_role_id = st.selectbox(
+                "Role", options=role_options, format_func=_role_label,
+                key="new_user_role", disabled=new_user_is_admin,
             )
 
             if st.button("Create User", type="primary", key="create_user_btn"):
@@ -1999,10 +2060,10 @@ if user["is_admin"]:
                 else:
                     core.add_user(
                         conn, new_user_email, new_user_password, display_name=new_user_name,
-                        is_admin=new_user_is_admin, pages=new_user_pages,
+                        is_admin=new_user_is_admin, role_id=new_user_role_id,
                     )
                     st.success(f"Created {new_user_email}. Share the temporary password with them directly.")
                     for _k in ("new_user_email", "new_user_name", "new_user_password",
-                               "new_user_is_admin", "new_user_pages"):
+                               "new_user_is_admin", "new_user_role"):
                         st.session_state.pop(_k, None)
                     st.rerun()

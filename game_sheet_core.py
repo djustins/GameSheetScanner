@@ -508,12 +508,12 @@ def set_setting(conn: PGConnection, key: str, value: str):
 
 
 # ---------------------------------------------------------------------------
-# Users & per-page permissions (who can log into the app — distinct from
-# players/coaches, who's on a roster)
+# Roles, users & per-page permissions (who can log into the app — distinct
+# from players/coaches, who's on a roster)
 # ---------------------------------------------------------------------------
 
-# Every page/tab a user could be granted access to, keyed the same way the
-# app's tabs are. Kept here (not just in app.py) so CLI tooling
+# Every page/tab a user could be granted access to (via a role), keyed the
+# same way the app's tabs are. Kept here (not just in app.py) so CLI tooling
 # (scripts/manage_users.py) validates against the same set without
 # duplicating it, and so it can't silently drift out of sync with app.py.
 PAGES = {
@@ -536,73 +536,125 @@ def _check_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
 
 
-def list_user_pages(conn: PGConnection, user_id: int) -> list[str]:
-    rows = conn.execute("SELECT page FROM user_pages WHERE user_id = %s", (user_id,)).fetchall()
+# --- Roles: a named bundle of page access, assigned to users -----------------
+
+def list_role_pages(conn: PGConnection, role_id: int | None) -> list[str]:
+    if role_id is None:
+        return []
+    rows = conn.execute("SELECT page FROM role_pages WHERE role_id = %s", (role_id,)).fetchall()
     return [r[0] for r in rows]
 
 
-def set_user_pages(conn: PGConnection, user_id: int, pages: list[str]):
-    conn.execute("DELETE FROM user_pages WHERE user_id = %s", (user_id,))
+def set_role_pages(conn: PGConnection, role_id: int, pages: list[str]):
+    conn.execute("DELETE FROM role_pages WHERE role_id = %s", (role_id,))
     for page in pages:
-        conn.execute("INSERT INTO user_pages (user_id, page) VALUES (%s, %s)", (user_id, page))
+        conn.execute("INSERT INTO role_pages (role_id, page) VALUES (%s, %s)", (role_id, page))
     conn.commit()
 
+
+def list_roles(conn: PGConnection) -> list[dict]:
+    rows = conn.execute("SELECT id, name FROM roles ORDER BY name").fetchall()
+    roles = [{"id": r[0], "name": r[1]} for r in rows]
+    for role in roles:
+        role["pages"] = list_role_pages(conn, role["id"])
+    return roles
+
+
+def get_role(conn: PGConnection, role_id: int) -> dict | None:
+    row = conn.execute("SELECT id, name FROM roles WHERE id = %s", (role_id,)).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "pages": list_role_pages(conn, row[0])}
+
+
+def add_role(conn: PGConnection, name: str, pages: list[str] | None = None) -> int:
+    cur = conn.execute("INSERT INTO roles (name) VALUES (%s) RETURNING id", (name.strip(),))
+    role_id = cur.fetchone()[0]
+    conn.commit()
+    if pages:
+        set_role_pages(conn, role_id, pages)
+    return role_id
+
+
+def update_role(conn: PGConnection, role_id: int, name: str | None = None, pages: list[str] | None = None):
+    if name is not None:
+        conn.execute("UPDATE roles SET name = %s WHERE id = %s", (name.strip(), role_id))
+        conn.commit()
+    if pages is not None:
+        set_role_pages(conn, role_id, pages)
+
+
+def delete_role(conn: PGConnection, role_id: int):
+    # Any user with this role loses it (role_id -> NULL, ON DELETE SET NULL)
+    # rather than the delete being blocked.
+    conn.execute("DELETE FROM roles WHERE id = %s", (role_id,))
+    conn.commit()
+
+
+# --- Users --------------------------------------------------------------
 
 def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(
-        f"SELECT id, email, display_name, is_admin, deleted_at FROM users {where} ORDER BY email"
+        f"SELECT id, email, display_name, is_admin, role_id, deleted_at FROM users {where} ORDER BY email"
     ).fetchall()
     users = [
-        {"id": r[0], "email": r[1], "display_name": r[2], "is_admin": bool(r[3]), "deleted_at": r[4]}
+        {
+            "id": r[0], "email": r[1], "display_name": r[2], "is_admin": bool(r[3]),
+            "role_id": r[4], "deleted_at": r[5],
+        }
         for r in rows
     ]
     for u in users:
-        u["pages"] = list_user_pages(conn, u["id"])
+        u["pages"] = list_role_pages(conn, u["role_id"])
     return users
 
 
 def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, email, password_hash, display_name, is_admin, deleted_at FROM users WHERE email = %s",
+        "SELECT id, email, password_hash, display_name, is_admin, role_id, deleted_at "
+        "FROM users WHERE email = %s",
         (email.strip().lower(),),
     ).fetchone()
     if not row:
         return None
     return {
-        "id": row[0], "email": row[1], "password_hash": row[2],
-        "display_name": row[3], "is_admin": bool(row[4]), "deleted_at": row[5],
+        "id": row[0], "email": row[1], "password_hash": row[2], "display_name": row[3],
+        "is_admin": bool(row[4]), "role_id": row[5], "deleted_at": row[6],
     }
 
 
 def verify_login(conn: PGConnection, email: str, password: str) -> dict | None:
     """Returns the user dict (password hash stripped) plus their permitted
-    pages if email/password match an active account, else None. Deliberately
-    doesn't tell the caller whether the email exists vs. the password was
-    wrong — same generic failure either way, so a login form can't be used
-    to enumerate registered emails."""
+    pages (derived from their role; empty if they have none) if email/
+    password match an active account, else None. Deliberately doesn't tell
+    the caller whether the email exists vs. the password was wrong — same
+    generic failure either way, so a login form can't be used to enumerate
+    registered emails."""
     user = get_user_by_email(conn, email)
     if not user or user["deleted_at"] is not None:
         return None
     if not _check_password(password, user["password_hash"]):
         return None
     user.pop("password_hash")
-    user["pages"] = list_user_pages(conn, user["id"])
+    user["pages"] = list_role_pages(conn, user["role_id"])
     return user
 
 
 def add_user(
     conn: PGConnection, email: str, password: str, display_name: str | None = None,
-    is_admin: bool = False, pages: list[str] | None = None,
+    is_admin: bool = False, role_id: int | None = None,
 ) -> int:
     cur = conn.execute(
-        "INSERT INTO users (email, password_hash, display_name, is_admin) VALUES (%s, %s, %s, %s) RETURNING id",
-        (email.strip().lower(), _hash_password(password), (display_name or "").strip() or None, int(is_admin)),
+        "INSERT INTO users (email, password_hash, display_name, is_admin, role_id) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (
+            email.strip().lower(), _hash_password(password), (display_name or "").strip() or None,
+            int(is_admin), role_id,
+        ),
     )
     user_id = cur.fetchone()[0]
     conn.commit()
-    if pages:
-        set_user_pages(conn, user_id, pages)
     return user_id
 
 
@@ -613,6 +665,11 @@ def update_user(
         conn.execute("UPDATE users SET display_name = %s WHERE id = %s", (display_name.strip() or None, user_id))
     if is_admin is not None:
         conn.execute("UPDATE users SET is_admin = %s WHERE id = %s", (int(is_admin), user_id))
+    conn.commit()
+
+
+def set_user_role(conn: PGConnection, user_id: int, role_id: int | None):
+    conn.execute("UPDATE users SET role_id = %s WHERE id = %s", (role_id, user_id))
     conn.commit()
 
 

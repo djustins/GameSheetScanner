@@ -185,24 +185,46 @@ CREATE TABLE IF NOT EXISTS schedule_games (
 -- App users, authenticated by email + password (bcrypt hash) — who can log
 -- into the app itself, distinct from players/coaches (who's on a roster).
 -- is_admin bypasses per-page permission checks entirely: admins always see
--- every tab, including User Management, regardless of what's in user_pages.
+-- every tab, including User Management, regardless of role. Non-admins get
+-- whatever pages their assigned role carries (role_id NULL = no pages).
 CREATE TABLE IF NOT EXISTS users (
     id             SERIAL PRIMARY KEY,
     email          TEXT NOT NULL UNIQUE,
     password_hash  TEXT NOT NULL,
     display_name   TEXT,
     is_admin       INTEGER NOT NULL DEFAULT 0,   -- 1/0
+    -- role_id added below via ALTER TABLE, once the roles table it
+    -- references exists (also how it's added to a pre-existing database).
     deleted_at     TEXT,                          -- deactivated; can no longer log in
     created_at     TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Which tabs (page keys defined in game_sheet_core.PAGES) a non-admin user
--- can see. Irrelevant for admins, who get every page regardless of this.
-CREATE TABLE IF NOT EXISTS user_pages (
-    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    page     TEXT NOT NULL,
-    PRIMARY KEY (user_id, page)
+-- A named bundle of page access (e.g. "Coach", "Scorer") — assigned to
+-- users so an admin configures pages once per role instead of once per
+-- person. Replaces the earlier per-user user_pages table: individual page
+-- overrides per user turned out to be more bookkeeping than this app's
+-- small, role-shaped user base actually needed.
+CREATE TABLE IF NOT EXISTS roles (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    created_at  TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Which tabs (page keys defined in game_sheet_core.PAGES) a role grants.
+CREATE TABLE IF NOT EXISTS role_pages (
+    role_id  INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    page     TEXT NOT NULL,
+    PRIMARY KEY (role_id, page)
+);
+
+-- Deleting a role clears role_id on any user who had it (they simply lose
+-- page access until reassigned) rather than blocking the delete.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role_id INTEGER REFERENCES roles(id) ON DELETE SET NULL;
+
+-- Superseded by roles/role_pages (see above) — dropped, not just left
+-- unused, so the schema doesn't carry a second, no-longer-read source of
+-- truth for page access.
+DROP TABLE IF EXISTS user_pages;
 
 -- Handy views for stat lookups
 

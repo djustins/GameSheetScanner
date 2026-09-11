@@ -13,6 +13,10 @@ venv/
 # Real uploaded/scanned game sheets and CLI batch-processing folders
 source/
 
+# League admin spreadsheets (player/parent PII — names, birthdates, contact
+# info) used as one-off data imports; never publish these
+*.xlsx
+
 # Streamlit secrets (API keys etc.) — config.toml itself is fine to commit
 .streamlit/secrets.toml
 

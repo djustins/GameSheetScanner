@@ -182,6 +182,28 @@ CREATE TABLE IF NOT EXISTS schedule_games (
     UNIQUE(division_id, game_date, home_team, away_team)
 );
 
+-- App users, authenticated by email + password (bcrypt hash) — who can log
+-- into the app itself, distinct from players/coaches (who's on a roster).
+-- is_admin bypasses per-page permission checks entirely: admins always see
+-- every tab, including User Management, regardless of what's in user_pages.
+CREATE TABLE IF NOT EXISTS users (
+    id             SERIAL PRIMARY KEY,
+    email          TEXT NOT NULL UNIQUE,
+    password_hash  TEXT NOT NULL,
+    display_name   TEXT,
+    is_admin       INTEGER NOT NULL DEFAULT 0,   -- 1/0
+    deleted_at     TEXT,                          -- deactivated; can no longer log in
+    created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Which tabs (page keys defined in game_sheet_core.PAGES) a non-admin user
+-- can see. Irrelevant for admins, who get every page regardless of this.
+CREATE TABLE IF NOT EXISTS user_pages (
+    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    page     TEXT NOT NULL,
+    PRIMARY KEY (user_id, page)
+);
+
 -- Handy views for stat lookups
 
 CREATE OR REPLACE VIEW player_goal_stats AS

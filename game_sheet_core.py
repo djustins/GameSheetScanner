@@ -22,6 +22,7 @@ from io import BytesIO
 from pathlib import Path
 
 import anthropic
+import bcrypt
 import psycopg2
 from dotenv import load_dotenv
 from pypdf import PdfReader, PdfWriter
@@ -503,6 +504,133 @@ def set_setting(conn: PGConnection, key: str, value: str):
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Users & per-page permissions (who can log into the app — distinct from
+# players/coaches, who's on a roster)
+# ---------------------------------------------------------------------------
+
+# Every page/tab a user could be granted access to, keyed the same way the
+# app's tabs are. Kept here (not just in app.py) so CLI tooling
+# (scripts/manage_users.py) validates against the same set without
+# duplicating it, and so it can't silently drift out of sync with app.py.
+PAGES = {
+    "process": "Process New Sheets",
+    "edit": "Games",
+    "schedule": "Schedule",
+    "standings": "Standings",
+    "stats": "Player Stats",
+    "rosters": "Team Rosters",
+    "players": "Players",
+    "divisions": "Divisions",
+}
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
+
+
+def _check_password(password: str, password_hash: str) -> bool:
+    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+
+
+def list_user_pages(conn: PGConnection, user_id: int) -> list[str]:
+    rows = conn.execute("SELECT page FROM user_pages WHERE user_id = %s", (user_id,)).fetchall()
+    return [r[0] for r in rows]
+
+
+def set_user_pages(conn: PGConnection, user_id: int, pages: list[str]):
+    conn.execute("DELETE FROM user_pages WHERE user_id = %s", (user_id,))
+    for page in pages:
+        conn.execute("INSERT INTO user_pages (user_id, page) VALUES (%s, %s)", (user_id, page))
+    conn.commit()
+
+
+def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
+    where = "" if include_deleted else "WHERE deleted_at IS NULL"
+    rows = conn.execute(
+        f"SELECT id, email, display_name, is_admin, deleted_at FROM users {where} ORDER BY email"
+    ).fetchall()
+    users = [
+        {"id": r[0], "email": r[1], "display_name": r[2], "is_admin": bool(r[3]), "deleted_at": r[4]}
+        for r in rows
+    ]
+    for u in users:
+        u["pages"] = list_user_pages(conn, u["id"])
+    return users
+
+
+def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
+    row = conn.execute(
+        "SELECT id, email, password_hash, display_name, is_admin, deleted_at FROM users WHERE email = %s",
+        (email.strip().lower(),),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "email": row[1], "password_hash": row[2],
+        "display_name": row[3], "is_admin": bool(row[4]), "deleted_at": row[5],
+    }
+
+
+def verify_login(conn: PGConnection, email: str, password: str) -> dict | None:
+    """Returns the user dict (password hash stripped) plus their permitted
+    pages if email/password match an active account, else None. Deliberately
+    doesn't tell the caller whether the email exists vs. the password was
+    wrong — same generic failure either way, so a login form can't be used
+    to enumerate registered emails."""
+    user = get_user_by_email(conn, email)
+    if not user or user["deleted_at"] is not None:
+        return None
+    if not _check_password(password, user["password_hash"]):
+        return None
+    user.pop("password_hash")
+    user["pages"] = list_user_pages(conn, user["id"])
+    return user
+
+
+def add_user(
+    conn: PGConnection, email: str, password: str, display_name: str | None = None,
+    is_admin: bool = False, pages: list[str] | None = None,
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO users (email, password_hash, display_name, is_admin) VALUES (%s, %s, %s, %s) RETURNING id",
+        (email.strip().lower(), _hash_password(password), (display_name or "").strip() or None, int(is_admin)),
+    )
+    user_id = cur.fetchone()[0]
+    conn.commit()
+    if pages:
+        set_user_pages(conn, user_id, pages)
+    return user_id
+
+
+def update_user(
+    conn: PGConnection, user_id: int, display_name: str | None = None, is_admin: bool | None = None,
+):
+    if display_name is not None:
+        conn.execute("UPDATE users SET display_name = %s WHERE id = %s", (display_name.strip() or None, user_id))
+    if is_admin is not None:
+        conn.execute("UPDATE users SET is_admin = %s WHERE id = %s", (int(is_admin), user_id))
+    conn.commit()
+
+
+def set_user_password(conn: PGConnection, user_id: int, new_password: str):
+    conn.execute("UPDATE users SET password_hash = %s WHERE id = %s", (_hash_password(new_password), user_id))
+    conn.commit()
+
+
+def soft_delete_user(conn: PGConnection, user_id: int):
+    conn.execute(
+        "UPDATE users SET deleted_at = %s WHERE id = %s",
+        (datetime.utcnow().isoformat(timespec="seconds"), user_id),
+    )
+    conn.commit()
+
+
+def restore_user(conn: PGConnection, user_id: int):
+    conn.execute("UPDATE users SET deleted_at = NULL WHERE id = %s", (user_id,))
     conn.commit()
 
 

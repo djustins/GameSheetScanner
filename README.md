@@ -43,6 +43,24 @@ Migrating an existing `hockey.db` (SQLite) into a fresh Postgres database:
 python scripts/migrate_sqlite_to_postgres.py path/to/hockey.db
 ```
 
+### Sign-in
+
+The app requires every session to sign in with an email/password account — there's
+no public signup. Accounts are created and their page access managed from the
+**User Management** tab, visible only to admins, once at least one admin exists.
+
+Since nobody can reach that tab before an admin exists, bootstrap the first one
+from the command line:
+
+```bash
+python scripts/manage_users.py add you@example.com --admin
+```
+
+`scripts/manage_users.py` also handles `list`, `set-password`, `deactivate`, and
+`reactivate` — useful for emergency access if every admin ever gets locked out.
+Non-admin accounts are limited to whichever tabs an admin has checked off for
+them in User Management; admins always see every tab.
+
 ## Usage
 
 ```bash

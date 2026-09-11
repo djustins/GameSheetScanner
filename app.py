@@ -27,6 +27,7 @@ Requires:
 
 import base64
 import os
+import secrets
 import urllib.parse
 import zipfile
 from io import BytesIO
@@ -927,6 +928,42 @@ _db_host = urllib.parse.urlparse(DATABASE_URL).hostname
 _db_name = urllib.parse.urlparse(DATABASE_URL).path.lstrip("/")
 st.sidebar.caption(f"Connected to `{_db_name}` on `{_db_host}`")
 
+# ---------------------------------------------------------------------------
+# Authentication — every session must sign in with an email/password account.
+# Accounts are created by an admin in the User Management tab; the very
+# first admin has to be bootstrapped with scripts/manage_users.py, since
+# nobody can reach User Management before at least one admin exists. Gates
+# everything below this point — the sidebar bits above (theme, version, DB
+# connection status) are harmless to show a signed-out visitor.
+# ---------------------------------------------------------------------------
+
+if "user" not in st.session_state:
+    st.markdown("### Team Pittsburgh Ball Hockey")
+    st.subheader("Sign In")
+    with st.form("login_form"):
+        login_email = st.text_input("Email")
+        login_password = st.text_input("Password", type="password")
+        login_submitted = st.form_submit_button("Log In", type="primary")
+    if login_submitted:
+        logged_in_user = core.verify_login(conn, login_email, login_password)
+        if logged_in_user:
+            st.session_state["user"] = logged_in_user
+            st.rerun()
+        else:
+            st.error("Incorrect email or password.")
+    st.stop()
+
+user = st.session_state["user"]
+# Admins aren't limited by user_pages rows at all — they always get every
+# page, including User Management, which non-admins can never be granted.
+visible_pages = list(core.PAGES) if user["is_admin"] else [p for p in core.PAGES if p in user["pages"]]
+
+with st.sidebar:
+    st.markdown(f"**Signed in:** {user['display_name'] or user['email']}" + (" (admin)" if user["is_admin"] else ""))
+    if st.button("Log out"):
+        del st.session_state["user"]
+        st.rerun()
+
 api_key = st.sidebar.text_input(
     "ANTHROPIC_API_KEY",
     value=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -1045,135 +1082,97 @@ if not all_divisions:
     with st.popover("➕ Create your first division"):
         render_add_division_form(conn, key_prefix="top_")
 
-tab_process, tab_edit, tab_schedule, tab_standings, tab_stats, tab_rosters, tab_players, tab_divisions = st.tabs(
-    ["Process New Sheets", "Games", "Schedule", "Standings", "Player Stats",
-     "Team Rosters", "Players", "Divisions"]
-)
+# The 8 regular tabs are always in the bar for everyone — a signed-in user
+# without permission for one just sees an access-restricted message inside
+# it (each tab's `if page_key not in visible_pages:` guard below) rather
+# than the tab disappearing outright. User Management is different: it's
+# only ever meaningful for admins (granting page access requires already
+# having it), so it's the one tab that's actually absent for non-admins.
+_tab_labels = ["Process New Sheets", "Games", "Schedule", "Standings", "Player Stats",
+               "Team Rosters", "Players", "Divisions"]
+if user["is_admin"]:
+    _tab_labels.append("User Management")
+
+_tabs = st.tabs(_tab_labels)
+(tab_process, tab_edit, tab_schedule, tab_standings, tab_stats,
+ tab_rosters, tab_players, tab_divisions) = _tabs[:8]
+tab_users = _tabs[8] if user["is_admin"] else None
 
 # ---------------------------------------------------------------------------
 # Tab 1: process new sheets
 # ---------------------------------------------------------------------------
 
 with tab_process:
-    st.header("Process New Sheets")
-    if working_division_id is None:
-        st.warning("No division selected. Add one in the Divisions tab first.")
-    # Keyed with a version counter so Clear/Cancel below can force the
-    # uploader widget itself to reset (bumping the key makes Streamlit treat
-    # it as a brand-new widget) — otherwise the browser keeps showing the
-    # previously-picked files even after the queue/session state is cleared.
-    st.session_state.setdefault("sheet_uploader_version", 0)
-    uploaded = st.file_uploader(
-        "Upload game sheet scan(s) (PDF or image)",
-        type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
-        accept_multiple_files=True,
-        key=f"sheet_uploader_{st.session_state.sheet_uploader_version}",
-    )
+    if "process" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+    else:
+        st.header("Process New Sheets")
+        if working_division_id is None:
+            st.warning("No division selected. Add one in the Divisions tab first.")
+        # Keyed with a version counter so Clear/Cancel below can force the
+        # uploader widget itself to reset (bumping the key makes Streamlit treat
+        # it as a brand-new widget) — otherwise the browser keeps showing the
+        # previously-picked files even after the queue/session state is cleared.
+        st.session_state.setdefault("sheet_uploader_version", 0)
+        uploaded = st.file_uploader(
+            "Upload game sheet scan(s) (PDF or image)",
+            type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
+            accept_multiple_files=True,
+            key=f"sheet_uploader_{st.session_state.sheet_uploader_version}",
+        )
 
-    if uploaded or st.session_state.get("queue"):
-        if uploaded:
-            upload_key = tuple(sorted((f.name, f.size) for f in uploaded))
-        if uploaded and st.session_state.get("upload_key") != upload_key:
-            # New batch — clear any per-item state left over from the last one.
-            for key in list(st.session_state.keys()):
-                if key.startswith(("data_", "proc_", "replace_target_")):
-                    del st.session_state[key]
+        if uploaded or st.session_state.get("queue"):
+            if uploaded:
+                upload_key = tuple(sorted((f.name, f.size) for f in uploaded))
+            if uploaded and st.session_state.get("upload_key") != upload_key:
+                # New batch — clear any per-item state left over from the last one.
+                for key in list(st.session_state.keys()):
+                    if key.startswith(("data_", "proc_", "replace_target_")):
+                        del st.session_state[key]
 
-            queue = []
-            for f in uploaded:
-                data = f.getvalue()
-                mime = core.guess_mime(f.name)
-                pages = core.split_pdf_bytes(data) if mime == "application/pdf" else [data]
-                stem = Path(f.name).stem
+                queue = []
+                for f in uploaded:
+                    data = f.getvalue()
+                    mime = core.guess_mime(f.name)
+                    pages = core.split_pdf_bytes(data) if mime == "application/pdf" else [data]
+                    stem = Path(f.name).stem
 
-                if len(pages) == 1:
-                    queue.append({"label": f.name, "bytes": pages[0], "mime": mime, "status": "pending"})
-                    continue
+                    if len(pages) == 1:
+                        queue.append({"label": f.name, "bytes": pages[0], "mime": mime, "status": "pending"})
+                        continue
 
-                for i, page_bytes in enumerate(pages, start=1):
-                    queue.append({
-                        "label": f"{stem}_p{i}.pdf", "bytes": page_bytes,
-                        "mime": "application/pdf", "status": "pending",
-                    })
+                    for i, page_bytes in enumerate(pages, start=1):
+                        queue.append({
+                            "label": f"{stem}_p{i}.pdf", "bytes": page_bytes,
+                            "mime": "application/pdf", "status": "pending",
+                        })
 
-            st.session_state.upload_key = upload_key
-            st.session_state.queue = queue
-            st.session_state.queue_index = 0
+                st.session_state.upload_key = upload_key
+                st.session_state.queue = queue
+                st.session_state.queue_index = 0
 
-        queue = st.session_state.queue
+            queue = st.session_state.queue
 
-        duplicates = [
-            (idx, item, core.find_game_by_source_file(conn, item["label"]))
-            for idx, item in enumerate(queue) if item["status"] == "pending"
-        ]
-        duplicates = [
-            (idx, item, g) for idx, item, g in duplicates
-            if g is not None and f"replace_target_{idx}" not in st.session_state
-        ]
+            duplicates = [
+                (idx, item, core.find_game_by_source_file(conn, item["label"]))
+                for idx, item in enumerate(queue) if item["status"] == "pending"
+            ]
+            duplicates = [
+                (idx, item, g) for idx, item, g in duplicates
+                if g is not None and f"replace_target_{idx}" not in st.session_state
+            ]
 
-        if duplicates and len(duplicates) == len(queue):
-            # Every uploaded file already exists in the database — nothing to
-            # review, so skip the per-item panel and just offer to clear the
-            # batch instead of making the user click through each one.
-            with st.container(border=True, key="dup_panel"):
-                st.subheader("⚠️ All Sheets Are Duplicates")
-                st.caption(
-                    f"All {len(queue)} uploaded file(s) already exist in the database — "
-                    "nothing new to process."
-                )
-                if st.button("Clear", key="dup_clear_all", type="primary"):
-                    for key in list(st.session_state.keys()):
-                        if key.startswith(("data_", "proc_", "replace_target_")):
-                            del st.session_state[key]
-                    for key in ("queue", "upload_key", "queue_index"):
-                        st.session_state.pop(key, None)
-                    st.session_state.sheet_uploader_version += 1
-                    st.rerun()
-        elif duplicates:
-            # An embedded "window": a bordered, tinted panel that gates the
-            # rest of the queue until every duplicate has a decision, instead
-            # of scattering warnings across a summary list and each item again
-            # later. key="dup_panel" is targeted by the .st-key-dup_panel CSS
-            # rule above to tint it lighter than the plain page background.
-            with st.container(border=True, key="dup_panel"):
-                st.subheader("⚠️ Duplicates Uploaded")
-                st.caption("These files match a game already in the database.")
-                for idx, item, g in duplicates:
-                    tcol, rcol1, rcol2, rcol3 = st.columns([1, 4, 1, 1])
-                    with tcol:
-                        st.image(render_preview_png(item["bytes"], item["mime"]), width=64)
-                    with rcol1:
-                        st.write(
-                            f"“{item['label']}” — game_id={g['id']}: "
-                            f"{g['home_team']} {g['home_final_score']}–{g['away_final_score']} "
-                            f"{g['away_team']} ({g['game_date']})"
-                        )
-                    with rcol2:
-                        if st.button("Replace", key=f"dup_replace_{idx}", type="primary"):
-                            st.session_state[f"replace_target_{idx}"] = g["id"]
-                            st.rerun()
-                    with rcol3:
-                        if st.button("Skip", key=f"dup_skip_{idx}"):
-                            queue[idx]["status"] = "skipped"
-                            st.rerun()
-
-                    with st.expander(f"🔍 View larger — {item['label']}"):
-                        st.image(render_preview_png(item["bytes"], item["mime"]), width="stretch")
-                        vcol1, vcol2 = st.columns(2)
-                        with vcol1:
-                            if st.button("Replace", key=f"dup_replace_big_{idx}", type="primary"):
-                                st.session_state[f"replace_target_{idx}"] = g["id"]
-                                st.rerun()
-                        with vcol2:
-                            if st.button("Skip", key=f"dup_skip_big_{idx}"):
-                                queue[idx]["status"] = "skipped"
-                                st.rerun()
-
-                    st.divider()
-
-                bcol1, bcol2 = st.columns(2)
-                with bcol1:
-                    if st.button("Cancel", key="dup_cancel"):
+            if duplicates and len(duplicates) == len(queue):
+                # Every uploaded file already exists in the database — nothing to
+                # review, so skip the per-item panel and just offer to clear the
+                # batch instead of making the user click through each one.
+                with st.container(border=True, key="dup_panel"):
+                    st.subheader("⚠️ All Sheets Are Duplicates")
+                    st.caption(
+                        f"All {len(queue)} uploaded file(s) already exist in the database — "
+                        "nothing new to process."
+                    )
+                    if st.button("Clear", key="dup_clear_all", type="primary"):
                         for key in list(st.session_state.keys()):
                             if key.startswith(("data_", "proc_", "replace_target_")):
                                 del st.session_state[key]
@@ -1181,645 +1180,829 @@ with tab_process:
                             st.session_state.pop(key, None)
                         st.session_state.sheet_uploader_version += 1
                         st.rerun()
-                with bcol2:
-                    if st.button("Skip All", key="dup_skip_all", type="primary"):
-                        for idx, _, _ in duplicates:
-                            queue[idx]["status"] = "skipped"
-                        st.rerun()
-        else:
-            idx = st.session_state.queue_index
-            while idx < len(queue) and queue[idx]["status"] != "pending":
-                idx += 1
-            st.session_state.queue_index = idx
+            elif duplicates:
+                # An embedded "window": a bordered, tinted panel that gates the
+                # rest of the queue until every duplicate has a decision, instead
+                # of scattering warnings across a summary list and each item again
+                # later. key="dup_panel" is targeted by the .st-key-dup_panel CSS
+                # rule above to tint it lighter than the plain page background.
+                with st.container(border=True, key="dup_panel"):
+                    st.subheader("⚠️ Duplicates Uploaded")
+                    st.caption("These files match a game already in the database.")
+                    for idx, item, g in duplicates:
+                        tcol, rcol1, rcol2, rcol3 = st.columns([1, 4, 1, 1])
+                        with tcol:
+                            st.image(render_preview_png(item["bytes"], item["mime"]), width=64)
+                        with rcol1:
+                            st.write(
+                                f"“{item['label']}” — game_id={g['id']}: "
+                                f"{g['home_team']} {g['home_final_score']}–{g['away_final_score']} "
+                                f"{g['away_team']} ({g['game_date']})"
+                            )
+                        with rcol2:
+                            if st.button("Replace", key=f"dup_replace_{idx}", type="primary"):
+                                st.session_state[f"replace_target_{idx}"] = g["id"]
+                                st.rerun()
+                        with rcol3:
+                            if st.button("Skip", key=f"dup_skip_{idx}"):
+                                queue[idx]["status"] = "skipped"
+                                st.rerun()
 
-            done = sum(1 for item in queue if item["status"] != "pending")
-            st.progress(done / len(queue) if queue else 0, text=f"{done}/{len(queue)} sheets handled")
+                        with st.expander(f"🔍 View larger — {item['label']}"):
+                            st.image(render_preview_png(item["bytes"], item["mime"]), width="stretch")
+                            vcol1, vcol2 = st.columns(2)
+                            with vcol1:
+                                if st.button("Replace", key=f"dup_replace_big_{idx}", type="primary"):
+                                    st.session_state[f"replace_target_{idx}"] = g["id"]
+                                    st.rerun()
+                            with vcol2:
+                                if st.button("Skip", key=f"dup_skip_big_{idx}"):
+                                    queue[idx]["status"] = "skipped"
+                                    st.rerun()
 
-            if idx >= len(queue):
-                st.success("All uploaded sheets have been handled.")
+                        st.divider()
+
+                    bcol1, bcol2 = st.columns(2)
+                    with bcol1:
+                        if st.button("Cancel", key="dup_cancel"):
+                            for key in list(st.session_state.keys()):
+                                if key.startswith(("data_", "proc_", "replace_target_")):
+                                    del st.session_state[key]
+                            for key in ("queue", "upload_key", "queue_index"):
+                                st.session_state.pop(key, None)
+                            st.session_state.sheet_uploader_version += 1
+                            st.rerun()
+                    with bcol2:
+                        if st.button("Skip All", key="dup_skip_all", type="primary"):
+                            for idx, _, _ in duplicates:
+                                queue[idx]["status"] = "skipped"
+                            st.rerun()
             else:
-                item = queue[idx]
-                st.subheader(item["label"])
-                replace_key = f"replace_target_{idx}"
+                idx = st.session_state.queue_index
+                while idx < len(queue) and queue[idx]["status"] != "pending":
+                    idx += 1
+                st.session_state.queue_index = idx
 
-                col1, col2 = st.columns(2)
+                done = sum(1 for item in queue if item["status"] != "pending")
+                st.progress(done / len(queue) if queue else 0, text=f"{done}/{len(queue)} sheets handled")
 
-                # Fixed-height, independently-scrolling panes (a real Streamlit
-                # layout feature, not a CSS position hack) — the image pane
-                # never moves as the user scrolls through the (usually much
-                # longer) form beside it, since each pane scrolls within its
-                # own box instead of the page scrolling past both.
-                PREVIEW_PANE_HEIGHT = 750
+                if idx >= len(queue):
+                    st.success("All uploaded sheets have been handled.")
+                else:
+                    item = queue[idx]
+                    st.subheader(item["label"])
+                    replace_key = f"replace_target_{idx}"
 
-                with col1:
-                    with st.container(height=PREVIEW_PANE_HEIGHT, border=True):
-                        preview_png = render_preview_png(item["bytes"], item["mime"])
-                        fit_width = display_width_for_height(preview_png, PREVIEW_PANE_HEIGHT - 40)
-                        st.image(preview_png, width=fit_width)
+                    col1, col2 = st.columns(2)
 
-                with col2:
-                    with st.container(height=PREVIEW_PANE_HEIGHT, border=True):
-                        data_key = f"data_{idx}"
-                        if data_key not in st.session_state:
-                            extract_col, presskip_col = st.columns(2)
-                            with extract_col:
-                                if st.button("Extract with Claude", key=f"extract_{idx}", type="primary"):
-                                    client = get_client(api_key)
-                                    if client is None:
-                                        st.error("Set your ANTHROPIC_API_KEY in the sidebar first.")
-                                    else:
-                                        with st.spinner("Reading handwriting..."):
+                    # Fixed-height, independently-scrolling panes (a real Streamlit
+                    # layout feature, not a CSS position hack) — the image pane
+                    # never moves as the user scrolls through the (usually much
+                    # longer) form beside it, since each pane scrolls within its
+                    # own box instead of the page scrolling past both.
+                    PREVIEW_PANE_HEIGHT = 750
+
+                    with col1:
+                        with st.container(height=PREVIEW_PANE_HEIGHT, border=True):
+                            preview_png = render_preview_png(item["bytes"], item["mime"])
+                            fit_width = display_width_for_height(preview_png, PREVIEW_PANE_HEIGHT - 40)
+                            st.image(preview_png, width=fit_width)
+
+                    with col2:
+                        with st.container(height=PREVIEW_PANE_HEIGHT, border=True):
+                            data_key = f"data_{idx}"
+                            if data_key not in st.session_state:
+                                extract_col, presskip_col = st.columns(2)
+                                with extract_col:
+                                    if st.button("Extract with Claude", key=f"extract_{idx}", type="primary"):
+                                        client = get_client(api_key)
+                                        if client is None:
+                                            st.error("Set your ANTHROPIC_API_KEY in the sidebar first.")
+                                        else:
+                                            with st.spinner("Reading handwriting..."):
+                                                try:
+                                                    content_block = core.build_content_block(item["bytes"], item["mime"])
+                                                    st.session_state[data_key] = core.extract_game_sheet(client, content_block)
+                                                    st.rerun()
+                                                except Exception as e:
+                                                    st.error(f"Extraction failed: {e}")
+                                with presskip_col:
+                                    if st.button("Skip this sheet", key=f"preskip_{idx}"):
+                                        queue[idx]["status"] = "skipped"
+                                        st.rerun()
+                            else:
+                                merged = render_game_form(f"proc_{idx}", st.session_state[data_key], conn, working_division_id)
+
+                                accept_col, skip_col = st.columns(2)
+                                with accept_col:
+                                    if st.button("Accept & Save", key=f"accept_{idx}", type="primary"):
+                                        form_error = game_form_error(merged)
+                                        if form_error:
+                                            st.error(form_error)
+                                        else:
                                             try:
-                                                content_block = core.build_content_block(item["bytes"], item["mime"])
-                                                st.session_state[data_key] = core.extract_game_sheet(client, content_block)
+                                                replace_target = st.session_state.get(replace_key)
+                                                if replace_target:
+                                                    core.update_game(conn, replace_target, merged, working_division_id)
+                                                    game_id = replace_target
+                                                    msg = f"Replaced game_id={game_id} with “{item['label']}”."
+                                                else:
+                                                    game_id, already_existed = core.insert_game(
+                                                        conn, merged, source_file=item["label"],
+                                                        working_division_id=working_division_id,
+                                                    )
+                                                    msg = f"Saved “{item['label']}” as game_id={game_id}."
+                                                    if already_existed:
+                                                        msg += " (Game already existed — stats were re-inserted.)"
+                                                queue[idx]["status"] = "done"
+                                                st.session_state.setdefault("messages", []).append(msg)
                                                 st.rerun()
-                                            except Exception as e:
-                                                st.error(f"Extraction failed: {e}")
-                            with presskip_col:
-                                if st.button("Skip this sheet", key=f"preskip_{idx}"):
-                                    queue[idx]["status"] = "skipped"
-                                    st.rerun()
-                        else:
-                            merged = render_game_form(f"proc_{idx}", st.session_state[data_key], conn, working_division_id)
+                                            except ValueError as e:
+                                                st.error(str(e))
+                                with skip_col:
+                                    if st.button("Skip this sheet", key=f"skip_{idx}"):
+                                        queue[idx]["status"] = "skipped"
+                                        st.rerun()
 
-                            accept_col, skip_col = st.columns(2)
-                            with accept_col:
-                                if st.button("Accept & Save", key=f"accept_{idx}", type="primary"):
-                                    form_error = game_form_error(merged)
-                                    if form_error:
-                                        st.error(form_error)
-                                    else:
-                                        try:
-                                            replace_target = st.session_state.get(replace_key)
-                                            if replace_target:
-                                                core.update_game(conn, replace_target, merged, working_division_id)
-                                                game_id = replace_target
-                                                msg = f"Replaced game_id={game_id} with “{item['label']}”."
-                                            else:
-                                                game_id, already_existed = core.insert_game(
-                                                    conn, merged, source_file=item["label"],
-                                                    working_division_id=working_division_id,
-                                                )
-                                                msg = f"Saved “{item['label']}” as game_id={game_id}."
-                                                if already_existed:
-                                                    msg += " (Game already existed — stats were re-inserted.)"
-                                            queue[idx]["status"] = "done"
-                                            st.session_state.setdefault("messages", []).append(msg)
-                                            st.rerun()
-                                        except ValueError as e:
-                                            st.error(str(e))
-                            with skip_col:
-                                if st.button("Skip this sheet", key=f"skip_{idx}"):
-                                    queue[idx]["status"] = "skipped"
-                                    st.rerun()
-
-        for msg in st.session_state.get("messages", []):
-            st.info(msg)
+            for msg in st.session_state.get("messages", []):
+                st.info(msg)
 
 # ---------------------------------------------------------------------------
 # Tab 2: edit existing games
 # ---------------------------------------------------------------------------
 
 with tab_edit:
-    st.header("Games")
-    if working_division_id is None:
-        st.warning("No division selected. Add one in the Divisions tab first.")
-        rows = []
+    if "edit" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
     else:
-        rows = core.list_games(conn, working_division_id)
+        st.header("Games")
+        if working_division_id is None:
+            st.warning("No division selected. Add one in the Divisions tab first.")
+            rows = []
+        else:
+            rows = core.list_games(conn, working_division_id)
 
-    if working_division_id is not None:
-        with st.expander("➕ Add Game Manually"):
-            st.caption(
-                "For a game whose sheet is missing, lost, or never scanned — enter its "
-                "stats by hand instead of processing a sheet."
-            )
-            manual_merged = render_game_form("add_new", {}, conn, working_division_id)
-            if st.button("Save new game", key="add_new_save", type="primary"):
-                form_error = game_form_error(manual_merged)
-                if form_error:
-                    st.error(form_error)
-                else:
-                    try:
-                        new_game_id, already_existed = core.insert_game(
-                            conn, manual_merged, source_file="(manual entry)",
-                            working_division_id=working_division_id,
-                        )
-                        for key in list(st.session_state.keys()):
-                            if key.startswith("add_new_"):
-                                del st.session_state[key]
-                        st.success(
-                            f"Added game_id={new_game_id} manually."
-                            + (" (Matching game already existed — stats were re-inserted.)"
-                               if already_existed else "")
-                        )
-                        st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
-
-    if not rows:
-        st.write("No games in the database yet.")
-    else:
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-        game_id = st.selectbox("Select a game to edit", options=[r["id"] for r in rows])
-        if st.button("Load for editing"):
-            # Drop any leftover widget/row state from a previous load of this game.
-            for key in list(st.session_state.keys()):
-                if key.startswith(f"edit_{game_id}_"):
-                    del st.session_state[key]
-            data, source_file = core.load_game(conn, game_id)
-            st.session_state.edit_game_id = game_id
-            st.session_state.edit_source_file = source_file
-            st.session_state.edit_data = data
-
-        if st.session_state.get("edit_game_id") == game_id and "edit_data" in st.session_state:
-            merged = render_game_form(f"edit_{game_id}", st.session_state.edit_data, conn, working_division_id)
-            delete_confirm_key = f"confirm_delete_game_{game_id}"
-            save_col, delete_col = st.columns(2)
-            with save_col:
-                if st.button("Save changes", type="primary"):
-                    form_error = game_form_error(merged)
+        if working_division_id is not None:
+            with st.expander("➕ Add Game Manually"):
+                st.caption(
+                    "For a game whose sheet is missing, lost, or never scanned — enter its "
+                    "stats by hand instead of processing a sheet."
+                )
+                manual_merged = render_game_form("add_new", {}, conn, working_division_id)
+                if st.button("Save new game", key="add_new_save", type="primary"):
+                    form_error = game_form_error(manual_merged)
                     if form_error:
                         st.error(form_error)
                     else:
                         try:
-                            core.update_game(conn, game_id, merged, working_division_id)
-                            st.success(f"Updated game_id={game_id}.")
+                            new_game_id, already_existed = core.insert_game(
+                                conn, manual_merged, source_file="(manual entry)",
+                                working_division_id=working_division_id,
+                            )
+                            for key in list(st.session_state.keys()):
+                                if key.startswith("add_new_"):
+                                    del st.session_state[key]
+                            st.success(
+                                f"Added game_id={new_game_id} manually."
+                                + (" (Matching game already existed — stats were re-inserted.)"
+                                   if already_existed else "")
+                            )
                             st.rerun()
                         except ValueError as e:
                             st.error(str(e))
-            with delete_col:
-                if st.button("🗑️ Delete this game", key=f"delete_game_{game_id}"):
-                    st.session_state[delete_confirm_key] = True
-                    st.rerun()
 
-            if st.session_state.get(delete_confirm_key):
-                st.warning(
-                    f"Permanently delete game_id={game_id} "
-                    f"({merged['home_team'] or 'Home'} vs {merged['away_team'] or 'Away'})? "
-                    "This can't be undone — its goals, penalties, and shootout attempts go with it."
-                )
-                confirm_col, cancel_col = st.columns(2)
-                with confirm_col:
-                    if st.button("Yes, delete", key=f"confirm_yes_delete_game_{game_id}", type="primary"):
-                        core.delete_game(conn, game_id)
-                        st.session_state.pop(delete_confirm_key, None)
-                        for key in ("edit_game_id", "edit_source_file", "edit_data"):
-                            st.session_state.pop(key, None)
-                        st.success(f"Deleted game_id={game_id}.")
+        if not rows:
+            st.write("No games in the database yet.")
+        else:
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+            game_id = st.selectbox("Select a game to edit", options=[r["id"] for r in rows])
+            if st.button("Load for editing"):
+                # Drop any leftover widget/row state from a previous load of this game.
+                for key in list(st.session_state.keys()):
+                    if key.startswith(f"edit_{game_id}_"):
+                        del st.session_state[key]
+                data, source_file = core.load_game(conn, game_id)
+                st.session_state.edit_game_id = game_id
+                st.session_state.edit_source_file = source_file
+                st.session_state.edit_data = data
+
+            if st.session_state.get("edit_game_id") == game_id and "edit_data" in st.session_state:
+                merged = render_game_form(f"edit_{game_id}", st.session_state.edit_data, conn, working_division_id)
+                delete_confirm_key = f"confirm_delete_game_{game_id}"
+                save_col, delete_col = st.columns(2)
+                with save_col:
+                    if st.button("Save changes", type="primary"):
+                        form_error = game_form_error(merged)
+                        if form_error:
+                            st.error(form_error)
+                        else:
+                            try:
+                                core.update_game(conn, game_id, merged, working_division_id)
+                                st.success(f"Updated game_id={game_id}.")
+                                st.rerun()
+                            except ValueError as e:
+                                st.error(str(e))
+                with delete_col:
+                    if st.button("🗑️ Delete this game", key=f"delete_game_{game_id}"):
+                        st.session_state[delete_confirm_key] = True
                         st.rerun()
-                with cancel_col:
-                    if st.button("Cancel", key=f"confirm_no_delete_game_{game_id}"):
-                        st.session_state.pop(delete_confirm_key, None)
-                        st.rerun()
+
+                if st.session_state.get(delete_confirm_key):
+                    st.warning(
+                        f"Permanently delete game_id={game_id} "
+                        f"({merged['home_team'] or 'Home'} vs {merged['away_team'] or 'Away'})? "
+                        "This can't be undone — its goals, penalties, and shootout attempts go with it."
+                    )
+                    confirm_col, cancel_col = st.columns(2)
+                    with confirm_col:
+                        if st.button("Yes, delete", key=f"confirm_yes_delete_game_{game_id}", type="primary"):
+                            core.delete_game(conn, game_id)
+                            st.session_state.pop(delete_confirm_key, None)
+                            for key in ("edit_game_id", "edit_source_file", "edit_data"):
+                                st.session_state.pop(key, None)
+                            st.success(f"Deleted game_id={game_id}.")
+                            st.rerun()
+                    with cancel_col:
+                        if st.button("Cancel", key=f"confirm_no_delete_game_{game_id}"):
+                            st.session_state.pop(delete_confirm_key, None)
+                            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Tab 3: schedule
 # ---------------------------------------------------------------------------
 
 with tab_schedule:
-    st.header("Schedule")
-    st.caption(
-        "Upload the season's official schedule (a CSV with Date/Home Team/Away Team "
-        "columns) to see which scheduled games haven't had a sheet entered yet. The "
-        "schedule is saved to the database, so this stays up to date as games are "
-        "added, edited, or removed — no need to re-upload."
-    )
-    if working_division_id is None:
-        st.warning("No division selected. Add one in the Divisions tab first.")
+    if "schedule" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
     else:
-        upload_col, clear_col = st.columns([4, 1])
-        with upload_col:
-            schedule_csv = st.file_uploader(
-                "Upload schedule CSV", type=["csv"], key=f"schedule_csv_{working_division_id}",
-            )
-        with clear_col:
-            with st.popover("🗑️ Clear schedule"):
-                st.caption("Removes this division's entire saved schedule — e.g. if the wrong CSV was uploaded.")
-                if st.button("Clear", key="clear_schedule_btn", type="primary"):
-                    core.clear_schedule(conn, working_division_id)
-                    st.rerun()
-
-        if schedule_csv is not None:
-            schedule_df = None
-            try:
-                schedule_df = pd.read_csv(schedule_csv)
-                schedule_df.columns = [c.strip() for c in schedule_df.columns]
-            except Exception as e:
-                st.error(f"Couldn't read that CSV: {e}")
-
-            if schedule_df is not None:
-                required_cols = {"Date", "Home Team", "Away Team"}
-                missing_cols = required_cols - set(schedule_df.columns)
-                if missing_cols:
-                    st.error(f"CSV is missing expected column(s): {', '.join(sorted(missing_cols))}")
-                else:
-                    schedule_rows = [
-                        {
-                            "order": row.get("Order"), "round": row.get("Round"),
-                            "game_date": row.get("Date"), "home_team": row.get("Home Team"),
-                            "away_team": row.get("Away Team"), "start_time": row.get("Start Time"),
-                            "end_time": row.get("End Time"), "location": row.get("Location"),
-                            "field": row.get("Field"),
-                        }
-                        for row in schedule_df.to_dict("records")
-                    ]
-                    saved = core.import_schedule(conn, working_division_id, schedule_rows)
-                    st.success(f"Saved {saved} scheduled game(s) to the database.")
-
-        schedule = core.list_schedule(conn, working_division_id)
-        if not schedule:
-            st.info("No schedule uploaded yet for this division.")
+        st.header("Schedule")
+        st.caption(
+            "Upload the season's official schedule (a CSV with Date/Home Team/Away Team "
+            "columns) to see which scheduled games haven't had a sheet entered yet. The "
+            "schedule is saved to the database, so this stays up to date as games are "
+            "added, edited, or removed — no need to re-upload."
+        )
+        if working_division_id is None:
+            st.warning("No division selected. Add one in the Divisions tab first.")
         else:
-            total = len(schedule)
-            done = sum(1 for r in schedule if r["accounted_for"])
-            st.progress(done / total if total else 0, text=f"{done}/{total} scheduled games accounted for")
+            upload_col, clear_col = st.columns([4, 1])
+            with upload_col:
+                schedule_csv = st.file_uploader(
+                    "Upload schedule CSV", type=["csv"], key=f"schedule_csv_{working_division_id}",
+                )
+            with clear_col:
+                with st.popover("🗑️ Clear schedule"):
+                    st.caption("Removes this division's entire saved schedule — e.g. if the wrong CSV was uploaded.")
+                    if st.button("Clear", key="clear_schedule_btn", type="primary"):
+                        core.clear_schedule(conn, working_division_id)
+                        st.rerun()
 
-            unaccounted = [r for r in schedule if not r["accounted_for"]]
-            if unaccounted:
-                st.subheader(f"⚠️ {len(unaccounted)} game(s) not yet accounted for")
-                display_df = pd.DataFrame(unaccounted)[
-                    ["round", "game_date", "away_team", "home_team", "start_time", "location"]
-                ].rename(columns={
-                    "round": "Round", "game_date": "Date", "away_team": "Away Team",
-                    "home_team": "Home Team", "start_time": "Start Time", "location": "Location",
-                })
-                st.dataframe(display_df, width="stretch", hide_index=True)
+            if schedule_csv is not None:
+                schedule_df = None
+                try:
+                    schedule_df = pd.read_csv(schedule_csv)
+                    schedule_df.columns = [c.strip() for c in schedule_df.columns]
+                except Exception as e:
+                    st.error(f"Couldn't read that CSV: {e}")
+
+                if schedule_df is not None:
+                    required_cols = {"Date", "Home Team", "Away Team"}
+                    missing_cols = required_cols - set(schedule_df.columns)
+                    if missing_cols:
+                        st.error(f"CSV is missing expected column(s): {', '.join(sorted(missing_cols))}")
+                    else:
+                        schedule_rows = [
+                            {
+                                "order": row.get("Order"), "round": row.get("Round"),
+                                "game_date": row.get("Date"), "home_team": row.get("Home Team"),
+                                "away_team": row.get("Away Team"), "start_time": row.get("Start Time"),
+                                "end_time": row.get("End Time"), "location": row.get("Location"),
+                                "field": row.get("Field"),
+                            }
+                            for row in schedule_df.to_dict("records")
+                        ]
+                        saved = core.import_schedule(conn, working_division_id, schedule_rows)
+                        st.success(f"Saved {saved} scheduled game(s) to the database.")
+
+            schedule = core.list_schedule(conn, working_division_id)
+            if not schedule:
+                st.info("No schedule uploaded yet for this division.")
             else:
-                st.success("Every scheduled game has been entered.")
+                total = len(schedule)
+                done = sum(1 for r in schedule if r["accounted_for"])
+                st.progress(done / total if total else 0, text=f"{done}/{total} scheduled games accounted for")
+
+                unaccounted = [r for r in schedule if not r["accounted_for"]]
+                if unaccounted:
+                    st.subheader(f"⚠️ {len(unaccounted)} game(s) not yet accounted for")
+                    display_df = pd.DataFrame(unaccounted)[
+                        ["round", "game_date", "away_team", "home_team", "start_time", "location"]
+                    ].rename(columns={
+                        "round": "Round", "game_date": "Date", "away_team": "Away Team",
+                        "home_team": "Home Team", "start_time": "Start Time", "location": "Location",
+                    })
+                    st.dataframe(display_df, width="stretch", hide_index=True)
+                else:
+                    st.success("Every scheduled game has been entered.")
 
 # ---------------------------------------------------------------------------
 # Tab 4: standings
 # ---------------------------------------------------------------------------
 
 with tab_standings:
-    st.header("Standings")
-    st.caption(
-        "3 pts for a regulation win, 2 for an OT/shootout win, 1 for an OT/shootout loss, 0 for a "
-        "regulation loss. Ties broken by: head-to-head record, goal differential, regulation wins, "
-        "OT wins, goals against, goals for."
-    )
-    table = core.standings_table(conn, working_division_id) if working_division_id is not None else []
-    if not table:
-        st.write("No completed games yet.")
+    if "standings" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
     else:
-        st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
+        st.header("Standings")
+        st.caption(
+            "3 pts for a regulation win, 2 for an OT/shootout win, 1 for an OT/shootout loss, 0 for a "
+            "regulation loss. Ties broken by: head-to-head record, goal differential, regulation wins, "
+            "OT wins, goals against, goals for."
+        )
+        table = core.standings_table(conn, working_division_id) if working_division_id is not None else []
+        if not table:
+            st.write("No completed games yet.")
+        else:
+            st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------------------
 # Tab 5: player stats
 # ---------------------------------------------------------------------------
 
 with tab_stats:
-    st.header("Player Stats")
-    stats = core.get_player_stats(conn, working_division_id) if working_division_id is not None else []
-    if not stats:
-        st.write("No players in the roster yet — add some in the Team Rosters tab.")
+    if "stats" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
     else:
-        stats = sorted(stats, key=lambda s: (-s["points"], -s["goals"]))
-        all_divisions_for_stats = core.list_divisions(conn)
-        division_name_by_id_stats = {
-            d["id"]: f"{d['year']} {d['season']} — {division_label(d['age_group'])}" for d in all_divisions_for_stats
-        }
+        st.header("Player Stats")
+        stats = core.get_player_stats(conn, working_division_id) if working_division_id is not None else []
+        if not stats:
+            st.write("No players in the roster yet — add some in the Team Rosters tab.")
+        else:
+            stats = sorted(stats, key=lambda s: (-s["points"], -s["goals"]))
+            all_divisions_for_stats = core.list_divisions(conn)
+            division_name_by_id_stats = {
+                d["id"]: f"{d['year']} {d['season']} — {division_label(d['age_group'])}" for d in all_divisions_for_stats
+            }
 
-        col_widths = [1.3, 0.5, 1.5, 0.5, 0.5, 0.5, 0.5, 0.8, 0.9, 1.2]
-        headers = st.columns(col_widths)
-        for col, label in zip(headers, ["Team", "#", "Name", "G", "A", "PTS", "PIM", "SO Made", "SO Missed", ""]):
-            col.markdown(f"**{label}**")
+            col_widths = [1.3, 0.5, 1.5, 0.5, 0.5, 0.5, 0.5, 0.8, 0.9, 1.2]
+            headers = st.columns(col_widths)
+            for col, label in zip(headers, ["Team", "#", "Name", "G", "A", "PTS", "PIM", "SO Made", "SO Missed", ""]):
+                col.markdown(f"**{label}**")
 
-        for s in stats:
-            row_key = f"{s['team_id']}_{s['number']}"
-            with highlighted_row(s.get("player_id")):
-                c = st.columns(col_widths)
-                c[0].write(core.display_text(s["team"]))
-                c[1].write(s["number"])
-                c[2].write(core.display_text(s["name"]))
-                c[3].write(s["goals"])
-                c[4].write(s["assists"])
-                c[5].write(s["points"])
-                c[6].write(s["penalties"])
-                c[7].write(s["shootout_goals"])
-                c[8].write(s["shootout_misses"])
-                with c[9]:
-                    if s.get("player_id") is None:
-                        render_create_player_popover(
-                            conn, f"stats_{row_key}", s["team_id"], s["team"], s["number"], working_division_id
-                        )
-                    else:
-                        with st.popover("👤 Player Panel"):
-                            render_player_panel(
-                                conn, s["player_id"], division_name_by_id_stats, all_divisions_for_stats,
-                                key_prefix=f"stats_panel_{row_key}",
+            for s in stats:
+                row_key = f"{s['team_id']}_{s['number']}"
+                with highlighted_row(s.get("player_id")):
+                    c = st.columns(col_widths)
+                    c[0].write(core.display_text(s["team"]))
+                    c[1].write(s["number"])
+                    c[2].write(core.display_text(s["name"]))
+                    c[3].write(s["goals"])
+                    c[4].write(s["assists"])
+                    c[5].write(s["points"])
+                    c[6].write(s["penalties"])
+                    c[7].write(s["shootout_goals"])
+                    c[8].write(s["shootout_misses"])
+                    with c[9]:
+                        if s.get("player_id") is None:
+                            render_create_player_popover(
+                                conn, f"stats_{row_key}", s["team_id"], s["team"], s["number"], working_division_id
                             )
+                        else:
+                            with st.popover("👤 Player Panel"):
+                                render_player_panel(
+                                    conn, s["player_id"], division_name_by_id_stats, all_divisions_for_stats,
+                                    key_prefix=f"stats_panel_{row_key}",
+                                )
 
 # ---------------------------------------------------------------------------
 # Tab 6: team rosters
 # ---------------------------------------------------------------------------
 
 with tab_rosters:
-    st.header("Team Rosters")
-    st.caption(
-        "Add player names/numbers per team so goals, assists, and penalties can be attributed by name. "
-        "Teams belong to the Working Division picked above — the same team name in a different division "
-        "is a separate team with its own roster."
-    )
-
-    if working_division_id is None:
-        st.warning("No division selected. Add one in the Divisions tab first.")
+    if "rosters" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
     else:
-        with st.expander("Add a new team"):
-            new_team_name = st.text_input("Team name", key="new_team_name")
-            if st.button("Add team"):
-                if new_team_name.strip():
-                    core.add_team(conn, working_division_id, new_team_name.strip())
-                    st.rerun()
-                else:
-                    st.error("Team name is required.")
+        st.header("Team Rosters")
+        st.caption(
+            "Add player names/numbers per team so goals, assists, and penalties can be attributed by name. "
+            "Teams belong to the Working Division picked above — the same team name in a different division "
+            "is a separate team with its own roster."
+        )
 
-        teams = core.list_teams(conn, working_division_id)
-        if not teams:
-            st.write("No teams yet in this division — process a game sheet, or add one above.")
+        if working_division_id is None:
+            st.warning("No division selected. Add one in the Divisions tab first.")
         else:
-            team_options = {t["id"]: t["name"] for t in teams}
-            roster_team_id = st.selectbox(
-                "Select a team", options=list(team_options), format_func=lambda i: team_options[i]
-            )
-            st.caption("Click a column header to sort. Edit cells directly, or use the blank bottom row to add a player.")
-
-            roster = core.list_roster(conn, roster_team_id)
-            roster_df = (
-                pd.DataFrame(roster, columns=["number", "name"]) if roster else pd.DataFrame(columns=["number", "name"])
-            )
-            roster_df = roster_df.rename(columns={"number": "Number", "name": "Name"})
-
-            edited_df = st.data_editor(
-                roster_df,
-                width="stretch",
-                hide_index=True,
-                num_rows="dynamic",
-                column_config={
-                    "Number": st.column_config.TextColumn("Number", required=True),
-                    "Name": st.column_config.TextColumn("Name", required=True),
-                },
-                key=f"roster_editor_{roster_team_id}",
-            )
-
-            if st.button("Save roster", type="primary"):
-                new_entries = [
-                    {"number": str(row["Number"]).strip(), "name": str(row["Name"]).strip()}
-                    for _, row in edited_df.iterrows()
-                    if str(row["Number"]).strip() or str(row["Name"]).strip()
-                ]
-                core.replace_roster(conn, roster_team_id, new_entries)
-                st.success("Roster saved.")
-                st.rerun()
-
-            st.divider()
-            st.subheader(f"{team_options[roster_team_id]} — Player Details")
-            st.caption(
-                "Position and Season Grade for the Working Division above — edits here update that "
-                "player's position on this team, and their most recent evaluation for this division "
-                "(see the player's Evaluations popover for full grade history)."
-            )
-            roster_rows = core.list_roster(conn, roster_team_id)
-            if not roster_rows:
-                st.caption("No players on this roster yet.")
-            else:
-                detail_cols = st.columns([1, 3, 1.5, 1.5])
-                detail_cols[0].markdown("**Number**")
-                detail_cols[1].markdown("**Name**")
-                detail_cols[2].markdown("**Position**")
-                detail_cols[3].markdown("**Season Grade**")
-                for entry in roster_rows:
-                    with highlighted_row(entry["player_id"]):
-                        row_cols = st.columns([1, 3, 1.5, 1.5])
-                        row_cols[0].write(entry["number"])
-                        row_cols[1].write(entry["name"])
-                        if entry["player_id"] is None:
-                            with row_cols[2]:
-                                render_create_player_popover(
-                                    conn, f"roster_{roster_team_id}_{entry['id']}", roster_team_id,
-                                    team_options[roster_team_id], entry["number"], working_division_id,
-                                )
-                            continue
-                        with row_cols[2]:
-                            position_input(
-                                conn, entry["player_id"], working_division_id, roster_team_id,
-                                key=f"roster_position_{roster_team_id}_{entry['id']}",
-                                label_visibility="collapsed",
-                            )
-                        with row_cols[3]:
-                            season_grade_input(
-                                conn, entry["player_id"], working_division_id, roster_team_id,
-                                key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
-                                label_visibility="collapsed",
-                            )
-
-            st.divider()
-            st.subheader(f"{team_options[roster_team_id]} — Coaches")
-            assigned = core.list_team_coaches(conn, roster_team_id)
-            if assigned:
-                st.write(", ".join(c["name"] for c in assigned))
-            else:
-                st.caption("No coaches assigned to this team yet.")
-            all_coaches = core.list_coaches(conn)
-            assigned_ids = {c["id"] for c in assigned}
-            available_coaches = {c["id"]: c["name"] for c in all_coaches if c["id"] not in assigned_ids}
-            acol1, acol2 = st.columns([3, 1])
-            with acol1:
-                coach_to_assign = st.selectbox(
-                    "Assign coach", options=list(available_coaches), format_func=lambda i: available_coaches[i],
-                    key=f"assign_coach_pick_{roster_team_id}",
-                ) if available_coaches else None
-            with acol2:
-                if available_coaches and st.button("Assign", key=f"assign_coach_btn_{roster_team_id}"):
-                    core.assign_coach_to_team(conn, roster_team_id, coach_to_assign)
-                    st.rerun()
-            if assigned:
-                assigned_names = {c["id"]: c["name"] for c in assigned}
-                remove_col1, remove_col2 = st.columns([3, 1])
-                with remove_col1:
-                    coach_to_remove = st.selectbox(
-                        "Remove coach", options=list(assigned_ids), format_func=lambda i: assigned_names[i],
-                        key=f"remove_coach_pick_{roster_team_id}",
-                    )
-                with remove_col2:
-                    if st.button("Remove", key=f"remove_coach_btn_{roster_team_id}"):
-                        core.remove_coach_from_team(conn, roster_team_id, coach_to_remove)
-                        st.rerun()
-            with st.popover("➕ New coach"):
-                new_coach_name = st.text_input("Coach name", key=f"new_coach_name_{roster_team_id}")
-                if st.button("Create coach", key=f"create_coach_btn_{roster_team_id}"):
-                    if new_coach_name.strip():
-                        new_coach_id = core.add_coach(conn, new_coach_name.strip())
-                        core.assign_coach_to_team(conn, roster_team_id, new_coach_id)
+            with st.expander("Add a new team"):
+                new_team_name = st.text_input("Team name", key="new_team_name")
+                if st.button("Add team"):
+                    if new_team_name.strip():
+                        core.add_team(conn, working_division_id, new_team_name.strip())
                         st.rerun()
                     else:
-                        st.error("Coach name is required.")
+                        st.error("Team name is required.")
 
-            st.divider()
-            st.subheader(f"{team_options[roster_team_id]} — Player Stats")
-            team_name = team_options[roster_team_id]
-            team_stats = [
-                s for s in core.get_player_stats(conn, working_division_id) if s["team"] == core.normalize_text(team_name)
-            ]
-            if not team_stats:
-                st.write("No stats recorded yet for this team.")
+            teams = core.list_teams(conn, working_division_id)
+            if not teams:
+                st.write("No teams yet in this division — process a game sheet, or add one above.")
             else:
-                stats_df = pd.DataFrame([
-                    {
-                        "#": s["number"], "Name": core.display_text(s["name"]),
-                        "G": s["goals"], "A": s["assists"], "PTS": s["points"], "PIM": s["penalties"],
-                        "SO Made": s["shootout_goals"], "SO Missed": s["shootout_misses"],
-                    }
-                    for s in team_stats
-                ])
-                st.dataframe(stats_df, width="stretch", hide_index=True)
+                team_options = {t["id"]: t["name"] for t in teams}
+                roster_team_id = st.selectbox(
+                    "Select a team", options=list(team_options), format_func=lambda i: team_options[i]
+                )
+                st.caption("Click a column header to sort. Edit cells directly, or use the blank bottom row to add a player.")
+
+                roster = core.list_roster(conn, roster_team_id)
+                roster_df = (
+                    pd.DataFrame(roster, columns=["number", "name"]) if roster else pd.DataFrame(columns=["number", "name"])
+                )
+                roster_df = roster_df.rename(columns={"number": "Number", "name": "Name"})
+
+                edited_df = st.data_editor(
+                    roster_df,
+                    width="stretch",
+                    hide_index=True,
+                    num_rows="dynamic",
+                    column_config={
+                        "Number": st.column_config.TextColumn("Number", required=True),
+                        "Name": st.column_config.TextColumn("Name", required=True),
+                    },
+                    key=f"roster_editor_{roster_team_id}",
+                )
+
+                if st.button("Save roster", type="primary"):
+                    new_entries = [
+                        {"number": str(row["Number"]).strip(), "name": str(row["Name"]).strip()}
+                        for _, row in edited_df.iterrows()
+                        if str(row["Number"]).strip() or str(row["Name"]).strip()
+                    ]
+                    core.replace_roster(conn, roster_team_id, new_entries)
+                    st.success("Roster saved.")
+                    st.rerun()
+
+                st.divider()
+                st.subheader(f"{team_options[roster_team_id]} — Player Details")
+                st.caption(
+                    "Position and Season Grade for the Working Division above — edits here update that "
+                    "player's position on this team, and their most recent evaluation for this division "
+                    "(see the player's Evaluations popover for full grade history)."
+                )
+                roster_rows = core.list_roster(conn, roster_team_id)
+                if not roster_rows:
+                    st.caption("No players on this roster yet.")
+                else:
+                    detail_cols = st.columns([1, 3, 1.5, 1.5])
+                    detail_cols[0].markdown("**Number**")
+                    detail_cols[1].markdown("**Name**")
+                    detail_cols[2].markdown("**Position**")
+                    detail_cols[3].markdown("**Season Grade**")
+                    for entry in roster_rows:
+                        with highlighted_row(entry["player_id"]):
+                            row_cols = st.columns([1, 3, 1.5, 1.5])
+                            row_cols[0].write(entry["number"])
+                            row_cols[1].write(entry["name"])
+                            if entry["player_id"] is None:
+                                with row_cols[2]:
+                                    render_create_player_popover(
+                                        conn, f"roster_{roster_team_id}_{entry['id']}", roster_team_id,
+                                        team_options[roster_team_id], entry["number"], working_division_id,
+                                    )
+                                continue
+                            with row_cols[2]:
+                                position_input(
+                                    conn, entry["player_id"], working_division_id, roster_team_id,
+                                    key=f"roster_position_{roster_team_id}_{entry['id']}",
+                                    label_visibility="collapsed",
+                                )
+                            with row_cols[3]:
+                                season_grade_input(
+                                    conn, entry["player_id"], working_division_id, roster_team_id,
+                                    key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
+                                    label_visibility="collapsed",
+                                )
+
+                st.divider()
+                st.subheader(f"{team_options[roster_team_id]} — Coaches")
+                assigned = core.list_team_coaches(conn, roster_team_id)
+                if assigned:
+                    st.write(", ".join(c["name"] for c in assigned))
+                else:
+                    st.caption("No coaches assigned to this team yet.")
+                all_coaches = core.list_coaches(conn)
+                assigned_ids = {c["id"] for c in assigned}
+                available_coaches = {c["id"]: c["name"] for c in all_coaches if c["id"] not in assigned_ids}
+                acol1, acol2 = st.columns([3, 1])
+                with acol1:
+                    coach_to_assign = st.selectbox(
+                        "Assign coach", options=list(available_coaches), format_func=lambda i: available_coaches[i],
+                        key=f"assign_coach_pick_{roster_team_id}",
+                    ) if available_coaches else None
+                with acol2:
+                    if available_coaches and st.button("Assign", key=f"assign_coach_btn_{roster_team_id}"):
+                        core.assign_coach_to_team(conn, roster_team_id, coach_to_assign)
+                        st.rerun()
+                if assigned:
+                    assigned_names = {c["id"]: c["name"] for c in assigned}
+                    remove_col1, remove_col2 = st.columns([3, 1])
+                    with remove_col1:
+                        coach_to_remove = st.selectbox(
+                            "Remove coach", options=list(assigned_ids), format_func=lambda i: assigned_names[i],
+                            key=f"remove_coach_pick_{roster_team_id}",
+                        )
+                    with remove_col2:
+                        if st.button("Remove", key=f"remove_coach_btn_{roster_team_id}"):
+                            core.remove_coach_from_team(conn, roster_team_id, coach_to_remove)
+                            st.rerun()
+                with st.popover("➕ New coach"):
+                    new_coach_name = st.text_input("Coach name", key=f"new_coach_name_{roster_team_id}")
+                    if st.button("Create coach", key=f"create_coach_btn_{roster_team_id}"):
+                        if new_coach_name.strip():
+                            new_coach_id = core.add_coach(conn, new_coach_name.strip())
+                            core.assign_coach_to_team(conn, roster_team_id, new_coach_id)
+                            st.rerun()
+                        else:
+                            st.error("Coach name is required.")
+
+                st.divider()
+                st.subheader(f"{team_options[roster_team_id]} — Player Stats")
+                team_name = team_options[roster_team_id]
+                team_stats = [
+                    s for s in core.get_player_stats(conn, working_division_id) if s["team"] == core.normalize_text(team_name)
+                ]
+                if not team_stats:
+                    st.write("No stats recorded yet for this team.")
+                else:
+                    stats_df = pd.DataFrame([
+                        {
+                            "#": s["number"], "Name": core.display_text(s["name"]),
+                            "G": s["goals"], "A": s["assists"], "PTS": s["points"], "PIM": s["penalties"],
+                            "SO Made": s["shootout_goals"], "SO Missed": s["shootout_misses"],
+                        }
+                        for s in team_stats
+                    ])
+                    st.dataframe(stats_df, width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------------------
 # Tab 7: players (global profiles, persisting across every division/season)
 # ---------------------------------------------------------------------------
 
 with tab_players:
-    st.header("Players")
-    st.caption(
-        "Player profiles are global — the same player keeps one profile across every division/season "
-        "they play in. Link a profile to a roster row (jersey number) in the Player Stats tab or Team "
-        "Rosters to attribute stats to a name."
-    )
-
-    all_divisions_for_players = core.list_divisions(conn)
-    division_name_by_id = {
-        d["id"]: f"{d['year']} {d['season']} — {division_label(d['age_group'])}" for d in all_divisions_for_players
-    }
-
-    with st.expander("➕ Add a new player"):
-        pn_name = st.text_input("Name", key="new_player_name")
-        pn_dob = st.text_input("Birth date", key="new_player_dob", placeholder="YYYY-MM-DD")
-        pn_division = st.selectbox(
-            "Current division", options=[None] + list(division_name_by_id),
-            format_func=lambda i: "(none)" if i is None else division_name_by_id[i],
-            key="new_player_division",
-        )
-        pcol1, pcol2 = st.columns(2)
-        pn_cfn = pcol1.text_input("Contact first name", key="new_player_cfn")
-        pn_cln = pcol2.text_input("Contact last name", key="new_player_cln")
-        pcol3, pcol4 = st.columns(2)
-        pn_cph = pcol3.text_input("Contact phone", key="new_player_cph")
-        pn_cem = pcol4.text_input("Contact email", key="new_player_cem")
-        if st.button("Add player", key="add_player_btn", type="primary"):
-            if pn_name.strip():
-                core.add_player(
-                    conn, pn_name.strip(), birth_date=pn_dob.strip() or None,
-                    current_division_id=pn_division,
-                    contact_first_name=pn_cfn.strip() or None, contact_last_name=pn_cln.strip() or None,
-                    contact_phone=pn_cph.strip() or None, contact_email=pn_cem.strip() or None,
-                )
-                st.rerun()
-            else:
-                st.error("Name is required.")
-
-    players_list = core.list_players(conn)
-    if not players_list:
-        st.write("No players yet — add one above.")
+    if "players" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
     else:
-        player_options = {p["id"]: player_label(conn, p) for p in players_list}
-        player_ids = list(player_options)
-
-        # Previous/Next live inside render_player_panel, alongside Save/
-        # Delete/Evaluations, but that runs *after* this selectbox — so
-        # they can't write "players_tab_select" directly (Streamlit forbids
-        # touching a widget's session_state after it's been instantiated
-        # this run). They stash the target id here instead; applying it to
-        # the real widget key must happen before that widget is created.
-        pending_key = "players_tab_pending_select"
-        if pending_key in st.session_state:
-            st.session_state["players_tab_select"] = st.session_state.pop(pending_key)
-
-        selected_player_id = st.selectbox(
-            "Select a player", options=player_ids, format_func=lambda i: player_options[i],
-            key="players_tab_select",
-        )
-        render_player_panel(
-            conn, selected_player_id, division_name_by_id, all_divisions_for_players, key_prefix="players_tab",
-            nav_ids=player_ids, nav_pending_key=pending_key,
+        st.header("Players")
+        st.caption(
+            "Player profiles are global — the same player keeps one profile across every division/season "
+            "they play in. Link a profile to a roster row (jersey number) in the Player Stats tab or Team "
+            "Rosters to attribute stats to a name."
         )
 
-    deleted_players = core.list_players(conn, include_deleted=True)
-    deleted_players = [p for p in deleted_players if p["deleted_at"]]
-    if deleted_players:
-        with st.expander(f"🗑️ Deleted Players ({len(deleted_players)})"):
-            for p in deleted_players:
-                dpcol1, dpcol2 = st.columns([4, 1])
-                with dpcol1:
-                    st.write(p["name"])
-                with dpcol2:
-                    if st.button("Restore", key=f"restore_player_{p['id']}"):
-                        core.restore_player(conn, p["id"])
-                        st.rerun()
+        all_divisions_for_players = core.list_divisions(conn)
+        division_name_by_id = {
+            d["id"]: f"{d['year']} {d['season']} — {division_label(d['age_group'])}" for d in all_divisions_for_players
+        }
+
+        with st.expander("➕ Add a new player"):
+            pn_name = st.text_input("Name", key="new_player_name")
+            pn_dob = st.text_input("Birth date", key="new_player_dob", placeholder="YYYY-MM-DD")
+            pn_division = st.selectbox(
+                "Current division", options=[None] + list(division_name_by_id),
+                format_func=lambda i: "(none)" if i is None else division_name_by_id[i],
+                key="new_player_division",
+            )
+            pcol1, pcol2 = st.columns(2)
+            pn_cfn = pcol1.text_input("Contact first name", key="new_player_cfn")
+            pn_cln = pcol2.text_input("Contact last name", key="new_player_cln")
+            pcol3, pcol4 = st.columns(2)
+            pn_cph = pcol3.text_input("Contact phone", key="new_player_cph")
+            pn_cem = pcol4.text_input("Contact email", key="new_player_cem")
+            if st.button("Add player", key="add_player_btn", type="primary"):
+                if pn_name.strip():
+                    core.add_player(
+                        conn, pn_name.strip(), birth_date=pn_dob.strip() or None,
+                        current_division_id=pn_division,
+                        contact_first_name=pn_cfn.strip() or None, contact_last_name=pn_cln.strip() or None,
+                        contact_phone=pn_cph.strip() or None, contact_email=pn_cem.strip() or None,
+                    )
+                    st.rerun()
+                else:
+                    st.error("Name is required.")
+
+        players_list = core.list_players(conn)
+        if not players_list:
+            st.write("No players yet — add one above.")
+        else:
+            player_options = {p["id"]: player_label(conn, p) for p in players_list}
+            player_ids = list(player_options)
+
+            # Previous/Next live inside render_player_panel, alongside Save/
+            # Delete/Evaluations, but that runs *after* this selectbox — so
+            # they can't write "players_tab_select" directly (Streamlit forbids
+            # touching a widget's session_state after it's been instantiated
+            # this run). They stash the target id here instead; applying it to
+            # the real widget key must happen before that widget is created.
+            pending_key = "players_tab_pending_select"
+            if pending_key in st.session_state:
+                st.session_state["players_tab_select"] = st.session_state.pop(pending_key)
+
+            selected_player_id = st.selectbox(
+                "Select a player", options=player_ids, format_func=lambda i: player_options[i],
+                key="players_tab_select",
+            )
+            render_player_panel(
+                conn, selected_player_id, division_name_by_id, all_divisions_for_players, key_prefix="players_tab",
+                nav_ids=player_ids, nav_pending_key=pending_key,
+            )
+
+        deleted_players = core.list_players(conn, include_deleted=True)
+        deleted_players = [p for p in deleted_players if p["deleted_at"]]
+        if deleted_players:
+            with st.expander(f"🗑️ Deleted Players ({len(deleted_players)})"):
+                for p in deleted_players:
+                    dpcol1, dpcol2 = st.columns([4, 1])
+                    with dpcol1:
+                        st.write(p["name"])
+                    with dpcol2:
+                        if st.button("Restore", key=f"restore_player_{p['id']}"):
+                            core.restore_player(conn, p["id"])
+                            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Tab 8: divisions
 # ---------------------------------------------------------------------------
 
 with tab_divisions:
-    header_col, recycle_col = st.columns([4, 1])
-    with header_col:
-        st.header("Divisions")
-    with recycle_col:
-        with st.popover("♻️ Recycle Bin"):
-            deleted_divisions = core.list_deleted_divisions(conn)
-            if not deleted_divisions:
-                st.write("Recycle bin is empty.")
-            else:
-                st.caption("Permanently deleted 30 days after removal, unless restored first.")
-                for d in deleted_divisions:
-                    rbcol1, rbcol2 = st.columns([4, 1])
-                    with rbcol1:
-                        st.write(
-                            f"{d['year']} {d['season']} — {division_label(d['age_group'])} "
-                            f"· {d['days_left']} days left"
-                        )
-                    with rbcol2:
-                        if st.button("Restore", key=f"restore_div_{d['id']}"):
-                            core.restore_division(conn, d["id"])
+    if "divisions" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+    else:
+        header_col, recycle_col = st.columns([4, 1])
+        with header_col:
+            st.header("Divisions")
+        with recycle_col:
+            with st.popover("♻️ Recycle Bin"):
+                deleted_divisions = core.list_deleted_divisions(conn)
+                if not deleted_divisions:
+                    st.write("Recycle bin is empty.")
+                else:
+                    st.caption("Permanently deleted 30 days after removal, unless restored first.")
+                    for d in deleted_divisions:
+                        rbcol1, rbcol2 = st.columns([4, 1])
+                        with rbcol1:
+                            st.write(
+                                f"{d['year']} {d['season']} — {division_label(d['age_group'])} "
+                                f"· {d['days_left']} days left"
+                            )
+                        with rbcol2:
+                            if st.button("Restore", key=f"restore_div_{d['id']}"):
+                                core.restore_division(conn, d["id"])
+                                st.rerun()
+
+        st.caption(
+            "A division is one season's instance of an age group, e.g. 2026 Summer Penguin (U10). "
+            "The same age group recurs as a new division every season. The Working Division picker "
+            "at the top right applies across the whole session and defaults new sheets' Division field."
+        )
+
+        divisions = core.list_divisions(conn)
+        if not divisions:
+            st.write("No divisions yet.")
+        else:
+            for d in divisions:
+                confirm_key = f"confirm_delete_div_{d['id']}"
+                dcol1, dcol2 = st.columns([5, 1])
+                with dcol1:
+                    st.write(f"**{d['year']} {d['season']}** — {division_label(d['age_group'])}")
+                with dcol2:
+                    if st.button("🗑️ Delete", key=f"delete_div_{d['id']}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+                if st.session_state.get(confirm_key):
+                    st.warning(
+                        f"Delete {d['year']} {d['season']} — {division_label(d['age_group'])}? "
+                        "It goes to the recycle bin for 30 days before being permanently removed."
+                    )
+                    ccol1, ccol2 = st.columns(2)
+                    with ccol1:
+                        if st.button("Yes, delete", key=f"confirm_yes_div_{d['id']}", type="primary"):
+                            core.soft_delete_division(conn, d["id"])
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                    with ccol2:
+                        if st.button("Cancel", key=f"confirm_no_div_{d['id']}"):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                st.divider()
+
+        with st.popover("➕ Add Division"):
+            render_add_division_form(conn)
+
+# ---------------------------------------------------------------------------
+# Tab 9: user management (admin only)
+# ---------------------------------------------------------------------------
+
+if user["is_admin"]:
+    with tab_users:
+        st.header("User Management")
+        st.caption(
+            "Admins always see every page, including this one, regardless of the checkboxes below. "
+            "Everyone else only sees the pages checked off for them."
+        )
+
+        active_users = core.list_users(conn)
+        deactivated_users = [u for u in core.list_users(conn, include_deleted=True) if u["deleted_at"]]
+        active_admin_count = sum(1 for u in active_users if u["is_admin"])
+
+        for row_user in active_users:
+            is_self = row_user["id"] == user["id"]
+            last_admin = is_self and row_user["is_admin"] and active_admin_count <= 1
+            label = row_user["display_name"] or row_user["email"]
+            with st.expander(f"{label} — {row_user['email']}" + (" (admin)" if row_user["is_admin"] else "")):
+                edit_name = st.text_input(
+                    "Display name", value=row_user["display_name"] or "", key=f"user_name_{row_user['id']}"
+                )
+                edit_admin = st.checkbox(
+                    "Admin (full access, including User Management)",
+                    value=row_user["is_admin"], key=f"user_admin_{row_user['id']}",
+                    disabled=last_admin,
+                    help="Can't remove the last admin's own admin access." if last_admin else None,
+                )
+                edit_pages = st.multiselect(
+                    "Pages", options=list(core.PAGES), default=row_user["pages"],
+                    format_func=lambda k: core.PAGES[k], key=f"user_pages_{row_user['id']}",
+                    disabled=edit_admin,
+                    help="Ignored while Admin is checked — admins get every page." if edit_admin else None,
+                )
+
+                save_col, reset_col, deactivate_col = st.columns(3)
+                with save_col:
+                    if st.button("Save", key=f"user_save_{row_user['id']}"):
+                        core.update_user(conn, row_user["id"], display_name=edit_name, is_admin=edit_admin)
+                        core.set_user_pages(conn, row_user["id"], edit_pages)
+                        st.success("Saved.")
+                        st.rerun()
+                with reset_col:
+                    reset_state_key = f"user_reset_pw_{row_user['id']}"
+                    if st.button("Generate new password", key=f"user_reset_btn_{row_user['id']}"):
+                        st.session_state[reset_state_key] = secrets.token_urlsafe(9)
+                    if st.session_state.get(reset_state_key):
+                        st.code(st.session_state[reset_state_key])
+                        if st.button("Apply this password", key=f"user_reset_confirm_{row_user['id']}"):
+                            core.set_user_password(conn, row_user["id"], st.session_state[reset_state_key])
+                            del st.session_state[reset_state_key]
+                            st.success("Password updated — share it with them directly; it won't be shown again.")
+                with deactivate_col:
+                    if st.button("Deactivate", key=f"user_deactivate_{row_user['id']}", disabled=last_admin):
+                        core.soft_delete_user(conn, row_user["id"])
+                        st.rerun()
+
+        if deactivated_users:
+            with st.popover(f"♻️ Deactivated users ({len(deactivated_users)})"):
+                for row_user in deactivated_users:
+                    dcol1, dcol2 = st.columns([4, 1])
+                    with dcol1:
+                        st.write(row_user["email"])
+                    with dcol2:
+                        if st.button("Reactivate", key=f"user_reactivate_{row_user['id']}"):
+                            core.restore_user(conn, row_user["id"])
                             st.rerun()
 
-    st.caption(
-        "A division is one season's instance of an age group, e.g. 2026 Summer Penguin (U10). "
-        "The same age group recurs as a new division every season. The Working Division picker "
-        "at the top right applies across the whole session and defaults new sheets' Division field."
-    )
+        st.divider()
+        with st.popover("➕ Add User"):
+            new_user_email = st.text_input("Email", key="new_user_email")
+            new_user_name = st.text_input("Display name (optional)", key="new_user_name")
 
-    divisions = core.list_divisions(conn)
-    if not divisions:
-        st.write("No divisions yet.")
-    else:
-        for d in divisions:
-            confirm_key = f"confirm_delete_div_{d['id']}"
-            dcol1, dcol2 = st.columns([5, 1])
-            with dcol1:
-                st.write(f"**{d['year']} {d['season']}** — {division_label(d['age_group'])}")
-            with dcol2:
-                if st.button("🗑️ Delete", key=f"delete_div_{d['id']}"):
-                    st.session_state[confirm_key] = True
-                    st.rerun()
-            if st.session_state.get(confirm_key):
-                st.warning(
-                    f"Delete {d['year']} {d['season']} — {division_label(d['age_group'])}? "
-                    "It goes to the recycle bin for 30 days before being permanently removed."
+            gen_col, pw_col = st.columns([1, 3])
+            with gen_col:
+                st.write("")  # vertical alignment nudge next to the text input below
+                if st.button("Generate", key="new_user_gen_pw"):
+                    st.session_state["new_user_password"] = secrets.token_urlsafe(9)
+            with pw_col:
+                new_user_password = st.text_input(
+                    "Temporary password", key="new_user_password",
+                    help="There's no email delivery — share this with them directly. "
+                         "They can be given a way to change it later.",
                 )
-                ccol1, ccol2 = st.columns(2)
-                with ccol1:
-                    if st.button("Yes, delete", key=f"confirm_yes_div_{d['id']}", type="primary"):
-                        core.soft_delete_division(conn, d["id"])
-                        st.session_state.pop(confirm_key, None)
-                        st.rerun()
-                with ccol2:
-                    if st.button("Cancel", key=f"confirm_no_div_{d['id']}"):
-                        st.session_state.pop(confirm_key, None)
-                        st.rerun()
-            st.divider()
 
-    with st.popover("➕ Add Division"):
-        render_add_division_form(conn)
+            new_user_is_admin = st.checkbox("Admin (full access)", key="new_user_is_admin")
+            new_user_pages = st.multiselect(
+                "Pages", options=list(core.PAGES), format_func=lambda k: core.PAGES[k],
+                key="new_user_pages", disabled=new_user_is_admin,
+            )
+
+            if st.button("Create User", type="primary", key="create_user_btn"):
+                if not new_user_email.strip() or "@" not in new_user_email:
+                    st.error("Enter a valid email address.")
+                elif not new_user_password:
+                    st.error("Set a temporary password (or click Generate).")
+                elif core.get_user_by_email(conn, new_user_email):
+                    st.error("A user with that email already exists.")
+                else:
+                    core.add_user(
+                        conn, new_user_email, new_user_password, display_name=new_user_name,
+                        is_admin=new_user_is_admin, pages=new_user_pages,
+                    )
+                    st.success(f"Created {new_user_email}. Share the temporary password with them directly.")
+                    for _k in ("new_user_email", "new_user_name", "new_user_password",
+                               "new_user_is_admin", "new_user_pages"):
+                        st.session_state.pop(_k, None)
+                    st.rerun()

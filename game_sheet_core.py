@@ -1388,6 +1388,16 @@ def player_division_history(conn: PGConnection, player_id: int) -> list[dict]:
     ]
 
 
+def list_evaluated_player_ids(conn: PGConnection, division_id: int) -> set[int]:
+    """Every player_id with at least one evaluation recorded for this
+    division — used to filter for "has a rating on file for division X",
+    e.g. checking who was already evaluated in a past season."""
+    rows = conn.execute(
+        "SELECT DISTINCT player_id FROM evaluations WHERE division_id = %s", (division_id,)
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
 # ---------------------------------------------------------------------------
 # Coaches (global; assigned to a team, which anchors them to one division)
 # ---------------------------------------------------------------------------

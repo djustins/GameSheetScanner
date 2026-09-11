@@ -33,6 +33,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
+import altair as alt
 import anthropic
 import pandas as pd
 import streamlit as st
@@ -57,6 +58,18 @@ st.set_page_config(
 )
 
 SIDES = ["home", "away"]
+
+# Chronological ordering for divisions that share the same year, used to
+# sort a player's evaluation history for the progress chart — divisions
+# don't otherwise carry a strict within-year order.
+SEASON_ORDER = {"Spring": 0, "Summer": 1, "Fall": 2, "Winter": 3}
+
+# Evaluation grades this league actually uses as a skill tier, best to
+# worst — plotted as an ordinal axis (this order = top to bottom) so
+# "progress" reads without guessing at a numeric scale. Anything else (a
+# position note like "Goalie", a status like "New") isn't a tier and is
+# left off the chart, though it still shows in the evaluations list.
+GRADE_TIERS = ["A", "B", "C", "D"]
 
 # Team Pittsburgh Ball Hockey's actual black/gold/white branding (teampgh.com):
 # gold nav/accent bars and buttons, black hero sections, white content areas,
@@ -698,6 +711,49 @@ def confirm_delete_player_dialog(key_prefix: str, player_id: int, player_name: s
             st.rerun()
 
 
+def render_evaluation_progress_chart(evaluations: list[dict]):
+    """A small line+point chart of a player's graded evaluation history
+    across every division/season they've been rated in — so progress (or
+    regression) is visible at a glance instead of scanning a popover list.
+    Only evaluations whose grade is one of the league's actual skill tiers
+    (GRADE_TIERS) are plotted; a position note like "Goalie" or a status
+    like "New" isn't a point on a skill axis and is left off, though it's
+    still visible in the Evaluations popover's full list. Needs at least 2
+    graded seasons to be worth showing as a trend."""
+    tiered = [e for e in evaluations if e["grade"] and e["grade"].strip().upper() in GRADE_TIERS]
+    if len(tiered) < 2:
+        return
+
+    rows = [
+        {
+            "season_label": f"{e['year']} {e['season']}",
+            "sort_key": (e["year"], SEASON_ORDER.get(e["season"], 99)),
+            "grade": e["grade"].strip().upper(),
+            "division": f"{e['year']} {e['season']} — {division_label(e['age_group'])}",
+        }
+        for e in tiered
+    ]
+    rows.sort(key=lambda r: r["sort_key"])
+    # Dedupe consecutive same-season entries (e.g. a grade edited more than
+    # once) down to the latest, keeping this a one-point-per-season trend.
+    by_season = {r["season_label"]: r for r in rows}
+    df = pd.DataFrame(by_season.values())
+    season_order = list(by_season)
+
+    st.caption("Evaluation progress over time")
+    chart = (
+        alt.Chart(df)
+        .mark_line(point={"size": 80, "filled": True}, strokeWidth=2, color="#FFC72C")
+        .encode(
+            x=alt.X("season_label:N", sort=season_order, title=None, axis=alt.Axis(labelAngle=-30)),
+            y=alt.Y("grade:O", sort=GRADE_TIERS, scale=alt.Scale(domain=GRADE_TIERS), title=None),
+            tooltip=[alt.Tooltip("division:N", title="Division"), alt.Tooltip("grade:N", title="Grade")],
+        )
+        .properties(height=180)
+    )
+    st.altair_chart(chart, width="stretch")
+
+
 def render_player_panel(
     conn, player_id: int, division_name_by_id: dict, all_divisions: list[dict], key_prefix: str,
     nav_ids: list[int] | None = None, nav_pending_key: str | None = None,
@@ -871,6 +927,8 @@ def render_player_panel(
             ):
                 st.session_state[nav_pending_key] = nav_ids[nav_idx + 1]
                 st.rerun()
+
+    render_evaluation_progress_chart(evaluations)
 
 
 # ---------------------------------------------------------------------------
@@ -1537,7 +1595,7 @@ with tab_stats:
         st.header("Player Stats")
         stats = core.get_player_stats(conn, working_division_id) if working_division_id is not None else []
         if not stats:
-            st.write("No players in the roster yet — add some in the Team Rosters tab.")
+            st.write("No stats collected for this division yet.")
         else:
             stats = sorted(stats, key=lambda s: (-s["points"], -s["goals"]))
             all_divisions_for_stats = core.list_divisions(conn)
@@ -1792,27 +1850,59 @@ with tab_players:
         if not players_list:
             st.write("No players yet — add one above.")
         else:
-            player_options = {p["id"]: player_label(conn, p) for p in players_list}
-            player_ids = list(player_options)
+            filter_col1, filter_col2, filter_col3 = st.columns([2, 1.5, 1.5])
+            with filter_col1:
+                name_filter = st.text_input("Search by name", key="players_tab_name_filter")
+            with filter_col2:
+                division_filter = st.selectbox(
+                    "Current division", options=[None] + list(division_name_by_id),
+                    format_func=lambda i: "All divisions" if i is None else division_name_by_id[i],
+                    key="players_tab_division_filter",
+                )
+            with filter_col3:
+                eval_filter = st.selectbox(
+                    "Has an evaluation for", options=[None] + list(division_name_by_id),
+                    format_func=lambda i: "Any / no filter" if i is None else division_name_by_id[i],
+                    key="players_tab_eval_filter",
+                    help="e.g. pick a past season's division to find players who were already rated then.",
+                )
 
-            # Previous/Next live inside render_player_panel, alongside Save/
-            # Delete/Evaluations, but that runs *after* this selectbox — so
-            # they can't write "players_tab_select" directly (Streamlit forbids
-            # touching a widget's session_state after it's been instantiated
-            # this run). They stash the target id here instead; applying it to
-            # the real widget key must happen before that widget is created.
-            pending_key = "players_tab_pending_select"
-            if pending_key in st.session_state:
-                st.session_state["players_tab_select"] = st.session_state.pop(pending_key)
+            filtered_players = players_list
+            if name_filter.strip():
+                needle = name_filter.strip().lower()
+                filtered_players = [p for p in filtered_players if needle in p["name"].lower()]
+            if division_filter is not None:
+                filtered_players = [p for p in filtered_players if p["current_division_id"] == division_filter]
+            if eval_filter is not None:
+                evaluated_ids = core.list_evaluated_player_ids(conn, eval_filter)
+                filtered_players = [p for p in filtered_players if p["id"] in evaluated_ids]
 
-            selected_player_id = st.selectbox(
-                "Select a player", options=player_ids, format_func=lambda i: player_options[i],
-                key="players_tab_select",
-            )
-            render_player_panel(
-                conn, selected_player_id, division_name_by_id, all_divisions_for_players, key_prefix="players_tab",
-                nav_ids=player_ids, nav_pending_key=pending_key,
-            )
+            st.caption(f"Showing {len(filtered_players)} of {len(players_list)} players.")
+
+            if not filtered_players:
+                st.write("No players match these filters.")
+            else:
+                player_options = {p["id"]: player_label(conn, p) for p in filtered_players}
+                player_ids = list(player_options)
+
+                # Previous/Next live inside render_player_panel, alongside Save/
+                # Delete/Evaluations, but that runs *after* this selectbox — so
+                # they can't write "players_tab_select" directly (Streamlit forbids
+                # touching a widget's session_state after it's been instantiated
+                # this run). They stash the target id here instead; applying it to
+                # the real widget key must happen before that widget is created.
+                pending_key = "players_tab_pending_select"
+                if pending_key in st.session_state:
+                    st.session_state["players_tab_select"] = st.session_state.pop(pending_key)
+
+                selected_player_id = st.selectbox(
+                    "Select a player", options=player_ids, format_func=lambda i: player_options[i],
+                    key="players_tab_select",
+                )
+                render_player_panel(
+                    conn, selected_player_id, division_name_by_id, all_divisions_for_players,
+                    key_prefix="players_tab", nav_ids=player_ids, nav_pending_key=pending_key,
+                )
 
         deleted_players = core.list_players(conn, include_deleted=True)
         deleted_players = [p for p in deleted_players if p["deleted_at"]]

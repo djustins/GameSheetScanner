@@ -760,6 +760,51 @@ def render_evaluation_progress_chart(evaluations: list[dict]):
     st.altair_chart(chart, width="stretch")
 
 
+def render_player_stats_summary(conn, player_id: int):
+    """A compact per-division stat line (goals/assists/points/PIM/
+    shootout) for every division this player has game-derived stats in —
+    shown alongside the evaluation chart so grades and on-ice performance
+    read together instead of needing a trip to the Player Stats tab.
+    Evaluation-only divisions (rated but never rostered onto a team with
+    games — e.g. an off-season tryout cycle) simply have no stats here,
+    same as they'd have none in Player Stats. One division needs no tabs;
+    more than one gets a tab per division."""
+    history = core.player_division_history(conn, player_id)
+    if not history:
+        return
+
+    per_division = []
+    for h in history:
+        row = next(
+            (s for s in core.get_player_stats(conn, h["division_id"]) if s["player_id"] == player_id), None
+        )
+        if row is not None:
+            per_division.append((h, row))
+    if not per_division:
+        return
+
+    def _render_stat_row(row: dict):
+        cols = st.columns(6)
+        values = [
+            ("Goals", row["goals"]), ("Assists", row["assists"]), ("Points", row["points"]),
+            ("PIM", row["penalties"]), ("SO Made", row["shootout_goals"]), ("SO Missed", row["shootout_misses"]),
+        ]
+        for col, (label, value) in zip(cols, values):
+            col.metric(label, value)
+
+    st.caption("Stats by division")
+    if len(per_division) == 1:
+        h, row = per_division[0]
+        st.write(f"{h['year']} {h['season']} — {division_label(h['age_group'])} ({h['team_name']} #{h['number']})")
+        _render_stat_row(row)
+    else:
+        stat_tabs = st.tabs([f"{h['year']} {h['season']}" for h, _ in per_division])
+        for stat_tab, (h, row) in zip(stat_tabs, per_division):
+            with stat_tab:
+                st.write(f"{division_label(h['age_group'])} — {h['team_name']} #{h['number']}")
+                _render_stat_row(row)
+
+
 def render_player_panel(
     conn, player_id: int, division_name_by_id: dict, all_divisions: list[dict], key_prefix: str,
     nav_ids: list[int] | None = None, nav_pending_key: str | None = None,
@@ -935,6 +980,7 @@ def render_player_panel(
                 st.rerun()
 
     render_evaluation_progress_chart(evaluations)
+    render_player_stats_summary(conn, player_id)
 
 
 # ---------------------------------------------------------------------------

@@ -7,14 +7,16 @@ id, then --game-id to open its full record (game info, goals, penalties,
 shootout attempts) in a text editor and save your corrections back to the DB.
 
 Usage:
-    python edit_game.py --list --db hockey.db
-    python edit_game.py --game-id 5 --db hockey.db
+    export DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+    python edit_game.py --list
+    python edit_game.py --game-id 5
 
 Requires:
     (only what process_game_sheet.py already needs — no extra installs)
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -45,15 +47,15 @@ def print_games_table(conn):
 
 def main():
     parser = argparse.ArgumentParser(description="Edit a game record already stored in the database.")
-    parser.add_argument("--db", default="hockey.db", help="Path to SQLite database file (default: hockey.db)")
     parser.add_argument("--list", action="store_true", help="List games and their ids, then exit")
     parser.add_argument("--game-id", type=int, help="id of the game to edit (see --list)")
     args = parser.parse_args()
 
-    if not Path(args.db).exists():
-        sys.exit(f"Error: database not found: {args.db}")
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        sys.exit("Error: set the DATABASE_URL environment variable first.")
 
-    conn = init_db(args.db)
+    conn = init_db(dsn)
 
     if args.list:
         print_games_table(conn)
@@ -69,7 +71,7 @@ def main():
         sys.exit(f"Error: no game with id={args.game_id}")
 
     division_row = conn.execute(
-        "SELECT division_id FROM games WHERE id = ?", (args.game_id,)
+        "SELECT division_id FROM games WHERE id = %s", (args.game_id,)
     ).fetchone()
     working_division_id = division_row[0]
 

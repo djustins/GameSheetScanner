@@ -1,7 +1,7 @@
-# Ball Hockey Game Sheet → SQLite
+# Ball Hockey Game Sheet → PostgreSQL
 
 Scans handwritten Team Pittsburgh Ball Hockey game sheets (PDF or photo) and stores
-the stats — goals, assists, penalties, shootout results — in a local SQLite database.
+the stats — goals, assists, penalties, shootout results — in a PostgreSQL database.
 
 **This is a Streamlit web app.** Run it with `streamlit run app.py`, not as a
 standalone Python script — running `app.py` directly with `python` will not work.
@@ -15,7 +15,7 @@ standalone Python script — running `app.py` directly with `python` will not wo
    detail, penalties, and shootout rounds (circled numbers = goals).
 3. The extraction opens in an editable form so you can review and correct it before
    saving — nothing is written to the database until you confirm.
-4. Confirmed data is inserted into `hockey.db`. The app also has standings, player
+4. Confirmed data is inserted into Postgres. The app also has standings, player
    stats, team rosters, an Excel export, and a Schedule tab: upload a season-schedule
    CSV once and it's saved to the database, then compared against stored games (by
    date and matchup) every time you view it — so which games still need a sheet stays
@@ -25,7 +25,22 @@ standalone Python script — running `app.py` directly with `python` will not wo
 
 ```bash
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...    # your own API key
+```
+
+Then create a `.env` file in the project root (loaded automatically on startup —
+never overrides a variable already set in the real environment):
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...    # your own API key
+DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+# or individually: PGHOST / PGDATABASE / PGUSER / PGPASSWORD / PGPORT / PGSSLMODE
+```
+
+The schema (`schema_postgres.sql`) is created automatically on first connect.
+Migrating an existing `hockey.db` (SQLite) into a fresh Postgres database:
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py path/to/hockey.db
 ```
 
 ## Usage
@@ -46,20 +61,20 @@ scripting:
 
 ```bash
 # Process one sheet, reviewing before it's saved
-python process_game_sheet.py game1.pdf --db hockey.db
+python process_game_sheet.py game1.pdf
 
 # Process a whole folder's worth at once
-python process_game_sheet.py scans/*.pdf --db hockey.db
+python process_game_sheet.py scans/*.pdf
 
 # Skip the review step (trust the extraction, insert directly)
-python process_game_sheet.py game1.pdf --db hockey.db --no-review
+python process_game_sheet.py game1.pdf --no-review
 
 # List stored games and their ids, then correct one from the terminal
-python edit_game.py --list --db hockey.db
-python edit_game.py --game-id 5 --db hockey.db
+python edit_game.py --list
+python edit_game.py --game-id 5
 ```
 
-## Database layout (`schema.sql`)
+## Database layout (`schema_postgres.sql`)
 
 - **games** — one row per sheet: date, division, home/away team & color, final scores,
   whether it went to a shootout, and the source filename (also prevents double-entry
@@ -79,7 +94,7 @@ python edit_game.py --game-id 5 --db hockey.db
 
 - Handwriting extraction won't be perfect every time — that's what the review step
   is for. If a field is unreadable, the script will fill in `"?"` rather than guess.
-- Re-running the same file against the same `--db` is safe for the `games` row
+- Re-running the same file against the same database is safe for the `games` row
   (it won't create a duplicate game), but if you edit-and-reinsert, it will add a
   *second* set of goals/penalties/shootout rows for that game — delete the old rows
   first if you're correcting an already-stored sheet.

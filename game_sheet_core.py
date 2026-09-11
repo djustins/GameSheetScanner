@@ -4,7 +4,8 @@ game_sheet_core.py
 
 Framework-agnostic core for the Team Pittsburgh Ball Hockey game sheet
 pipeline: calling Claude for handwriting extraction, computing the game
-winner, splitting multi-page PDFs, and reading/writing the SQLite database.
+winner, splitting multi-page PDFs, and reading/writing the PostgreSQL
+database.
 
 Nothing here depends on a CLI (argparse/input/print), a GUI (tkinter), or a
 web framework (Streamlit/Flask) — it's the shared logic that every front end
@@ -16,15 +17,30 @@ import difflib
 import functools
 import json
 import mimetypes
-import sqlite3
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
 import anthropic
+import psycopg2
+from dotenv import load_dotenv
 from pypdf import PdfReader, PdfWriter
 
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+# Load variables from a local .env file (e.g. DATABASE_URL, ANTHROPIC_API_KEY)
+# into the process environment, so every front end that imports this module
+# (app.py, process_game_sheet.py, edit_game.py, scripts/migrate_*.py) picks
+# them up without each having to remember to load it separately. Never
+# overrides a variable that's already set in the real environment (e.g. one
+# exported by the shell or set by a deployment platform), so .env is purely
+# a local-dev convenience and production config always wins.
+load_dotenv()
+
+# Type-hint alias only (a plain psycopg2 connection, wrapped by _ConnWrapper
+# below at runtime) — kept as a string so this module doesn't need
+# psycopg2.extensions imported just for annotations.
+PGConnection = "psycopg2.extensions.connection"
+
+SCHEMA_PATH = Path(__file__).parent / "schema_postgres.sql"
 MODEL = "claude-sonnet-4-6"
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
@@ -172,7 +188,7 @@ def normalize_division(value: str | None) -> str | None:
     return normalize_text(matched) if matched else normalize_text(value)
 
 
-def match_team_name(conn: sqlite3.Connection, division_id: int, value: str | None) -> str | None:
+def match_team_name(conn: PGConnection, division_id: int, value: str | None) -> str | None:
     """Best-effort match of free text (extraction/typos) to a team already in
     this division, e.g. "Avachale" -> "Avalanche". Returns None if there's no
     confident match (including when this division has no teams yet)."""
@@ -181,7 +197,7 @@ def match_team_name(conn: sqlite3.Connection, division_id: int, value: str | Non
     value = value.strip()
     existing = [
         row[0] for row in conn.execute(
-            "SELECT name FROM teams WHERE division_id = ?", (division_id,)
+            "SELECT name FROM teams WHERE division_id = %s", (division_id,)
         ).fetchall()
     ]
     if not existing:
@@ -193,7 +209,7 @@ def match_team_name(conn: sqlite3.Connection, division_id: int, value: str | Non
     return display_text(match) if match else None
 
 
-def normalize_team_name(conn: sqlite3.Connection, division_id: int, value: str | None) -> str | None:
+def normalize_team_name(conn: PGConnection, division_id: int, value: str | None) -> str | None:
     """Storage form for a team name field: auto-corrected to an existing team
     in this division (fuzzy-matched) when there's a confident match, else
     just lowercased/trimmed like any other identity field so unrecognized
@@ -410,312 +426,98 @@ def split_pdf_bytes(data: bytes) -> list[bytes]:
 # Database
 # ---------------------------------------------------------------------------
 
-def init_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.executescript(SCHEMA_PATH.read_text())
-    _migrate(conn)
+
+class _ConnWrapper:
+    """Wraps a psycopg2 connection with the sqlite3-style `conn.execute(...)`
+    shortcut (opening a fresh cursor per call and returning it so
+    `.fetchall()`/`.fetchone()` can be chained directly) that every query in
+    this file is already written against. Ported from sqlite3, where that
+    shortcut is built in — psycopg2 requires an explicit cursor. This keeps
+    the ~130 query call sites in this file unchanged in shape; only their
+    `?` placeholders become `%s` and a handful of call sites that relied on
+    sqlite3-only features (`cur.lastrowid`, `conn.total_changes`) are
+    rewritten to use `RETURNING` instead."""
+
+    def __init__(self, pg_conn):
+        self._conn = pg_conn
+
+    def execute(self, sql: str, params=()):
+        cur = self._conn.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def cursor(self):
+        return self._conn.cursor()
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+
+def _apply_schema(conn: _ConnWrapper):
+    """Run schema_postgres.sql's CREATE TABLE/VIEW IF NOT EXISTS statements.
+    psycopg2 has no equivalent of sqlite3's executescript() (multi-statement
+    exec in one call), so this strips `--` line comments (several of which
+    contain a literal ';', e.g. "soft-deleted; purged 30 days later" — left
+    in, a naive split would break a CREATE TABLE mid-statement there) and
+    then splits what's left on top-level `;` — safe here since the schema
+    file has no semicolons inside string literals or function bodies."""
+    lines = []
+    for line in SCHEMA_PATH.read_text().splitlines():
+        comment_at = line.find("--")
+        lines.append(line[:comment_at] if comment_at != -1 else line)
+    for statement in "\n".join(lines).split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
     conn.commit()
+
+
+def init_db(dsn: str) -> _ConnWrapper:
+    """Connect to the Postgres database identified by dsn (a full connection
+    string / DSN, e.g. "postgresql://user:pass@host:port/dbname?sslmode=require"),
+    ensure the schema exists, and purge any long-expired soft-deleted
+    divisions (see purge_expired_divisions)."""
+    conn = _ConnWrapper(psycopg2.connect(dsn))
+    _apply_schema(conn)
+    purge_expired_divisions(conn)
     return conn
 
 
-def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+def get_setting(conn: PGConnection, key: str) -> str | None:
     """A durable (survives a restart) app-level preference, e.g. the
-    last-selected Working Division — stored in this database file itself
-    rather than session state, which resets every new browser session."""
-    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    last-selected Working Division — stored in the database itself rather
+    than session state, which resets every new browser session."""
+    row = conn.execute("SELECT value FROM app_settings WHERE key = %s", (key,)).fetchone()
     return row[0] if row else None
 
 
-def set_setting(conn: sqlite3.Connection, key: str, value: str):
+def set_setting(conn: PGConnection, key: str, value: str):
     conn.execute(
-        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "INSERT INTO app_settings (key, value) VALUES (%s, %s) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
     conn.commit()
 
 
-def _migrate(conn: sqlite3.Connection):
-    """Add columns to a database created before they existed in schema.sql,
-    make every game/team belong to a division (fully isolating each
-    division's games/teams/rosters from every other), and make sure every
-    team seen in games has a row in the teams table.
-
-    Foreign keys are switched off for the duration: several steps here
-    rebuild a table (rename-create-copy-drop, since SQLite can't ALTER a
-    UNIQUE constraint or add a NOT NULL FK column in place), and SQLite's
-    DROP TABLE looks up a to-be-dropped table's own FK targets even with
-    nothing depending on it — if an earlier interrupted run (e.g. a
-    concurrent process reloading this file mid-edit) left a stale
-    intermediate table referenced elsewhere, that lookup fails with a
-    misleading "no such table" unless enforcement is off during cleanup."""
-    conn.execute("PRAGMA foreign_keys = OFF")
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(games)")}
-    if "winner" not in cols:
-        conn.execute("ALTER TABLE games ADD COLUMN winner TEXT")
-    if "ot_winner" not in cols:
-        conn.execute("ALTER TABLE games ADD COLUMN ot_winner TEXT")
-    if "ot_loser" not in cols:
-        conn.execute("ALTER TABLE games ADD COLUMN ot_loser TEXT")
-    if "division_id" not in cols:
-        conn.execute("ALTER TABLE games ADD COLUMN division_id INTEGER REFERENCES divisions(id)")
-
-    division_cols = {row[1] for row in conn.execute("PRAGMA table_info(divisions)")}
-    if "deleted_at" not in division_cols:
-        conn.execute("ALTER TABLE divisions ADD COLUMN deleted_at TEXT")
-
-    _migrate_players_split(conn)
-
-    # Seed the division the existing (pre-division-scoping) data belongs to,
-    # and use its id to backfill anything that predates division scoping —
-    # but only when there's actually legacy data to migrate, so a brand-new,
-    # division-less database doesn't get seeded with a division nobody asked
-    # for (that used to happen unconditionally on every init_db() call).
-    needs_legacy_division = (
-        "division_id" not in {row[1] for row in conn.execute("PRAGMA table_info(teams)")}
-        or conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='teams_old'"
-        ).fetchone() is not None
-        or conn.execute("SELECT 1 FROM games WHERE division_id IS NULL LIMIT 1").fetchone() is not None
-    )
-    default_division_id = None
-    if needs_legacy_division:
-        default_division_id = add_division(conn, 2026, "Summer", "Penguin", "U10")
-        _migrate_teams_division_id(conn, default_division_id)
-
-    _fix_dangling_fks(conn)
-    _merge_duplicate_teams(conn)
-    _normalize_identity_case(conn)
-    _normalize_dates(conn)
-    _fix_division_typos(conn)
-
-    if default_division_id is not None:
-        conn.execute("UPDATE games SET division_id = ? WHERE division_id IS NULL", (default_division_id,))
-
-    # Auto-register any team appearing in games but not yet in teams, scoped
-    # to that same game's division.
-    conn.execute(
-        """INSERT OR IGNORE INTO teams (division_id, name)
-           SELECT division_id, home_team FROM games
-           WHERE division_id IS NOT NULL AND home_team IS NOT NULL AND home_team <> ''
-           UNION
-           SELECT division_id, away_team FROM games
-           WHERE division_id IS NOT NULL AND away_team IS NOT NULL AND away_team <> ''"""
-    )
-
-    # Defensive cleanup: roster_entries referencing a team_id that no longer
-    # exists (e.g. a team row recreated with a new id after being rebuilt)
-    # would otherwise sit invisible to every join and never get cleaned up.
-    conn.execute("DELETE FROM roster_entries WHERE team_id NOT IN (SELECT id FROM teams)")
-
-    # Recycle bin: divisions soft-deleted more than 30 days ago are purged
-    # for good every time the app connects.
-    purge_expired_divisions(conn)
-
-    # Backfill winner/ot_winner/ot_loser for rows inserted before those columns
-    # existed — otherwise they'd silently drop out of standings.
-    stale = conn.execute(
-        "SELECT id, home_final_score, away_final_score FROM games WHERE winner IS NULL"
-    ).fetchall()
-    for game_id, home_score, away_score in stale:
-        shootout = conn.execute(
-            "SELECT side, scored FROM shootout_attempts WHERE game_id = ?", (game_id,)
-        ).fetchall()
-        data = {
-            "home_final_score": home_score, "away_final_score": away_score,
-            "shootout_attempts": [{"side": s, "scored": bool(sc)} for s, sc in shootout],
-        }
-        winner = compute_winner(data)
-        if winner is None:
-            continue
-        ot_winner, ot_loser = compute_ot_result(data)
-        conn.execute(
-            "UPDATE games SET winner = ?, ot_winner = ?, ot_loser = ? WHERE id = ?",
-            (winner, ot_winner, ot_loser, game_id),
-        )
-
-    # Re-check ot_winner/ot_loser for games that went to a shootout but got
-    # stuck with ot_winner=NULL under an older, too-strict compute_ot_result
-    # that required the score to be an exact tie — it now also accepts the
-    # shootout winner's score shown one goal ahead (e.g. "5-4" for a game
-    # that was really 4-4 before the shootout), the standard box-score
-    # convention. Without this, those games kept counting as a plain
-    # regulation win/loss (3/0 points) instead of a shootout win/loss (2/1),
-    # and never showed up in the OTW/OTL standings columns.
-    shootout_games = conn.execute(
-        "SELECT id, home_final_score, away_final_score, winner FROM games "
-        "WHERE went_to_shootout = 1 AND ot_winner IS NULL"
-    ).fetchall()
-    for game_id, home_score, away_score, winner in shootout_games:
-        shootout = conn.execute(
-            "SELECT side, scored FROM shootout_attempts WHERE game_id = ?", (game_id,)
-        ).fetchall()
-        data = {
-            "home_final_score": home_score, "away_final_score": away_score, "winner": winner,
-            "shootout_attempts": [{"side": s, "scored": bool(sc)} for s, sc in shootout],
-        }
-        ot_winner, ot_loser = compute_ot_result(data)
-        if ot_winner:
-            conn.execute(
-                "UPDATE games SET ot_winner = ?, ot_loser = ? WHERE id = ?",
-                (ot_winner, ot_loser, game_id),
-            )
-
-    # Backfill roster entries for players who appeared in games scanned
-    # before auto-registration existed.
-    for game_id, division_id in conn.execute("SELECT id, division_id FROM games").fetchall():
-        game_data, _ = load_game(conn, game_id)
-        if game_data and division_id:
-            register_players_from_game(conn, game_data, division_id)
-
-    conn.commit()
-    conn.execute("PRAGMA foreign_keys = ON")
-
-
-def _migrate_players_split(conn: sqlite3.Connection):
-    """Before division-scoping and the global player-profile table existed,
-    "players" WAS the per-team jersey-number roster table (team_id, number,
-    name). schema.sql's CREATE TABLE IF NOT EXISTS leaves that old table
-    alone (so "players" ends up holding old roster data under a name now
-    meant for global profiles) while creating an empty new roster_entries —
-    detect the old shape and rename/rebuild so existing rosters land in
-    roster_entries and "players" becomes the real (empty, to be populated)
-    global profile table."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(players)")}
-    if "team_id" not in cols:
-        return
-    conn.execute("DROP TABLE IF EXISTS roster_entries")
-    conn.execute("ALTER TABLE players RENAME TO roster_entries")
-    conn.execute(
-        """CREATE TABLE players (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            name                 TEXT NOT NULL,
-            birth_date           TEXT,
-            current_division_id  INTEGER REFERENCES divisions(id),
-            contact_first_name   TEXT,
-            contact_last_name    TEXT,
-            contact_phone        TEXT,
-            contact_email        TEXT,
-            deleted_at           TEXT,
-            created_at           TEXT DEFAULT CURRENT_TIMESTAMP
-        )"""
-    )
-    re_cols = {row[1] for row in conn.execute("PRAGMA table_info(roster_entries)")}
-    if "player_id" not in re_cols:
-        conn.execute("ALTER TABLE roster_entries ADD COLUMN player_id INTEGER REFERENCES players(id)")
-
-
-def _migrate_teams_division_id(conn: sqlite3.Connection, default_division_id: int):
-    """One-time rebuild adding teams.division_id (SQLite can't ALTER a UNIQUE
-    constraint in place), for a database created before teams were scoped per
-    division. Every existing team is assigned to the division the existing
-    data belongs to, *keeping its original id* so roster_entries.team_id
-    still points at the right team afterwards.
-
-    Also finishes this same rebuild if it was left half-done: a "teams_old"
-    table still present means an earlier run renamed teams away, copied its
-    rows into the new teams table, but crashed (or was interrupted by a
-    concurrent process reloading mid-refactor) before dropping teams_old —
-    in which case teams may already have the new shape, but teams_old's
-    original rows (and ids) haven't actually been copied in and dropped yet."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(teams)")}
-    has_teams_old = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='teams_old'"
-    ).fetchone() is not None
-
-    if "division_id" not in cols:
-        conn.execute("ALTER TABLE teams RENAME TO teams_old")
-        conn.execute(
-            """CREATE TABLE teams (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                division_id INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
-                name        TEXT NOT NULL,
-                UNIQUE(division_id, name)
-            )"""
-        )
-        has_teams_old = True
-
-    if has_teams_old:
-        conn.execute(
-            "INSERT OR IGNORE INTO teams (id, division_id, name) SELECT id, ?, name FROM teams_old",
-            (default_division_id,),
-        )
-        conn.execute("DROP TABLE teams_old")
-
-
-def _fix_dangling_fks(conn: sqlite3.Connection):
-    """Repair any table whose foreign key is left pointing at a stale
-    intermediate table name (e.g. "teams_old") from an earlier table rebuild
-    elsewhere in this migration. SQLite's ALTER TABLE RENAME rewrites every
-    *other* table's FK text to follow along whenever the table it points at
-    is renamed — so renaming teams -> teams_old (mid-rebuild) silently
-    rewrites roster_entries/team_coaches/evaluations' FKs to say
-    "teams_old" too, and if that rebuild is then interrupted (e.g. a
-    concurrent process reloading this file mid-refactor) before the rename
-    is undone, those tables are left referencing a name that's since been
-    dropped — which then fails every future INSERT into them with a
-    misleading "FOREIGN KEY constraint failed". Each affected table is
-    rebuilt from its correct (schema.sql) definition, dropping only rows
-    whose reference genuinely no longer resolves."""
-    repairs = {
-        "roster_entries": (
-            """CREATE TABLE roster_entries (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                team_id    INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-                number     TEXT NOT NULL,
-                name       TEXT NOT NULL,
-                player_id  INTEGER REFERENCES players(id) ON DELETE SET NULL,
-                UNIQUE(team_id, number)
-            )""",
-            "id, team_id, number, name, player_id",
-            "team_id IN (SELECT id FROM teams)",
-        ),
-        "team_coaches": (
-            """CREATE TABLE team_coaches (
-                team_id   INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-                coach_id  INTEGER NOT NULL REFERENCES coaches(id) ON DELETE CASCADE,
-                PRIMARY KEY (team_id, coach_id)
-            )""",
-            "team_id, coach_id",
-            "team_id IN (SELECT id FROM teams) AND coach_id IN (SELECT id FROM coaches)",
-        ),
-        "evaluations": (
-            """CREATE TABLE evaluations (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                player_id    INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-                division_id  INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
-                team_id      INTEGER REFERENCES teams(id) ON DELETE SET NULL,
-                grade        TEXT,
-                created_at   TEXT DEFAULT CURRENT_TIMESTAMP
-            )""",
-            "id, player_id, division_id, team_id, grade, created_at",
-            "player_id IN (SELECT id FROM players) AND division_id IN (SELECT id FROM divisions)",
-        ),
-    }
-    for table, (create_sql, columns, valid_where) in repairs.items():
-        fks = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
-        existing_tables = {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        if all(fk[2] in existing_tables for fk in fks):
-            continue
-        conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old_fk")
-        conn.execute(create_sql)
-        conn.execute(
-            f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_old_fk WHERE {valid_where}"
-        )
-        conn.execute(f"DROP TABLE {table}_old_fk")
-
-
-def _merge_duplicate_teams(conn: sqlite3.Connection):
+def _merge_duplicate_teams(conn: PGConnection):
     """If case variants (e.g. "Blues" and "BLUes") already created separate
     team rows *within the same division* before storage was normalized, merge
     them into one canonical (lowest id) team so lowercasing teams.name below
     doesn't hit its UNIQUE constraint. Players under a merged-away duplicate
     move to the canonical team; a player number that already exists there is
     dropped rather than kept twice. The same name in a *different* division
-    is a different team and is left alone."""
+    is a different team and is left alone.
+
+    A one-time data-quality pass, not a Postgres/SQLite-specific concern —
+    called from the migrate-data-into-Postgres script (see
+    scripts/migrate_sqlite_to_postgres.py), not on every app connect."""
     rows = conn.execute("SELECT id, division_id, name FROM teams ORDER BY id").fetchall()
     groups: dict[tuple[int, str], list[int]] = {}
     for team_id, division_id, name in rows:
@@ -727,21 +529,22 @@ def _merge_duplicate_teams(conn: sqlite3.Connection):
         canonical_id, *duplicate_ids = ids
         for dup_id in duplicate_ids:
             for entry_id, number in conn.execute(
-                "SELECT id, number FROM roster_entries WHERE team_id = ?", (dup_id,)
+                "SELECT id, number FROM roster_entries WHERE team_id = %s", (dup_id,)
             ).fetchall():
                 clash = conn.execute(
-                    "SELECT 1 FROM roster_entries WHERE team_id = ? AND number = ?", (canonical_id, number),
+                    "SELECT 1 FROM roster_entries WHERE team_id = %s AND number = %s", (canonical_id, number),
                 ).fetchone()
                 if clash:
-                    conn.execute("DELETE FROM roster_entries WHERE id = ?", (entry_id,))
+                    conn.execute("DELETE FROM roster_entries WHERE id = %s", (entry_id,))
                 else:
-                    conn.execute("UPDATE roster_entries SET team_id = ? WHERE id = ?", (canonical_id, entry_id))
-            conn.execute("DELETE FROM teams WHERE id = ?", (dup_id,))
+                    conn.execute("UPDATE roster_entries SET team_id = %s WHERE id = %s", (canonical_id, entry_id))
+            conn.execute("DELETE FROM teams WHERE id = %s", (dup_id,))
 
 
-def _normalize_identity_case(conn: sqlite3.Connection):
+def _normalize_identity_case(conn: PGConnection):
     """One-time (idempotent) lowercase normalization of identity fields
-    already in the database, for rows written before this existed."""
+    already in the database, for rows written before this existed. See
+    _merge_duplicate_teams — same "run once during data migration" note."""
     conn.execute("UPDATE games SET home_team = LOWER(TRIM(home_team)) WHERE home_team IS NOT NULL")
     conn.execute("UPDATE games SET away_team = LOWER(TRIM(away_team)) WHERE away_team IS NOT NULL")
     conn.execute("UPDATE games SET division = LOWER(TRIM(division)) WHERE division IS NOT NULL")
@@ -749,17 +552,17 @@ def _normalize_identity_case(conn: sqlite3.Connection):
     conn.execute("UPDATE roster_entries SET name = LOWER(TRIM(name)) WHERE name IS NOT NULL")
 
 
-def _normalize_dates(conn: sqlite3.Connection):
+def _normalize_dates(conn: PGConnection):
     """One-time (idempotent) conversion of existing game_date values to the
     ISO storage format, for rows written before this existed."""
     rows = conn.execute("SELECT id, game_date FROM games WHERE game_date IS NOT NULL").fetchall()
     for game_id, game_date in rows:
         normalized = normalize_date(game_date)
         if normalized != game_date:
-            conn.execute("UPDATE games SET game_date = ? WHERE id = ?", (normalized, game_id))
+            conn.execute("UPDATE games SET game_date = %s WHERE id = %s", (normalized, game_id))
 
 
-def _fix_division_typos(conn: sqlite3.Connection):
+def _fix_division_typos(conn: PGConnection):
     """One-time (idempotent) auto-correction of existing games.division
     values against the known age group list, for rows written before this
     existed (or before the corresponding form field validated it)."""
@@ -767,7 +570,7 @@ def _fix_division_typos(conn: sqlite3.Connection):
     for row_id, division in rows:
         fixed = normalize_division(division)
         if fixed != division:
-            conn.execute("UPDATE games SET division = ? WHERE id = ?", (fixed, row_id))
+            conn.execute("UPDATE games SET division = %s WHERE id = %s", (fixed, row_id))
 
 
 def _collect_numbers_by_side(data: dict) -> dict[str, set[str]]:
@@ -795,7 +598,7 @@ def _collect_numbers_by_side(data: dict) -> dict[str, set[str]]:
     return numbers
 
 
-def register_players_from_game(conn: sqlite3.Connection, data: dict, division_id: int):
+def register_players_from_game(conn: PGConnection, data: dict, division_id: int):
     """Auto-add a roster entry (placeholder name "#<number>") for any jersey
     number that shows up in this game's stats but isn't on the roster yet.
     Existing roster entries (and their names) are left untouched. This is a
@@ -809,20 +612,21 @@ def register_players_from_game(conn: sqlite3.Connection, data: dict, division_id
         team_id = add_team(conn, division_id, team_name)
         for number in numbers[side]:
             conn.execute(
-                "INSERT OR IGNORE INTO roster_entries (team_id, number, name) VALUES (?, ?, ?)",
+                "INSERT INTO roster_entries (team_id, number, name) VALUES (%s, %s, %s) "
+                "ON CONFLICT (team_id, number) DO NOTHING",
                 (team_id, number, f"#{number}"),
             )
     conn.commit()
 
 
-def insert_stat_rows(conn: sqlite3.Connection, game_id: int, data: dict):
+def insert_stat_rows(conn: PGConnection, game_id: int, data: dict):
     """Insert the goals/penalties/shootout_attempts rows for a game. Does not
     commit or touch the games row itself."""
     for g in data.get("goals", []):
         conn.execute(
             """INSERT INTO goals (game_id, side, scorer_number, assist1_number,
                                    assist2_number, period, time)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (game_id, g.get("side"), g.get("scorer_number"), g.get("assist1_number"),
              g.get("assist2_number"), g.get("period"), g.get("time")),
         )
@@ -830,7 +634,7 @@ def insert_stat_rows(conn: sqlite3.Connection, game_id: int, data: dict):
     for p in data.get("penalties", []):
         conn.execute(
             """INSERT INTO penalties (game_id, side, player_number, penalty_type, period, time)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (game_id, p.get("side"), p.get("player_number"), p.get("penalty_type"),
              p.get("period"), p.get("time")),
         )
@@ -838,13 +642,13 @@ def insert_stat_rows(conn: sqlite3.Connection, game_id: int, data: dict):
     for s in data.get("shootout_attempts", []):
         conn.execute(
             """INSERT INTO shootout_attempts (game_id, side, round, player_number, scored)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (game_id, s.get("side"), s.get("round"), s.get("player_number"),
              1 if s.get("scored") else 0),
         )
 
 
-def insert_game(conn: sqlite3.Connection, data: dict, source_file: str, working_division_id: int) -> tuple[int, bool]:
+def insert_game(conn: PGConnection, data: dict, source_file: str, working_division_id: int) -> tuple[int, bool]:
     """Insert a game and its stats. Returns (game_id, already_existed).
     Raises ValueError if the game resolves to a tie — this league always
     resolves a regulation tie with a shootout, so a stored game must have a
@@ -868,11 +672,13 @@ def insert_game(conn: sqlite3.Connection, data: dict, source_file: str, working_
     validate_shootout(data)
     ot_winner, ot_loser = compute_ot_result(data)
     cur = conn.execute(
-        """INSERT OR IGNORE INTO games
+        """INSERT INTO games
            (game_date, division, division_id, home_team, home_color, home_final_score,
             away_team, away_color, away_final_score, went_to_shootout, winner,
             ot_winner, ot_loser, source_file)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+           ON CONFLICT (game_date, home_team, away_team, source_file) DO NOTHING
+           RETURNING id""",
         (
             data.get("game_date"), data.get("division"), division_id,
             data.get("home_team"), data.get("home_color"), data.get("home_final_score"),
@@ -880,15 +686,16 @@ def insert_game(conn: sqlite3.Connection, data: dict, source_file: str, working_
             went_to_shootout, winner, ot_winner, ot_loser, source_file,
         ),
     )
-    already_existed = cur.lastrowid == 0 or conn.total_changes == 0
+    inserted = cur.fetchone()
+    already_existed = inserted is None
     if already_existed:
         row = conn.execute(
-            "SELECT id FROM games WHERE game_date=? AND home_team=? AND away_team=? AND source_file=?",
+            "SELECT id FROM games WHERE game_date=%s AND home_team=%s AND away_team=%s AND source_file=%s",
             (data.get("game_date"), data.get("home_team"), data.get("away_team"), source_file),
         ).fetchone()
         game_id = row[0]
     else:
-        game_id = cur.lastrowid
+        game_id = inserted[0]
 
     insert_stat_rows(conn, game_id, data)
     conn.commit()
@@ -896,11 +703,11 @@ def insert_game(conn: sqlite3.Connection, data: dict, source_file: str, working_
     return game_id, already_existed
 
 
-def list_games(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def list_games(conn: PGConnection, division_id: int) -> list[dict]:
     cols = ["id", "game_date", "division", "home_team", "home_final_score",
             "away_team", "away_final_score", "winner", "ot_winner", "ot_loser", "source_file"]
     rows = conn.execute(
-        f"SELECT {', '.join(cols)} FROM games WHERE division_id = ? ORDER BY id", (division_id,)
+        f"SELECT {', '.join(cols)} FROM games WHERE division_id = %s ORDER BY id", (division_id,)
     ).fetchall()
     games = [dict(zip(cols, row)) for row in rows]
     for g in games:
@@ -911,13 +718,13 @@ def list_games(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     return games
 
 
-def find_game_by_source_file(conn: sqlite3.Connection, source_file: str) -> dict | None:
+def find_game_by_source_file(conn: PGConnection, source_file: str) -> dict | None:
     """Return the existing game whose source_file matches, or None. Used to
     warn before re-processing a file that's already been imported."""
     cols = ["id", "game_date", "division", "home_team", "away_team",
             "home_final_score", "away_final_score"]
     row = conn.execute(
-        f"SELECT {', '.join(cols)} FROM games WHERE source_file = ?", (source_file,)
+        f"SELECT {', '.join(cols)} FROM games WHERE source_file = %s", (source_file,)
     ).fetchone()
     if row is None:
         return None
@@ -929,7 +736,7 @@ def find_game_by_source_file(conn: sqlite3.Connection, source_file: str) -> dict
     return g
 
 
-def import_schedule(conn: sqlite3.Connection, division_id: int, schedule_rows: list[dict]) -> int:
+def import_schedule(conn: PGConnection, division_id: int, schedule_rows: list[dict]) -> int:
     """Persist an uploaded season schedule for this division. Each row needs
     at least "game_date", "home_team", "away_team"; "order", "round",
     "start_time", "end_time", "location", "field" are optional. Upserted by
@@ -948,7 +755,7 @@ def import_schedule(conn: sqlite3.Connection, division_id: int, schedule_rows: l
             """INSERT INTO schedule_games
                (division_id, order_num, round, game_date, home_team, away_team,
                 start_time, end_time, location, field)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT(division_id, game_date, home_team, away_team) DO UPDATE SET
                    order_num = excluded.order_num, round = excluded.round,
                    start_time = excluded.start_time, end_time = excluded.end_time,
@@ -963,7 +770,7 @@ def import_schedule(conn: sqlite3.Connection, division_id: int, schedule_rows: l
     return saved
 
 
-def list_schedule(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def list_schedule(conn: PGConnection, division_id: int) -> list[dict]:
     """The division's persisted schedule, each row annotated with
     "accounted_for" — whether a stored game shares its date and its two
     teams (regardless of which side is home/away, since a transcribed sheet
@@ -981,14 +788,14 @@ def list_schedule(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     whitespace, etc.) that an exact-string match silently never fires even
     though the game is plainly right there in the Games tab."""
     stored = conn.execute(
-        "SELECT game_date, home_team, away_team FROM games WHERE division_id = ?", (division_id,)
+        "SELECT game_date, home_team, away_team FROM games WHERE division_id = %s", (division_id,)
     ).fetchall()
     played = {(date, frozenset((home, away))) for date, home, away in stored}
 
     rows = conn.execute(
         """SELECT id, order_num, round, game_date, home_team, away_team,
                   start_time, end_time, location, field
-           FROM schedule_games WHERE division_id = ?
+           FROM schedule_games WHERE division_id = %s
            ORDER BY game_date, order_num""",
         (division_id,),
     ).fetchall()
@@ -1007,21 +814,21 @@ def list_schedule(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     return result
 
 
-def clear_schedule(conn: sqlite3.Connection, division_id: int):
+def clear_schedule(conn: PGConnection, division_id: int):
     """Delete the division's entire persisted schedule (e.g. the wrong CSV
     was uploaded) so a corrected one can be uploaded clean."""
-    conn.execute("DELETE FROM schedule_games WHERE division_id = ?", (division_id,))
+    conn.execute("DELETE FROM schedule_games WHERE division_id = %s", (division_id,))
     conn.commit()
 
 
-def load_game(conn: sqlite3.Connection, game_id: int) -> tuple[dict | None, str | None]:
+def load_game(conn: PGConnection, game_id: int) -> tuple[dict | None, str | None]:
     """Return (data, source_file) for the given game id, matching the same
     structure extract_game_sheet() produces (plus the stored "winner"), or
     (None, None) if not found."""
     row = conn.execute(
         """SELECT game_date, division, home_team, home_color, home_final_score,
                   away_team, away_color, away_final_score, winner, source_file
-           FROM games WHERE id = ?""",
+           FROM games WHERE id = %s""",
         (game_id,),
     ).fetchone()
     if row is None:
@@ -1034,7 +841,7 @@ def load_game(conn: sqlite3.Connection, game_id: int) -> tuple[dict | None, str 
         dict(zip(("side", "scorer_number", "assist1_number", "assist2_number", "period", "time"), r))
         for r in conn.execute(
             """SELECT side, scorer_number, assist1_number, assist2_number, period, time
-               FROM goals WHERE game_id = ? ORDER BY id""",
+               FROM goals WHERE game_id = %s ORDER BY id""",
             (game_id,),
         ).fetchall()
     ]
@@ -1042,7 +849,7 @@ def load_game(conn: sqlite3.Connection, game_id: int) -> tuple[dict | None, str 
         dict(zip(("side", "player_number", "penalty_type", "period", "time"), r))
         for r in conn.execute(
             """SELECT side, player_number, penalty_type, period, time
-               FROM penalties WHERE game_id = ? ORDER BY id""",
+               FROM penalties WHERE game_id = %s ORDER BY id""",
             (game_id,),
         ).fetchall()
     ]
@@ -1050,7 +857,7 @@ def load_game(conn: sqlite3.Connection, game_id: int) -> tuple[dict | None, str 
         {"side": side, "round": round_, "player_number": player_number, "scored": bool(scored)}
         for side, round_, player_number, scored in conn.execute(
             """SELECT side, round, player_number, scored
-               FROM shootout_attempts WHERE game_id = ? ORDER BY round, id""",
+               FROM shootout_attempts WHERE game_id = %s ORDER BY round, id""",
             (game_id,),
         ).fetchall()
     ]
@@ -1072,7 +879,7 @@ def load_game(conn: sqlite3.Connection, game_id: int) -> tuple[dict | None, str 
     return data, source_file
 
 
-def update_game(conn: sqlite3.Connection, game_id: int, data: dict, working_division_id: int):
+def update_game(conn: PGConnection, game_id: int, data: dict, working_division_id: int):
     """Raises ValueError if the game resolves to a tie — see insert_game()."""
     division_text = normalize_division(data.get("division"))
     division_id = resolve_division_id(conn, working_division_id, division_text)
@@ -1092,11 +899,11 @@ def update_game(conn: sqlite3.Connection, game_id: int, data: dict, working_divi
 
     conn.execute(
         """UPDATE games SET
-               game_date = ?, division = ?, division_id = ?, home_team = ?, home_color = ?,
-               home_final_score = ?, away_team = ?, away_color = ?,
-               away_final_score = ?, went_to_shootout = ?, winner = ?,
-               ot_winner = ?, ot_loser = ?
-           WHERE id = ?""",
+               game_date = %s, division = %s, division_id = %s, home_team = %s, home_color = %s,
+               home_final_score = %s, away_team = %s, away_color = %s,
+               away_final_score = %s, went_to_shootout = %s, winner = %s,
+               ot_winner = %s, ot_loser = %s
+           WHERE id = %s""",
         (
             data.get("game_date"), data.get("division"), division_id,
             data.get("home_team"), data.get("home_color"), data.get("home_final_score"),
@@ -1105,22 +912,22 @@ def update_game(conn: sqlite3.Connection, game_id: int, data: dict, working_divi
         ),
     )
 
-    conn.execute("DELETE FROM goals WHERE game_id = ?", (game_id,))
-    conn.execute("DELETE FROM penalties WHERE game_id = ?", (game_id,))
-    conn.execute("DELETE FROM shootout_attempts WHERE game_id = ?", (game_id,))
+    conn.execute("DELETE FROM goals WHERE game_id = %s", (game_id,))
+    conn.execute("DELETE FROM penalties WHERE game_id = %s", (game_id,))
+    conn.execute("DELETE FROM shootout_attempts WHERE game_id = %s", (game_id,))
     insert_stat_rows(conn, game_id, data)
 
     conn.commit()
     register_players_from_game(conn, data, division_id)
 
 
-def delete_game(conn: sqlite3.Connection, game_id: int):
+def delete_game(conn: PGConnection, game_id: int):
     """Permanently remove a game and its goals/penalties/shootout_attempts
-    (cascaded via foreign keys — see schema.sql). Games aren't soft-deleted/
-    recycled like divisions: a single mis-entered game is easy enough to
-    re-process from its sheet if removed by mistake, so a straight delete
-    keeps this simple."""
-    conn.execute("DELETE FROM games WHERE id = ?", (game_id,))
+    (cascaded via foreign keys — see schema_postgres.sql). Games aren't
+    soft-deleted/recycled like divisions: a single mis-entered game is easy
+    enough to re-process from its sheet if removed by mistake, so a
+    straight delete keeps this simple."""
+    conn.execute("DELETE FROM games WHERE id = %s", (game_id,))
     conn.commit()
 
 
@@ -1128,7 +935,7 @@ def delete_game(conn: sqlite3.Connection, game_id: int):
 # Divisions (season + year + age group)
 # ---------------------------------------------------------------------------
 
-def list_divisions(conn: sqlite3.Connection) -> list[dict]:
+def list_divisions(conn: PGConnection) -> list[dict]:
     """Active (not-deleted) divisions — what dropdowns and the main Divisions
     table should show. See list_deleted_divisions() for the recycle bin."""
     rows = conn.execute(
@@ -1142,29 +949,30 @@ def list_divisions(conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
-def add_division(conn: sqlite3.Connection, year: int, season: str, age_group: str,
+def add_division(conn: PGConnection, year: int, season: str, age_group: str,
                   category: str | None = None) -> int:
     season = normalize_text(season)
     age_group = match_age_group(age_group) or age_group.strip()
     category = category or AGE_GROUPS.get(age_group, "")
     conn.execute(
-        "INSERT OR IGNORE INTO divisions (year, season, age_group, category) VALUES (?, ?, ?, ?)",
+        "INSERT INTO divisions (year, season, age_group, category) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (year, season, age_group) DO NOTHING",
         (year, season, age_group, category),
     )
     conn.commit()
     return conn.execute(
-        "SELECT id FROM divisions WHERE year = ? AND season = ? AND age_group = ?",
+        "SELECT id FROM divisions WHERE year = %s AND season = %s AND age_group = %s",
         (year, season, age_group),
     ).fetchone()[0]
 
 
-def resolve_division_id(conn: sqlite3.Connection, working_division_id: int, age_group: str | None) -> int:
+def resolve_division_id(conn: PGConnection, working_division_id: int, age_group: str | None) -> int:
     """Find-or-create the division that a game actually belongs to: the same
     year/season as the working division, but this game's own age group
     (which is usually the working division's age group, but may differ if
     this particular sheet is for a different age group)."""
     row = conn.execute(
-        "SELECT year, season, age_group FROM divisions WHERE id = ?", (working_division_id,)
+        "SELECT year, season, age_group FROM divisions WHERE id = %s", (working_division_id,)
     ).fetchone()
     if row is None:
         raise ValueError("No working division selected.")
@@ -1173,22 +981,22 @@ def resolve_division_id(conn: sqlite3.Connection, working_division_id: int, age_
     return add_division(conn, year, season, resolved_age_group)
 
 
-def soft_delete_division(conn: sqlite3.Connection, division_id: int):
+def soft_delete_division(conn: PGConnection, division_id: int):
     """Move a division to the recycle bin — it's purged for good 30 days
     later (see purge_expired_divisions), or can be restored before then."""
     conn.execute(
-        "UPDATE divisions SET deleted_at = ? WHERE id = ?",
+        "UPDATE divisions SET deleted_at = %s WHERE id = %s",
         (datetime.utcnow().isoformat(timespec="seconds"), division_id),
     )
     conn.commit()
 
 
-def restore_division(conn: sqlite3.Connection, division_id: int):
-    conn.execute("UPDATE divisions SET deleted_at = NULL WHERE id = ?", (division_id,))
+def restore_division(conn: PGConnection, division_id: int):
+    conn.execute("UPDATE divisions SET deleted_at = NULL WHERE id = %s", (division_id,))
     conn.commit()
 
 
-def list_deleted_divisions(conn: sqlite3.Connection) -> list[dict]:
+def list_deleted_divisions(conn: PGConnection) -> list[dict]:
     """The recycle bin: divisions soft-deleted but not yet purged, with how
     many days remain before they're gone for good."""
     rows = conn.execute(
@@ -1207,11 +1015,11 @@ def list_deleted_divisions(conn: sqlite3.Connection) -> list[dict]:
     return result
 
 
-def purge_expired_divisions(conn: sqlite3.Connection, days: int = 30):
+def purge_expired_divisions(conn: PGConnection, days: int = 30):
     """Permanently delete divisions that have been in the recycle bin more
     than `days` days. Called automatically on every init_db()."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat(timespec="seconds")
-    conn.execute("DELETE FROM divisions WHERE deleted_at IS NOT NULL AND deleted_at <= ?", (cutoff,))
+    conn.execute("DELETE FROM divisions WHERE deleted_at IS NOT NULL AND deleted_at <= %s", (cutoff,))
     conn.commit()
 
 
@@ -1219,60 +1027,83 @@ def purge_expired_divisions(conn: sqlite3.Connection, days: int = 30):
 # Team rosters
 # ---------------------------------------------------------------------------
 
-def list_teams(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def list_teams(conn: PGConnection, division_id: int) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, name FROM teams WHERE division_id = ? ORDER BY name", (division_id,)
+        "SELECT id, name FROM teams WHERE division_id = %s ORDER BY name", (division_id,)
     ).fetchall()
     return [{"id": r[0], "name": display_text(r[1])} for r in rows]
 
 
-def add_team(conn: sqlite3.Connection, division_id: int, name: str) -> int:
+def add_team(conn: PGConnection, division_id: int, name: str) -> int:
     name = normalize_text(name)
     conn.execute(
-        "INSERT OR IGNORE INTO teams (division_id, name) VALUES (?, ?)", (division_id, name)
+        "INSERT INTO teams (division_id, name) VALUES (%s, %s) "
+        "ON CONFLICT (division_id, name) DO NOTHING",
+        (division_id, name),
     )
     conn.commit()
     return conn.execute(
-        "SELECT id FROM teams WHERE division_id = ? AND name = ?", (division_id, name)
+        "SELECT id FROM teams WHERE division_id = %s AND name = %s", (division_id, name)
     ).fetchone()[0]
 
 
-def list_roster(conn: sqlite3.Connection, team_id: int) -> list[dict]:
+# A jersey number is usually numeric but can be a placeholder like "G" or
+# "?" for oddities on a scanned sheet. SQLite's CAST(x AS INTEGER) silently
+# returns 0 for non-numeric text, so ordering by it was always safe;
+# Postgres's CAST raises on non-numeric input, so ordering guards with a
+# regex check first and falls back to NULL (sorted last) for non-numeric
+# values instead of erroring the whole query.
+_NUMERIC_SORT_KEY = "CASE WHEN {col} ~ '^[0-9]+$' THEN CAST({col} AS INTEGER) END"
+
+
+def list_roster(conn: PGConnection, team_id: int) -> list[dict]:
+    """A team's roster. Once a row is linked to a global player profile,
+    its name is taken from that profile (kept live if the player is later
+    renamed) rather than the name originally auto-extracted from the game
+    sheet into roster_entries.name. A row whose linked player has been
+    soft-deleted reverts to unlinked (player_id None, original scanned
+    name) until that player is restored or a new one is linked — the
+    roster_entries.player_id FK itself is left alone, so restoring the
+    player re-links it automatically."""
+    sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
-        """SELECT id, number, name, player_id FROM roster_entries
-           WHERE team_id = ? ORDER BY CAST(number AS INTEGER), number""",
+        f"""SELECT re.id, re.number, COALESCE(p.name, re.name), p.id
+           FROM roster_entries re
+           LEFT JOIN players p ON p.id = re.player_id AND p.deleted_at IS NULL
+           WHERE re.team_id = %s ORDER BY {sort_key}, re.number""",
         (team_id,),
     ).fetchall()
     return [{"id": r[0], "number": r[1], "name": display_text(r[2]), "player_id": r[3]} for r in rows]
 
 
-def replace_roster(conn: sqlite3.Connection, team_id: int, entries: list[dict]):
+def replace_roster(conn: PGConnection, team_id: int, entries: list[dict]):
     """Replace a team's whole roster with the given (number, name) rows. A
     row's link to a global player profile is preserved by jersey number
     match, since the roster editor doesn't expose player_id directly."""
     existing_player_ids = dict(
         conn.execute(
-            "SELECT number, player_id FROM roster_entries WHERE team_id = ?", (team_id,)
+            "SELECT number, player_id FROM roster_entries WHERE team_id = %s", (team_id,)
         ).fetchall()
     )
-    conn.execute("DELETE FROM roster_entries WHERE team_id = ?", (team_id,))
+    conn.execute("DELETE FROM roster_entries WHERE team_id = %s", (team_id,))
     for p in entries:
         number = (p.get("number") or "").strip()
         name = normalize_text(p.get("name")) or ""
         if not number and not name:
             continue
         conn.execute(
-            "INSERT OR IGNORE INTO roster_entries (team_id, number, name, player_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO roster_entries (team_id, number, name, player_id) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (team_id, number) DO NOTHING",
             (team_id, number, name, existing_player_ids.get(number)),
         )
     conn.commit()
 
 
-def link_roster_entry_to_player(conn: sqlite3.Connection, roster_entry_id: int, player_id: int):
+def link_roster_entry_to_player(conn: PGConnection, roster_entry_id: int, player_id: int):
     """Identify a roster entry (a jersey number seen on a game sheet) as a
     specific global player profile."""
     conn.execute(
-        "UPDATE roster_entries SET player_id = ? WHERE id = ?", (player_id, roster_entry_id)
+        "UPDATE roster_entries SET player_id = %s WHERE id = %s", (player_id, roster_entry_id)
     )
     conn.commit()
 
@@ -1281,7 +1112,7 @@ def link_roster_entry_to_player(conn: sqlite3.Connection, roster_entry_id: int, 
 # Global players (identity persists across every division/season)
 # ---------------------------------------------------------------------------
 
-def list_players(conn: sqlite3.Connection, include_deleted: bool = False) -> list[dict]:
+def list_players(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(
         f"""SELECT id, name, birth_date, current_division_id, contact_first_name,
@@ -1293,13 +1124,13 @@ def list_players(conn: sqlite3.Connection, include_deleted: bool = False) -> lis
     return [dict(zip(cols, r)) for r in rows]
 
 
-def get_player(conn: sqlite3.Connection, player_id: int) -> dict | None:
+def get_player(conn: PGConnection, player_id: int) -> dict | None:
     players = {p["id"]: p for p in list_players(conn, include_deleted=True)}
     return players.get(player_id)
 
 
 def add_player(
-    conn: sqlite3.Connection, name: str, birth_date: str | None = None,
+    conn: PGConnection, name: str, birth_date: str | None = None,
     current_division_id: int | None = None, contact_first_name: str | None = None,
     contact_last_name: str | None = None, contact_phone: str | None = None,
     contact_email: str | None = None,
@@ -1308,15 +1139,17 @@ def add_player(
         """INSERT INTO players
            (name, birth_date, current_division_id, contact_first_name,
             contact_last_name, contact_phone, contact_email)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s, %s, %s)
+           RETURNING id""",
         (name.strip(), birth_date, current_division_id, contact_first_name,
          contact_last_name, contact_phone, contact_email),
     )
+    player_id = cur.fetchone()[0]
     conn.commit()
-    return cur.lastrowid
+    return player_id
 
 
-def update_player(conn: sqlite3.Connection, player_id: int, **fields):
+def update_player(conn: PGConnection, player_id: int, **fields):
     """Update any subset of a player's profile fields, e.g.
     update_player(conn, 5, name="Alex Smith", contact_phone="412-555-0100")."""
     allowed = {
@@ -1326,43 +1159,45 @@ def update_player(conn: sqlite3.Connection, player_id: int, **fields):
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
     conn.execute(
-        f"UPDATE players SET {set_clause} WHERE id = ?", (*updates.values(), player_id)
+        f"UPDATE players SET {set_clause} WHERE id = %s", (*updates.values(), player_id)
     )
     conn.commit()
 
 
-def soft_delete_player(conn: sqlite3.Connection, player_id: int):
+def soft_delete_player(conn: PGConnection, player_id: int):
     conn.execute(
-        "UPDATE players SET deleted_at = ? WHERE id = ?",
+        "UPDATE players SET deleted_at = %s WHERE id = %s",
         (datetime.utcnow().isoformat(timespec="seconds"), player_id),
     )
     conn.commit()
 
 
-def restore_player(conn: sqlite3.Connection, player_id: int):
-    conn.execute("UPDATE players SET deleted_at = NULL WHERE id = ?", (player_id,))
+def restore_player(conn: PGConnection, player_id: int):
+    conn.execute("UPDATE players SET deleted_at = NULL WHERE id = %s", (player_id,))
     conn.commit()
 
 
-def player_division_history(conn: sqlite3.Connection, player_id: int) -> list[dict]:
-    """Every division this player has a roster entry in, derived by joining
-    roster_entries -> teams -> divisions rather than tracked separately, so
-    it can never drift out of sync with the actual rosters."""
+def player_division_history(conn: PGConnection, player_id: int) -> list[dict]:
+    """Every division this player has a roster entry in (with the team and
+    jersey number they wore), derived by joining roster_entries -> teams ->
+    divisions rather than tracked separately, so it can never drift out of
+    sync with the actual rosters."""
     rows = conn.execute(
-        """SELECT DISTINCT d.id, d.year, d.season, d.age_group, d.category, t.name
+        """SELECT DISTINCT d.id, d.year, d.season, d.age_group, d.category, t.name, re.number, t.id
            FROM roster_entries re
            JOIN teams t ON t.id = re.team_id
            JOIN divisions d ON d.id = t.division_id
-           WHERE re.player_id = ?
+           WHERE re.player_id = %s
            ORDER BY d.year DESC, d.season""",
         (player_id,),
     ).fetchall()
     return [
         {
             "division_id": r[0], "year": r[1], "season": display_text(r[2]),
-            "age_group": r[3], "category": r[4], "team_name": display_text(r[5]),
+            "age_group": r[3], "category": r[4], "team_name": display_text(r[5]), "number": r[6],
+            "team_id": r[7],
         }
         for r in rows
     ]
@@ -1372,55 +1207,58 @@ def player_division_history(conn: sqlite3.Connection, player_id: int) -> list[di
 # Coaches (global; assigned to a team, which anchors them to one division)
 # ---------------------------------------------------------------------------
 
-def list_coaches(conn: sqlite3.Connection, include_deleted: bool = False) -> list[dict]:
+def list_coaches(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(f"SELECT id, name, deleted_at FROM coaches {where} ORDER BY name").fetchall()
     return [{"id": r[0], "name": r[1], "deleted_at": r[2]} for r in rows]
 
 
-def add_coach(conn: sqlite3.Connection, name: str) -> int:
-    cur = conn.execute("INSERT INTO coaches (name) VALUES (?)", (name.strip(),))
+def add_coach(conn: PGConnection, name: str) -> int:
+    cur = conn.execute("INSERT INTO coaches (name) VALUES (%s) RETURNING id", (name.strip(),))
+    coach_id = cur.fetchone()[0]
     conn.commit()
-    return cur.lastrowid
+    return coach_id
 
 
-def update_coach(conn: sqlite3.Connection, coach_id: int, name: str):
-    conn.execute("UPDATE coaches SET name = ? WHERE id = ?", (name.strip(), coach_id))
+def update_coach(conn: PGConnection, coach_id: int, name: str):
+    conn.execute("UPDATE coaches SET name = %s WHERE id = %s", (name.strip(), coach_id))
     conn.commit()
 
 
-def soft_delete_coach(conn: sqlite3.Connection, coach_id: int):
+def soft_delete_coach(conn: PGConnection, coach_id: int):
     conn.execute(
-        "UPDATE coaches SET deleted_at = ? WHERE id = ?",
+        "UPDATE coaches SET deleted_at = %s WHERE id = %s",
         (datetime.utcnow().isoformat(timespec="seconds"), coach_id),
     )
     conn.commit()
 
 
-def restore_coach(conn: sqlite3.Connection, coach_id: int):
-    conn.execute("UPDATE coaches SET deleted_at = NULL WHERE id = ?", (coach_id,))
+def restore_coach(conn: PGConnection, coach_id: int):
+    conn.execute("UPDATE coaches SET deleted_at = NULL WHERE id = %s", (coach_id,))
     conn.commit()
 
 
-def assign_coach_to_team(conn: sqlite3.Connection, team_id: int, coach_id: int):
+def assign_coach_to_team(conn: PGConnection, team_id: int, coach_id: int):
     conn.execute(
-        "INSERT OR IGNORE INTO team_coaches (team_id, coach_id) VALUES (?, ?)", (team_id, coach_id)
+        "INSERT INTO team_coaches (team_id, coach_id) VALUES (%s, %s) "
+        "ON CONFLICT (team_id, coach_id) DO NOTHING",
+        (team_id, coach_id),
     )
     conn.commit()
 
 
-def remove_coach_from_team(conn: sqlite3.Connection, team_id: int, coach_id: int):
+def remove_coach_from_team(conn: PGConnection, team_id: int, coach_id: int):
     conn.execute(
-        "DELETE FROM team_coaches WHERE team_id = ? AND coach_id = ?", (team_id, coach_id)
+        "DELETE FROM team_coaches WHERE team_id = %s AND coach_id = %s", (team_id, coach_id)
     )
     conn.commit()
 
 
-def list_team_coaches(conn: sqlite3.Connection, team_id: int) -> list[dict]:
+def list_team_coaches(conn: PGConnection, team_id: int) -> list[dict]:
     rows = conn.execute(
         """SELECT c.id, c.name FROM team_coaches tc
            JOIN coaches c ON c.id = tc.coach_id
-           WHERE tc.team_id = ? AND c.deleted_at IS NULL ORDER BY c.name""",
+           WHERE tc.team_id = %s AND c.deleted_at IS NULL ORDER BY c.name""",
         (team_id,),
     ).fetchall()
     return [{"id": r[0], "name": r[1]} for r in rows]
@@ -1430,22 +1268,23 @@ def list_team_coaches(conn: sqlite3.Connection, team_id: int) -> list[dict]:
 # Evaluations (a player's grade for a given division/team)
 # ---------------------------------------------------------------------------
 
-def add_evaluation(conn: sqlite3.Connection, player_id: int, division_id: int, team_id: int | None, grade: str) -> int:
+def add_evaluation(conn: PGConnection, player_id: int, division_id: int, team_id: int | None, grade: str) -> int:
     cur = conn.execute(
-        "INSERT INTO evaluations (player_id, division_id, team_id, grade) VALUES (?, ?, ?, ?)",
+        "INSERT INTO evaluations (player_id, division_id, team_id, grade) VALUES (%s, %s, %s, %s) RETURNING id",
         (player_id, division_id, team_id, grade),
     )
+    evaluation_id = cur.fetchone()[0]
     conn.commit()
-    return cur.lastrowid
+    return evaluation_id
 
 
-def list_evaluations(conn: sqlite3.Connection, player_id: int) -> list[dict]:
+def list_evaluations(conn: PGConnection, player_id: int) -> list[dict]:
     rows = conn.execute(
         """SELECT e.id, d.year, d.season, d.age_group, t.name, e.grade, e.created_at
            FROM evaluations e
            JOIN divisions d ON d.id = e.division_id
            LEFT JOIN teams t ON t.id = e.team_id
-           WHERE e.player_id = ?
+           WHERE e.player_id = %s
            ORDER BY e.created_at DESC""",
         (player_id,),
     ).fetchall()
@@ -1458,8 +1297,76 @@ def list_evaluations(conn: sqlite3.Connection, player_id: int) -> list[dict]:
     ]
 
 
-def delete_evaluation(conn: sqlite3.Connection, evaluation_id: int):
-    conn.execute("DELETE FROM evaluations WHERE id = ?", (evaluation_id,))
+def delete_evaluation(conn: PGConnection, evaluation_id: int):
+    conn.execute("DELETE FROM evaluations WHERE id = %s", (evaluation_id,))
+    conn.commit()
+
+
+def get_season_grade(conn: PGConnection, player_id: int, division_id: int) -> str | None:
+    """A player's "Season Grade" — the most recent evaluation on record for
+    them in a given division (a division already IS one season's instance
+    of an age group, so this needs no separate concept/table of its own)."""
+    row = conn.execute(
+        """SELECT grade FROM evaluations WHERE player_id = %s AND division_id = %s
+           ORDER BY created_at DESC, id DESC LIMIT 1""",
+        (player_id, division_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def set_season_grade(conn: PGConnection, player_id: int, division_id: int, team_id: int | None, grade: str):
+    """Set a player's Season Grade for a division: updates that player's
+    most recent evaluation there in place rather than growing a new history
+    row every time, since a quick roster-grid edit isn't a new evaluation
+    event the way the Evaluations popover's "Add evaluation" is. Clearing
+    the grade deletes that row rather than leaving an empty one behind."""
+    grade = grade.strip()
+    existing_id = conn.execute(
+        """SELECT id FROM evaluations WHERE player_id = %s AND division_id = %s
+           ORDER BY created_at DESC, id DESC LIMIT 1""",
+        (player_id, division_id),
+    ).fetchone()
+    if not grade:
+        if existing_id:
+            conn.execute("DELETE FROM evaluations WHERE id = %s", (existing_id[0],))
+            conn.commit()
+        return
+    if existing_id:
+        conn.execute(
+            "UPDATE evaluations SET grade = %s, team_id = %s WHERE id = %s", (grade, team_id, existing_id[0])
+        )
+        conn.commit()
+    else:
+        add_evaluation(conn, player_id, division_id, team_id, grade)
+
+
+def get_position(conn: PGConnection, player_id: int, division_id: int, team_id: int) -> str | None:
+    """A player's position on one specific team for one division — unlike
+    Season Grade, this is scoped to the team too (not just the division),
+    since the same player could in principle be rostered on more than one
+    team within a division."""
+    row = conn.execute(
+        "SELECT position FROM player_positions WHERE player_id = %s AND division_id = %s AND team_id = %s",
+        (player_id, division_id, team_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def set_position(conn: PGConnection, player_id: int, division_id: int, team_id: int, position: str):
+    """Set (or clear) a player's position for one team/division — a plain
+    current value with no history, so this just overwrites the row."""
+    position = position.strip()
+    if not position:
+        conn.execute(
+            "DELETE FROM player_positions WHERE player_id = %s AND division_id = %s AND team_id = %s",
+            (player_id, division_id, team_id),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO player_positions (player_id, division_id, team_id, position) VALUES (%s, %s, %s, %s)
+               ON CONFLICT(player_id, division_id, team_id) DO UPDATE SET position = excluded.position""",
+            (player_id, division_id, team_id, position),
+        )
     conn.commit()
 
 
@@ -1467,7 +1374,7 @@ def delete_evaluation(conn: sqlite3.Connection, evaluation_id: int):
 # Player stats
 # ---------------------------------------------------------------------------
 
-def get_player_stats(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def get_player_stats(conn: PGConnection, division_id: int) -> list[dict]:
     """Per-player goals/assists/points/penalties/shootout stats for one
     division, keyed by (team name, jersey number) straight from the games
     already scanned — a roster entry is NOT required for a player to show
@@ -1483,12 +1390,12 @@ def get_player_stats(conn: sqlite3.Connection, division_id: int) -> list[dict]:
         """SELECT team, scorer_number, COUNT(*) FROM (
                SELECT gm.home_team AS team, gl.scorer_number
                FROM goals gl JOIN games gm ON gm.id = gl.game_id AND gl.side = 'home'
-               WHERE gm.division_id = ?
+               WHERE gm.division_id = %s
                UNION ALL
                SELECT gm.away_team AS team, gl.scorer_number
                FROM goals gl JOIN games gm ON gm.id = gl.game_id AND gl.side = 'away'
-               WHERE gm.division_id = ?
-           )
+               WHERE gm.division_id = %s
+           ) sub
            WHERE scorer_number IS NOT NULL AND scorer_number <> ''
            GROUP BY team, scorer_number"""
     )
@@ -1497,20 +1404,20 @@ def get_player_stats(conn: sqlite3.Connection, division_id: int) -> list[dict]:
         """SELECT team, player_number, COUNT(*) FROM (
                SELECT gm.home_team AS team, gl.assist1_number AS player_number
                FROM goals gl JOIN games gm ON gm.id = gl.game_id AND gl.side = 'home'
-               WHERE gm.division_id = ? AND gl.assist1_number IS NOT NULL AND gl.assist1_number <> ''
+               WHERE gm.division_id = %s AND gl.assist1_number IS NOT NULL AND gl.assist1_number <> ''
                UNION ALL
                SELECT gm.away_team, gl.assist1_number
                FROM goals gl JOIN games gm ON gm.id = gl.game_id AND gl.side = 'away'
-               WHERE gm.division_id = ? AND gl.assist1_number IS NOT NULL AND gl.assist1_number <> ''
+               WHERE gm.division_id = %s AND gl.assist1_number IS NOT NULL AND gl.assist1_number <> ''
                UNION ALL
                SELECT gm.home_team, gl.assist2_number
                FROM goals gl JOIN games gm ON gm.id = gl.game_id AND gl.side = 'home'
-               WHERE gm.division_id = ? AND gl.assist2_number IS NOT NULL AND gl.assist2_number <> ''
+               WHERE gm.division_id = %s AND gl.assist2_number IS NOT NULL AND gl.assist2_number <> ''
                UNION ALL
                SELECT gm.away_team, gl.assist2_number
                FROM goals gl JOIN games gm ON gm.id = gl.game_id AND gl.side = 'away'
-               WHERE gm.division_id = ? AND gl.assist2_number IS NOT NULL AND gl.assist2_number <> ''
-           )
+               WHERE gm.division_id = %s AND gl.assist2_number IS NOT NULL AND gl.assist2_number <> ''
+           ) sub
            GROUP BY team, player_number""",
         (division_id, division_id, division_id, division_id),
     ):
@@ -1519,12 +1426,12 @@ def get_player_stats(conn: sqlite3.Connection, division_id: int) -> list[dict]:
         """SELECT team, player_number, COUNT(*) FROM (
                SELECT gm.home_team AS team, pen.player_number
                FROM penalties pen JOIN games gm ON gm.id = pen.game_id AND pen.side = 'home'
-               WHERE gm.division_id = ?
+               WHERE gm.division_id = %s
                UNION ALL
                SELECT gm.away_team, pen.player_number
                FROM penalties pen JOIN games gm ON gm.id = pen.game_id AND pen.side = 'away'
-               WHERE gm.division_id = ?
-           )
+               WHERE gm.division_id = %s
+           ) sub
            WHERE player_number IS NOT NULL AND player_number <> ''
            GROUP BY team, player_number"""
     )
@@ -1534,30 +1441,34 @@ def get_player_stats(conn: sqlite3.Connection, division_id: int) -> list[dict]:
         """SELECT team, player_number, COUNT(*), COALESCE(SUM(scored), 0) FROM (
                SELECT gm.home_team AS team, so.player_number, so.scored
                FROM shootout_attempts so JOIN games gm ON gm.id = so.game_id AND so.side = 'home'
-               WHERE gm.division_id = ?
+               WHERE gm.division_id = %s
                UNION ALL
                SELECT gm.away_team, so.player_number, so.scored
                FROM shootout_attempts so JOIN games gm ON gm.id = so.game_id AND so.side = 'away'
-               WHERE gm.division_id = ?
-           )
+               WHERE gm.division_id = %s
+           ) sub
            WHERE player_number IS NOT NULL AND player_number <> ''
            GROUP BY team, player_number""",
         (division_id, division_id),
     ):
         shootout[(team, number)] = (attempts, made)
 
+    # A soft-deleted player's link doesn't count as linked here (see
+    # list_roster) — the row reverts to unlinked until restored/re-linked.
     roster = {
         (team, number): (name, player_id)
         for team, number, name, player_id in conn.execute(
-            """SELECT t.name, re.number, re.name, re.player_id
-               FROM roster_entries re JOIN teams t ON t.id = re.team_id
-               WHERE t.division_id = ?""",
+            """SELECT t.name, re.number, COALESCE(p.name, re.name), p.id
+               FROM roster_entries re
+               JOIN teams t ON t.id = re.team_id
+               LEFT JOIN players p ON p.id = re.player_id AND p.deleted_at IS NULL
+               WHERE t.division_id = %s""",
             (division_id,),
         )
     }
     team_ids = {
         name: team_id
-        for team_id, name in conn.execute("SELECT id, name FROM teams WHERE division_id = ?", (division_id,))
+        for team_id, name in conn.execute("SELECT id, name FROM teams WHERE division_id = %s", (division_id,))
     }
 
     keys = set(goals) | set(assists) | set(penalties) | set(shootout) | set(roster)
@@ -1583,7 +1494,7 @@ def get_player_stats(conn: sqlite3.Connection, division_id: int) -> list[dict]:
 # Standings
 # ---------------------------------------------------------------------------
 
-def get_standings(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def get_standings(conn: PGConnection, division_id: int) -> list[dict]:
     """Per-team season record for one division, sorted by points then the
     tiebreak chain: head-to-head record, goal differential, regulation
     wins, OT wins, goals against (fewer first), goals for (more first).
@@ -1594,7 +1505,7 @@ def get_standings(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     games = conn.execute(
         """SELECT home_team, away_team, home_final_score, away_final_score,
                   winner, ot_winner, ot_loser
-           FROM games WHERE winner IS NOT NULL AND division_id = ?""",
+           FROM games WHERE winner IS NOT NULL AND division_id = %s""",
         (division_id,),
     ).fetchall()
 
@@ -1682,7 +1593,7 @@ def _compare_teams(a: dict, b: dict) -> int:
 # UI and the Excel export can never drift out of sync with each other.
 # ---------------------------------------------------------------------------
 
-def standings_table(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def standings_table(conn: PGConnection, division_id: int) -> list[dict]:
     standings = get_standings(conn, division_id)
     show_ties = any(s["ties"] for s in standings)
     table = []
@@ -1698,7 +1609,7 @@ def standings_table(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     return table
 
 
-def player_stats_table(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def player_stats_table(conn: PGConnection, division_id: int) -> list[dict]:
     stats = sorted(get_player_stats(conn, division_id), key=lambda s: (-s["points"], -s["goals"]))
     return [
         {
@@ -1710,12 +1621,13 @@ def player_stats_table(conn: sqlite3.Connection, division_id: int) -> list[dict]
     ]
 
 
-def roster_table(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
+    sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
-        """SELECT t.name, re.number, re.name FROM roster_entries re
+        f"""SELECT t.name, re.number, re.name FROM roster_entries re
            JOIN teams t ON t.id = re.team_id
-           WHERE t.division_id = ?
-           ORDER BY t.name, CAST(re.number AS INTEGER), re.number""",
+           WHERE t.division_id = %s
+           ORDER BY t.name, {sort_key}, re.number""",
         (division_id,),
     ).fetchall()
     return [
@@ -1724,7 +1636,7 @@ def roster_table(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     ]
 
 
-def games_table(conn: sqlite3.Connection, division_id: int) -> list[dict]:
+def games_table(conn: PGConnection, division_id: int) -> list[dict]:
     labels = {
         "id": "ID", "game_date": "Date", "division": "Division",
         "home_team": "Home", "home_final_score": "Home Score",
@@ -1735,7 +1647,7 @@ def games_table(conn: sqlite3.Connection, division_id: int) -> list[dict]:
     return [{labels[k]: v for k, v in row.items()} for row in list_games(conn, division_id)]
 
 
-def export_workbook(conn: sqlite3.Connection, division_id: int) -> bytes:
+def export_workbook(conn: PGConnection, division_id: int) -> bytes:
     """Build an in-memory .xlsx with one sheet per table, matching what's
     shown in the app (Games, Standings, Player Stats, Rosters) for one
     division."""

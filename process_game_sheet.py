@@ -4,26 +4,28 @@ process_game_sheet.py
 
 Scans one or more Team Pittsburgh Ball Hockey game sheet scans (PDF or image),
 extracts the handwritten stats using Claude's vision, lets you review/correct
-the extraction interactively, and stores the results in a SQLite database.
+the extraction interactively, and stores the results in the PostgreSQL
+database.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
-    python process_game_sheet.py sheet1.pdf sheet2.jpg --db hockey.db
-    python process_game_sheet.py sheet1.pdf --db hockey.db --no-review   # skip confirmation
+    export DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+    python process_game_sheet.py sheet1.pdf sheet2.jpg
+    python process_game_sheet.py sheet1.pdf --no-review   # skip confirmation
 
     # Batch mode: process every sheet in a folder. Each file is previewed in a
     # window while you review the extraction; on acceptance it's moved into
     # <source-dir>/processed (or --processed-dir).
-    python process_game_sheet.py --source-dir incoming --db hockey.db
+    python process_game_sheet.py --source-dir incoming
 
 For multi-page PDFs, run split_pdf.py first to split them into single-page
 PDFs, then pass the resulting files to this script:
     python split_pdf.py sheet1.pdf
-    python process_game_sheet.py sheet1_pages/*.pdf --db hockey.db
+    python process_game_sheet.py sheet1_pages/*.pdf
 
 To correct a game already stored in the database, use edit_game.py instead:
-    python edit_game.py --list --db hockey.db
-    python edit_game.py --game-id 5 --db hockey.db
+    python edit_game.py --list
+    python edit_game.py --game-id 5
 
 Requires:
     pip install anthropic pymupdf
@@ -165,13 +167,12 @@ def gather_files(args) -> list[Path]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract ball hockey game sheets into a SQLite DB.")
+    parser = argparse.ArgumentParser(description="Extract ball hockey game sheets into the Postgres DB.")
     parser.add_argument("files", nargs="*", help="Game sheet PDF/image files to process")
     parser.add_argument("--source-dir", help="Batch-process every sheet found in this directory")
     parser.add_argument("--processed-dir",
                          help="Where to move successfully submitted files "
                               "(default: <source-dir>/processed, or ./processed)")
-    parser.add_argument("--db", default="hockey.db", help="Path to SQLite database file (default: hockey.db)")
     parser.add_argument("--no-review", action="store_true",
                          help="Skip interactive review and insert extracted data directly")
     parser.add_argument("--no-preview", action="store_true",
@@ -193,9 +194,12 @@ def main():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         sys.exit("Error: set the ANTHROPIC_API_KEY environment variable first.")
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        sys.exit("Error: set the DATABASE_URL environment variable first.")
 
     client = anthropic.Anthropic(api_key=api_key)
-    conn = init_db(args.db)
+    conn = init_db(dsn)
     # Anchors the year/season for every sheet processed this run; each
     # sheet's own division (age group) resolves to its own division under
     # that same year/season, auto-creating it if needed.
@@ -228,7 +232,7 @@ def main():
             if already_existed:
                 print(f"  (Game already existed in DB as id={game_id} — stats were re-inserted;"
                       f" delete old rows first if re-processing.)")
-            print(f"  Stored as game_id={game_id} in {args.db}")
+            print(f"  Stored as game_id={game_id}")
 
             processed_dir.mkdir(parents=True, exist_ok=True)
             dest = processed_dir / path.name

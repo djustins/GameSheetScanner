@@ -16,6 +16,9 @@ source/
 # Streamlit secrets (API keys etc.) — config.toml itself is fine to commit
 .streamlit/secrets.toml
 
+# Local database connection string / credentials — never commit
+.env
+
 # Process logs
 *.log
 

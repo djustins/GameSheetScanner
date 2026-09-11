@@ -4,8 +4,9 @@ app.py
 
 Streamlit web app for the Team Pittsburgh Ball Hockey game sheet pipeline:
 split multi-page PDF scans, upload a sheet, review Claude's extraction in an
-editable form, and save it to the SQLite database — or correct a game already
-stored. Also has standings, player stats, team rosters, and an Excel export.
+editable form, and save it to the PostgreSQL database — or correct a game
+already stored. Also has standings, player stats, team rosters, and an
+Excel export.
 
 All extraction/DB/winner logic lives in game_sheet_core.py, which has no
 Streamlit dependency, so the same core also backs the terminal scripts
@@ -14,16 +15,19 @@ without rewriting any of that logic.
 
 Run:
     export ANTHROPIC_API_KEY=sk-ant-...
+    export DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
     streamlit run app.py
 
+DATABASE_URL can instead be given as separate PGHOST/PGDATABASE/PGUSER/
+PGPASSWORD/PGPORT/PGSSLMODE environment variables.
+
 Requires:
-    pip install anthropic pypdf pymupdf streamlit pandas
+    pip install -r requirements.txt
 """
 
 import base64
 import os
-import platform
-import subprocess
+import urllib.parse
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -35,7 +39,6 @@ from PIL import Image
 
 import game_sheet_core as core
 
-DEFAULT_DB_PATH = Path(__file__).parent / "hockey.db"
 LOGO_PATH = Path(__file__).parent / "logo.png"
 _LOGO_B64 = base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii") if LOGO_PATH.exists() else None
 VERSION_PATH = Path(__file__).parent / "VERSION"
@@ -99,14 +102,6 @@ def inject_theme_css(mode: str):
         .st-key-dup_panel {{
             background-color: {c['panel_bg']} !important;
             border-radius: 10px; padding: 1rem 1.25rem;
-        }}
-        .st-key-db_path_button button {{
-            background-color: {c['panel_bg']} !important;
-            color: {c['text']} !important;
-            justify-content: flex-start !important;
-            text-align: left !important;
-            font-weight: 400 !important;
-            border: 1px solid {c['secondary_bg']} !important;
         }}
         </style>
         """,
@@ -196,60 +191,6 @@ def get_client(api_key: str) -> anthropic.Anthropic | None:
     if not api_key:
         return None
     return anthropic.Anthropic(api_key=api_key)
-
-
-def gui_dialogs_available() -> bool:
-    """Whether this process can pop up native dialogs (tkinter file picker,
-    Windows Explorer). False on a hosted deployment like Streamlit Community
-    Cloud, which runs headless on Linux with no display and no tkinter —
-    installing tkinter there wouldn't help, since there's still no display
-    for it to open a window on."""
-    if platform.system() != "Windows":
-        return False
-    try:
-        import tkinter  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def browse_for_db_file() -> str | None:
-    """Open a native file-picker dialog on the machine running this Streamlit
-    server and return the chosen path, or None if cancelled/unavailable.
-    Only meaningful for local use, where that machine is your own."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except ImportError:
-        st.sidebar.error("Browse isn't available — tkinter isn't installed.")
-        return None
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = filedialog.askopenfilename(
-            title="Select database file",
-            filetypes=[("SQLite database", "*.db"), ("All files", "*.*")],
-        )
-        root.destroy()
-    except Exception as e:
-        st.sidebar.error(f"Couldn't open the file picker: {e}")
-        return None
-    return path or None
-
-
-def open_file_location(path_str: str):
-    """Open Windows File Explorer at the given file's location, selecting it
-    if it exists, or opening its parent folder if it doesn't yet."""
-    p = Path(path_str).resolve()
-    try:
-        if p.exists():
-            subprocess.run(["explorer", "/select,", str(p)])
-        else:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["explorer", str(p.parent)])
-    except Exception as e:
-        st.sidebar.error(f"Couldn't open File Explorer: {e}")
 
 
 def render_preview_png(data: bytes, mime: str | None) -> bytes:
@@ -625,15 +566,159 @@ def game_form_error(merged: dict) -> str | None:
     return None
 
 
+def season_grade_input(conn, player_id: int, division_id: int, team_id: int | None, key: str, **text_input_kwargs):
+    """A "Season Grade" text input backed by core.set_season_grade, usable
+    both from the Player Panel and the Team Rosters grid. Both render on
+    every script run (st.tabs() executes every tab's body regardless of
+    which one is visually selected), so without this, Streamlit's rule
+    that a widget's `value=` is ignored once its key already exists in
+    session_state would let whichever surface has a stale value silently
+    overwrite the other's edit — including deleting a grade someone just
+    set — on the very next rerun. Resyncing session_state here whenever
+    the DB value changed out from under this widget avoids that."""
+    current_grade = core.get_season_grade(conn, player_id, division_id) or ""
+    synced_key = f"{key}__synced"
+    if st.session_state.get(synced_key) != current_grade:
+        st.session_state[key] = current_grade
+        st.session_state[synced_key] = current_grade
+    new_grade = st.text_input("Season Grade", key=key, **text_input_kwargs)
+    if new_grade.strip() != current_grade:
+        core.set_season_grade(conn, player_id, division_id, team_id, new_grade)
+        st.session_state[synced_key] = new_grade.strip()
+        st.rerun()
+
+
+POSITION_OPTIONS = ["", "Forward", "Defense", "Goalie"]
+
+
+def position_input(conn, player_id: int, division_id: int, team_id: int, key: str, **selectbox_kwargs):
+    """A "Position" dropdown backed by core.set_position, for one specific
+    player+team+division. Mirrors season_grade_input's session_state resync
+    trick since this can likewise render in more than one place (Player
+    Panel, Team Rosters grid) within the same script run."""
+    current_position = core.get_position(conn, player_id, division_id, team_id) or ""
+    synced_key = f"{key}__synced"
+    if st.session_state.get(synced_key) != current_position:
+        st.session_state[key] = current_position
+        st.session_state[synced_key] = current_position
+    new_position = st.selectbox(
+        "Position", options=POSITION_OPTIONS, format_func=lambda p: "(none)" if p == "" else p,
+        key=key, **selectbox_kwargs,
+    )
+    if new_position.strip() != current_position:
+        core.set_position(conn, player_id, division_id, team_id, new_position)
+        st.session_state[synced_key] = new_position.strip()
+        st.rerun()
+
+
+def highlighted_row(player_id: int | None):
+    """A bordered container around one player row, drawn with a border only
+    for the player most recently created via a "Create Player" popover —
+    so that row stands out from the rest of a freshly re-rendered list
+    right after it appears."""
+    is_new = player_id is not None and player_id == st.session_state.get("just_linked_player_id")
+    return st.container(border=is_new)
+
+
+def render_create_player_popover(
+    conn, key_prefix: str, team_id: int, team_name: str, number: str, working_division_id
+):
+    """A "Create Player" popover that creates a new global player profile
+    and links it to one roster row (by team_id + number). Reused by the
+    Player Stats tab and the Team Rosters tab so there's one implementation
+    of "create & link a player" regardless of where it's opened from."""
+    with st.popover("➕ Create Player"):
+        st.caption(f"Linking {core.display_text(team_name)} #{number}")
+        new_name = st.text_input("Player name", key=f"{key_prefix}_new_name")
+        new_dob = st.text_input("Birth date", key=f"{key_prefix}_new_dob", placeholder="YYYY-MM-DD")
+        ncol1, ncol2 = st.columns(2)
+        new_cfn = ncol1.text_input("Contact first name", key=f"{key_prefix}_new_cfn")
+        new_cln = ncol2.text_input("Contact last name", key=f"{key_prefix}_new_cln")
+        ncol3, ncol4 = st.columns(2)
+        new_cph = ncol3.text_input("Contact phone", key=f"{key_prefix}_new_cph")
+        new_cem = ncol4.text_input("Contact email", key=f"{key_prefix}_new_cem")
+        if st.button("Create & Link", key=f"{key_prefix}_create_link", type="primary"):
+            if not new_name.strip():
+                st.error("Player name is required.")
+            else:
+                new_player_id = core.add_player(
+                    conn, new_name.strip(), birth_date=new_dob.strip() or None,
+                    current_division_id=working_division_id,
+                    contact_first_name=new_cfn.strip() or None, contact_last_name=new_cln.strip() or None,
+                    contact_phone=new_cph.strip() or None, contact_email=new_cem.strip() or None,
+                )
+                entry = conn.execute(
+                    "SELECT id FROM roster_entries WHERE team_id = ? AND number = ?",
+                    (team_id, number),
+                ).fetchone()
+                if entry:
+                    core.link_roster_entry_to_player(conn, entry[0], new_player_id)
+                st.success(f"Created and linked {new_name.strip()}.")
+                st.session_state["just_linked_player_id"] = new_player_id
+                st.rerun()
+
+
+def player_label(conn, player: dict) -> str:
+    """A player's label for pickers: name plus their current jersey
+    number/team, if they have one — so two players sharing a name (e.g. a
+    duplicate accidentally created for the wrong roster number) can still
+    be told apart well enough to pick the right one to delete."""
+    if player["current_division_id"] is not None:
+        entries = [
+            h for h in core.player_division_history(conn, player["id"])
+            if h["division_id"] == player["current_division_id"]
+        ]
+        if entries:
+            numbers = ", ".join(f"#{h['number']} {h['team_name']}" for h in entries)
+            return f"{player['name']} ({numbers})"
+    return player["name"]
+
+
+@st.dialog("Delete player?")
+def confirm_delete_player_dialog(key_prefix: str, player_id: int, player_name: str):
+    """A dialog's body runs as a Streamlit fragment in its own thread,
+    separate from the thread that ran the rest of the script. That used to
+    matter here — sqlite3 connections can't cross threads — but psycopg2
+    connections don't have that restriction (sequential cross-thread use is
+    fine), so this can safely reuse the shared session connection (`conn`,
+    the same one every other tab/function in this file uses) instead of
+    opening a second one."""
+    st.write(f"Delete **{player_name}**? This can be undone in the Players tab's Deleted Players list.")
+    yes_col, cancel_col = st.columns(2)
+    with yes_col:
+        if st.button(
+            "Yes, delete this player", key=f"{key_prefix}_delete_confirm_{player_id}",
+            type="primary", width="stretch",
+        ):
+            core.soft_delete_player(conn, player_id)
+            st.rerun()
+    with cancel_col:
+        if st.button("Cancel", key=f"{key_prefix}_delete_cancel_{player_id}", width="stretch"):
+            st.rerun()
+
+
 def render_player_panel(
-    conn, player_id: int, division_name_by_id: dict, all_divisions: list[dict], key_prefix: str
+    conn, player_id: int, division_name_by_id: dict, all_divisions: list[dict], key_prefix: str,
+    nav_ids: list[int] | None = None, nav_pending_key: str | None = None,
 ):
     """The full player profile editor — name/dob/current division/contacts,
     save/soft-delete, and an Evaluations popover. Reused both by the Players
     tab (picked from a dropdown) and by a "Player Panel" action opened
     inline from a linked Player Stats row, so there's one implementation of
     "the player panel" regardless of where it's opened from. key_prefix
-    keeps widget keys unique between those two call sites."""
+    keeps widget keys unique between those two call sites.
+
+    nav_ids/nav_pending_key add Previous/Next buttons alongside Save/Delete
+    for browsing a caller-supplied ordered list of player ids (the Players
+    tab's alphabetical list) — omitted where that doesn't apply (the
+    Player Stats tab's single-row "Player Panel" popover). Clicking one
+    can't write directly to the caller's own selectbox session_state key,
+    since that widget has already been instantiated earlier in this same
+    script run by the time this function is called — Streamlit forbids
+    modifying a widget's state after it's created in the same run. Instead
+    it stashes the target id under nav_pending_key, a plain (non-widget)
+    session key, which the caller applies to its selectbox's key *before*
+    creating that widget on the next run."""
     player = core.get_player(conn, player_id)
     if player is None:
         st.error("Player not found.")
@@ -650,11 +735,34 @@ def render_player_panel(
     current_idx = (
         division_ids.index(player["current_division_id"]) if player["current_division_id"] in division_ids else 0
     )
-    edit_division = st.selectbox(
+    dcol1, dcol2 = st.columns(2)
+    edit_division = dcol1.selectbox(
         "Current division", options=division_ids,
         format_func=lambda i: "(none)" if i is None else division_name_by_id[i],
         index=current_idx, key=f"{key_prefix}_division_{player_id}",
     )
+    if player["current_division_id"] is not None:
+        current_team_entries = [
+            h for h in core.player_division_history(conn, player_id) if h["division_id"] == player["current_division_id"]
+        ]
+        team_number_display = (
+            ", ".join(f"#{h['number']} ({h['team_name']})" for h in current_team_entries)
+            if current_team_entries else "Not on a roster yet"
+        )
+    else:
+        team_number_display = "—"
+    dcol2.text_input(
+        "Current Team Number", value=team_number_display, key=f"{key_prefix}_team_number_{player_id}",
+        disabled=True, help="Derived from Team Rosters — link this player to a roster row there to set it.",
+    )
+    if player["current_division_id"] is not None and current_team_entries:
+        for h in current_team_entries:
+            position_input(
+                conn, player_id, player["current_division_id"], h["team_id"],
+                key=f"{key_prefix}_position_{player_id}_{h['team_id']}",
+                help=f"Position on {h['team_name']} for this division." if len(current_team_entries) > 1 else None,
+            )
+
     ecol3, ecol4 = st.columns(2)
     edit_cfn = ecol3.text_input(
         "Contact first name", value=player["contact_first_name"] or "", key=f"{key_prefix}_cfn_{player_id}"
@@ -670,7 +778,28 @@ def render_player_panel(
         "Contact email", value=player["contact_email"] or "", key=f"{key_prefix}_cem_{player_id}"
     )
 
-    save_col, delete_col, eval_col = st.columns(3)
+    if working_division_id is None:
+        st.caption("Select a Working Division above to set this player's Season Grade.")
+    else:
+        season_grade_input(
+            conn, player_id, working_division_id, None, key=f"{key_prefix}_season_grade_{player_id}",
+            help="This player's grade for the current Working Division — editing it here updates their "
+                 "most recent evaluation for that division instead of adding a new one to its history.",
+        )
+
+    show_nav = nav_ids is not None and nav_pending_key is not None
+    nav_idx = nav_ids.index(player_id) if show_nav and player_id in nav_ids else None
+    if show_nav:
+        prev_col, save_col, delete_col, eval_col, next_col = st.columns(5)
+        with prev_col:
+            can_prev = nav_idx is not None and nav_idx > 0
+            if st.button(
+                "◀ Previous", key=f"{key_prefix}_nav_prev_{player_id}", disabled=not can_prev, width="stretch"
+            ):
+                st.session_state[nav_pending_key] = nav_ids[nav_idx - 1]
+                st.rerun()
+    else:
+        save_col, delete_col, eval_col = st.columns(3)
     with save_col:
         if st.button("Save changes", key=f"{key_prefix}_save_{player_id}", type="primary"):
             core.update_player(
@@ -682,23 +811,18 @@ def render_player_panel(
             st.success("Saved.")
             st.rerun()
     with delete_col:
-        confirm_del_key = f"{key_prefix}_confirm_delete_{player_id}"
         if st.button("🗑️ Delete player", key=f"{key_prefix}_delete_{player_id}"):
-            st.session_state[confirm_del_key] = True
-            st.rerun()
-        if st.session_state.get(confirm_del_key):
-            st.warning(f"Delete {player['name']}? This can be undone in the Players tab.")
-            if st.button("Yes, delete", key=f"{key_prefix}_delete_confirm_{player_id}", type="primary"):
-                core.soft_delete_player(conn, player_id)
-                st.session_state.pop(confirm_del_key, None)
-                st.rerun()
+            confirm_delete_player_dialog(key_prefix, player_id, player["name"])
     with eval_col:
         with st.popover("📋 Evaluations"):
             history = core.player_division_history(conn, player_id)
             if history:
                 st.caption("Divisions played:")
                 for h in history:
-                    st.write(f"- {h['year']} {h['season']} — {division_label(h['age_group'])} ({h['team_name']})")
+                    st.write(
+                        f"- {h['year']} {h['season']} — {division_label(h['age_group'])} "
+                        f"({h['team_name']} #{h['number']})"
+                    )
 
             evaluations = core.list_evaluations(conn, player_id)
             if evaluations:
@@ -738,6 +862,15 @@ def render_player_panel(
                     else:
                         st.error("Grade is required.")
 
+    if show_nav:
+        with next_col:
+            can_next = nav_idx is not None and nav_idx < len(nav_ids) - 1
+            if st.button(
+                "Next ▶", key=f"{key_prefix}_nav_next_{player_id}", disabled=not can_next, width="stretch"
+            ):
+                st.session_state[nav_pending_key] = nav_ids[nav_idx + 1]
+                st.rerun()
+
 
 # ---------------------------------------------------------------------------
 # Sidebar: shared settings
@@ -758,107 +891,42 @@ st.sidebar.title("Settings")
 # top" over a real display-breaking hack.
 st.sidebar.caption(f"v{APP_VERSION}")
 
-if "db_path_input" not in st.session_state:
-    st.session_state["db_path_input"] = str(DEFAULT_DB_PATH)
-
-db_path = st.session_state["db_path_input"]
-
-st.sidebar.markdown("**Database file**")
-if gui_dialogs_available():
-    if st.sidebar.button(
-        f"📂 {db_path or '(click to choose a database file)'}", key="db_path_button",
-        help="Click to browse for an existing database file", width="stretch",
-    ):
-        picked = browse_for_db_file()
-        if picked:
-            st.session_state["db_path_input"] = picked
-            st.rerun()
-    if st.sidebar.button("📁 Locate", key="open_loc_btn", help="Open this file's folder in File Explorer",
-                          width="stretch"):
-        if db_path.strip():
-            open_file_location(db_path)
-        else:
-            st.sidebar.error("No database file set.")
-else:
-    # A widget's `value=` is only honored the first time it's created — once
-    # session_state["db_path_text"] exists, Streamlit keeps showing that on
-    # every later rerun and ignores `value=` entirely. Without this, Load/
-    # Create/Browse updating db_path_input got silently reverted right back
-    # on the very next line below, since typed_path would still read the
-    # stale pre-upload path and immediately overwrite db_path_input with it.
-    if st.session_state.get("db_path_text") != db_path:
-        st.session_state["db_path_text"] = db_path
-    typed_path = st.sidebar.text_input(
-        "Database path", key="db_path_text",
-        help="No native file browser on a hosted deployment — type a path, "
-             "or use Load/Save below.",
-    )
-    if typed_path != db_path:
-        st.session_state["db_path_input"] = typed_path
-        st.rerun()
-
-# Create / Save / Load — always available regardless of platform, so a
-# hosted deployment (no local file browsing there) has the same three ways
-# to get a database as a local install.
-create_col, save_col, load_col = st.sidebar.columns(3)
-with create_col:
-    with st.popover("➕ New", width="stretch"):
-        new_db_name = st.text_input(
-            "New database filename or path",
-            value=db_path if not gui_dialogs_available() else "hockey.db",
-            key="new_db_filename",
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    _pg_host = os.environ.get("PGHOST")
+    _pg_dbname = os.environ.get("PGDATABASE")
+    _pg_user = os.environ.get("PGUSER")
+    if _pg_host and _pg_dbname and _pg_user:
+        DATABASE_URL = (
+            f"postgresql://{_pg_user}:{os.environ.get('PGPASSWORD', '')}@"
+            f"{_pg_host}:{os.environ.get('PGPORT', '5432')}/{_pg_dbname}"
+            f"?sslmode={os.environ.get('PGSSLMODE', 'require')}"
         )
-        if st.button("Create", key="create_db_btn", type="primary"):
-            new_path = new_db_name.strip() or "hockey.db"
-            st.session_state["db_path_input"] = new_path
-            st.session_state["db_just_created"] = str(Path(new_path).resolve())
-            st.rerun()
-with save_col:
-    save_db_placeholder = st.empty()
-    if not Path(db_path).exists():
-        save_db_placeholder.button("💾 Save", key="save_db_btn_disabled", width="stretch", disabled=True,
-                                    help="Nothing to save yet — create or load a database first.")
-with load_col:
-    with st.popover("📤 Load", width="stretch"):
-        st.caption(
-            "Upload a previously-downloaded database file to work from it — "
-            "this app only works for one person at a time this way, since "
-            "there's no merging of edits from two people working from "
-            "separate copies."
-        )
-        uploaded_db = st.file_uploader("Upload a database file (.db)", type=["db"], key="db_upload")
-        if uploaded_db is not None:
-            upload_marker = (uploaded_db.name, uploaded_db.size)
-            if st.session_state.get("db_upload_marker") != upload_marker:
-                upload_path = (Path(__file__).parent / "uploaded_hockey.db").resolve()
-                upload_path.write_bytes(uploaded_db.getvalue())
-                st.session_state["db_upload_marker"] = upload_marker
-                st.session_state["db_path_input"] = str(upload_path)
-                st.rerun()
 
-if not db_path.strip():
-    st.sidebar.caption("No database selected.")
-    st.info("Click the database field above to browse, or use New/Load below.")
-    st.stop()
-
-just_created = st.session_state.pop("db_just_created", None)
-resolved_db_path = Path(db_path).resolve()
-
-if not just_created and not resolved_db_path.exists():
-    st.sidebar.caption(f"Not found: {resolved_db_path}")
+st.sidebar.markdown("**Database**")
+if not DATABASE_URL:
+    st.sidebar.error("No database configured.")
     st.info(
-        f"No database exists yet at:\n\n{resolved_db_path}\n\n"
-        "Use **New** to create one, **Load** to upload a database file you "
-        "downloaded before"
-        + (", or Browse to pick a different existing file on this machine." if gui_dialogs_available() else ".")
+        "Set the `DATABASE_URL` environment variable (a full Postgres connection "
+        "string) — or `PGHOST`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`/`PGPORT`/"
+        "`PGSSLMODE` individually — before running the app."
     )
     st.stop()
 
-if just_created:
-    st.sidebar.success(f"Created database at:\n\n{resolved_db_path}")
+# One connection per browser session, reused across every rerun (Streamlit
+# reruns the whole script on every interaction) rather than reconnecting to
+# Postgres every time — cheap for a local SQLite file, but each reconnect
+# against a remote server pays a real network+TLS handshake cost. Kept in
+# session_state (not st.cache_resource) so concurrent sessions never share
+# one psycopg2 connection object across threads.
+if "conn" not in st.session_state:
+    st.session_state["conn"] = core.init_db(DATABASE_URL)
+conn = st.session_state["conn"]
 
-resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
-st.sidebar.caption(f"Using: {resolved_db_path}")
+_db_host = urllib.parse.urlparse(DATABASE_URL).hostname
+_db_name = urllib.parse.urlparse(DATABASE_URL).path.lstrip("/")
+st.sidebar.caption(f"Connected to `{_db_name}` on `{_db_host}`")
+
 api_key = st.sidebar.text_input(
     "ANTHROPIC_API_KEY",
     value=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -868,16 +936,6 @@ api_key = st.sidebar.text_input(
 
 if fitz is None:
     st.sidebar.warning("pymupdf isn't installed — PDF previews will be unavailable.")
-
-conn = core.init_db(db_path)
-
-if Path(db_path).exists():
-    save_db_placeholder.download_button(
-        "💾 Save", data=Path(db_path).read_bytes(),
-        file_name=Path(db_path).name or "hockey.db", mime="application/x-sqlite3",
-        help="Download your current database file locally so you can Load it again next time.",
-        key="save_db_btn", width="stretch",
-    )
 
 # Resolved here (before the Working Division selectbox widget itself is
 # rendered further down) so the sidebar export button — which appears
@@ -1431,54 +1489,28 @@ with tab_stats:
 
         for s in stats:
             row_key = f"{s['team_id']}_{s['number']}"
-            c = st.columns(col_widths)
-            c[0].write(core.display_text(s["team"]))
-            c[1].write(s["number"])
-            c[2].write(core.display_text(s["name"]))
-            c[3].write(s["goals"])
-            c[4].write(s["assists"])
-            c[5].write(s["points"])
-            c[6].write(s["penalties"])
-            c[7].write(s["shootout_goals"])
-            c[8].write(s["shootout_misses"])
-            with c[9]:
-                if s.get("player_id") is None:
-                    with st.popover("➕ Create Player"):
-                        st.caption(f"Linking {core.display_text(s['team'])} #{s['number']}")
-                        new_name = st.text_input("Player name", key=f"stats_new_name_{row_key}")
-                        new_dob = st.text_input(
-                            "Birth date", key=f"stats_new_dob_{row_key}", placeholder="YYYY-MM-DD"
+            with highlighted_row(s.get("player_id")):
+                c = st.columns(col_widths)
+                c[0].write(core.display_text(s["team"]))
+                c[1].write(s["number"])
+                c[2].write(core.display_text(s["name"]))
+                c[3].write(s["goals"])
+                c[4].write(s["assists"])
+                c[5].write(s["points"])
+                c[6].write(s["penalties"])
+                c[7].write(s["shootout_goals"])
+                c[8].write(s["shootout_misses"])
+                with c[9]:
+                    if s.get("player_id") is None:
+                        render_create_player_popover(
+                            conn, f"stats_{row_key}", s["team_id"], s["team"], s["number"], working_division_id
                         )
-                        ncol1, ncol2 = st.columns(2)
-                        new_cfn = ncol1.text_input("Contact first name", key=f"stats_new_cfn_{row_key}")
-                        new_cln = ncol2.text_input("Contact last name", key=f"stats_new_cln_{row_key}")
-                        ncol3, ncol4 = st.columns(2)
-                        new_cph = ncol3.text_input("Contact phone", key=f"stats_new_cph_{row_key}")
-                        new_cem = ncol4.text_input("Contact email", key=f"stats_new_cem_{row_key}")
-                        if st.button("Create & Link", key=f"stats_create_link_{row_key}", type="primary"):
-                            if not new_name.strip():
-                                st.error("Player name is required.")
-                            else:
-                                new_player_id = core.add_player(
-                                    conn, new_name.strip(), birth_date=new_dob.strip() or None,
-                                    current_division_id=working_division_id,
-                                    contact_first_name=new_cfn.strip() or None, contact_last_name=new_cln.strip() or None,
-                                    contact_phone=new_cph.strip() or None, contact_email=new_cem.strip() or None,
-                                )
-                                entry = conn.execute(
-                                    "SELECT id FROM roster_entries WHERE team_id = ? AND number = ?",
-                                    (s["team_id"], s["number"]),
-                                ).fetchone()
-                                if entry:
-                                    core.link_roster_entry_to_player(conn, entry[0], new_player_id)
-                                st.success(f"Created and linked {new_name.strip()}.")
-                                st.rerun()
-                else:
-                    with st.popover("👤 Player Panel"):
-                        render_player_panel(
-                            conn, s["player_id"], division_name_by_id_stats, all_divisions_for_stats,
-                            key_prefix=f"stats_panel_{row_key}",
-                        )
+                    else:
+                        with st.popover("👤 Player Panel"):
+                            render_player_panel(
+                                conn, s["player_id"], division_name_by_id_stats, all_divisions_for_stats,
+                                key_prefix=f"stats_panel_{row_key}",
+                            )
 
 # ---------------------------------------------------------------------------
 # Tab 6: team rosters
@@ -1541,6 +1573,47 @@ with tab_rosters:
                 core.replace_roster(conn, roster_team_id, new_entries)
                 st.success("Roster saved.")
                 st.rerun()
+
+            st.divider()
+            st.subheader(f"{team_options[roster_team_id]} — Player Details")
+            st.caption(
+                "Position and Season Grade for the Working Division above — edits here update that "
+                "player's position on this team, and their most recent evaluation for this division "
+                "(see the player's Evaluations popover for full grade history)."
+            )
+            roster_rows = core.list_roster(conn, roster_team_id)
+            if not roster_rows:
+                st.caption("No players on this roster yet.")
+            else:
+                detail_cols = st.columns([1, 3, 1.5, 1.5])
+                detail_cols[0].markdown("**Number**")
+                detail_cols[1].markdown("**Name**")
+                detail_cols[2].markdown("**Position**")
+                detail_cols[3].markdown("**Season Grade**")
+                for entry in roster_rows:
+                    with highlighted_row(entry["player_id"]):
+                        row_cols = st.columns([1, 3, 1.5, 1.5])
+                        row_cols[0].write(entry["number"])
+                        row_cols[1].write(entry["name"])
+                        if entry["player_id"] is None:
+                            with row_cols[2]:
+                                render_create_player_popover(
+                                    conn, f"roster_{roster_team_id}_{entry['id']}", roster_team_id,
+                                    team_options[roster_team_id], entry["number"], working_division_id,
+                                )
+                            continue
+                        with row_cols[2]:
+                            position_input(
+                                conn, entry["player_id"], working_division_id, roster_team_id,
+                                key=f"roster_position_{roster_team_id}_{entry['id']}",
+                                label_visibility="collapsed",
+                            )
+                        with row_cols[3]:
+                            season_grade_input(
+                                conn, entry["player_id"], working_division_id, roster_team_id,
+                                key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
+                                label_visibility="collapsed",
+                            )
 
             st.divider()
             st.subheader(f"{team_options[roster_team_id]} — Coaches")
@@ -1650,13 +1723,26 @@ with tab_players:
     if not players_list:
         st.write("No players yet — add one above.")
     else:
-        player_options = {p["id"]: p["name"] for p in players_list}
+        player_options = {p["id"]: player_label(conn, p) for p in players_list}
+        player_ids = list(player_options)
+
+        # Previous/Next live inside render_player_panel, alongside Save/
+        # Delete/Evaluations, but that runs *after* this selectbox — so
+        # they can't write "players_tab_select" directly (Streamlit forbids
+        # touching a widget's session_state after it's been instantiated
+        # this run). They stash the target id here instead; applying it to
+        # the real widget key must happen before that widget is created.
+        pending_key = "players_tab_pending_select"
+        if pending_key in st.session_state:
+            st.session_state["players_tab_select"] = st.session_state.pop(pending_key)
+
         selected_player_id = st.selectbox(
-            "Select a player", options=list(player_options), format_func=lambda i: player_options[i],
+            "Select a player", options=player_ids, format_func=lambda i: player_options[i],
             key="players_tab_select",
         )
         render_player_panel(
-            conn, selected_player_id, division_name_by_id, all_divisions_for_players, key_prefix="players_tab"
+            conn, selected_player_id, division_name_by_id, all_divisions_for_players, key_prefix="players_tab",
+            nav_ids=player_ids, nav_pending_key=pending_key,
         )
 
     deleted_players = core.list_players(conn, include_deleted=True)

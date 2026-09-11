@@ -1,8 +1,15 @@
--- Team Pittsburgh Ball Hockey — game sheet database schema
+-- Team Pittsburgh Ball Hockey — game sheet database schema (PostgreSQL)
+--
+-- Ported from schema.sql (SQLite). Differences from the SQLite version:
+--   - INTEGER PRIMARY KEY AUTOINCREMENT -> id SERIAL PRIMARY KEY
+--   - Foreign keys are always enforced by Postgres (no PRAGMA opt-in needed)
+-- created_at/deleted_at/game_date etc. stay TEXT, and went_to_shootout/
+-- scored stay INTEGER 0/1, to keep the exact semantics the app already
+-- reads/writes today.
 
 -- Small durable key/value store for app-level preferences that should
 -- survive a restart (e.g. the last-selected Working Division) — scoped to
--- this database file, same as everything else here.
+-- this database, same as everything else here.
 CREATE TABLE IF NOT EXISTS app_settings (
     key    TEXT PRIMARY KEY,
     value  TEXT
@@ -13,7 +20,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- Everything else (games, teams, and transitively player rosters) belongs to
 -- exactly one division and is fully isolated from every other division.
 CREATE TABLE IF NOT EXISTS divisions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          SERIAL PRIMARY KEY,
     year        INTEGER NOT NULL,
     season      TEXT NOT NULL,          -- e.g. "Summer", "Winter", "Fall", "Spring"
     age_group   TEXT NOT NULL,          -- e.g. "Penguin"
@@ -23,7 +30,7 @@ CREATE TABLE IF NOT EXISTS divisions (
 );
 
 CREATE TABLE IF NOT EXISTS games (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                  SERIAL PRIMARY KEY,
     game_date           TEXT,           -- as written, e.g. "7/14/26"
     division            TEXT,           -- e.g. "Penguin" (age group only; see division_id)
     division_id         INTEGER REFERENCES divisions(id),  -- which season's division this game belongs to
@@ -43,7 +50,7 @@ CREATE TABLE IF NOT EXISTS games (
 );
 
 CREATE TABLE IF NOT EXISTS goals (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              SERIAL PRIMARY KEY,
     game_id         INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
     side            TEXT NOT NULL CHECK(side IN ('home','away')),
     scorer_number   TEXT,           -- player # (text, since sheets sometimes have oddities)
@@ -54,7 +61,7 @@ CREATE TABLE IF NOT EXISTS goals (
 );
 
 CREATE TABLE IF NOT EXISTS penalties (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              SERIAL PRIMARY KEY,
     game_id         INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
     side            TEXT NOT NULL CHECK(side IN ('home','away')),
     player_number   TEXT,
@@ -64,7 +71,7 @@ CREATE TABLE IF NOT EXISTS penalties (
 );
 
 CREATE TABLE IF NOT EXISTS shootout_attempts (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              SERIAL PRIMARY KEY,
     game_id         INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
     side            TEXT NOT NULL CHECK(side IN ('home','away')),
     round           INTEGER NOT NULL,
@@ -76,7 +83,7 @@ CREATE TABLE IF NOT EXISTS shootout_attempts (
 -- division — the same team name in a different division/season is a
 -- separate row with its own roster, not shared.
 CREATE TABLE IF NOT EXISTS teams (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          SERIAL PRIMARY KEY,
     division_id INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     UNIQUE(division_id, name)
@@ -90,7 +97,7 @@ CREATE TABLE IF NOT EXISTS teams (
 -- roster_entries -> teams -> divisions rather than tracked as its own table,
 -- so it can't drift out of sync with the actual rosters.
 CREATE TABLE IF NOT EXISTS players (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                   SERIAL PRIMARY KEY,
     name                 TEXT NOT NULL,
     birth_date           TEXT,
     current_division_id  INTEGER REFERENCES divisions(id),
@@ -106,7 +113,7 @@ CREATE TABLE IF NOT EXISTS players (
 -- used to attribute goals/assists/penalties by number. Optionally linked to
 -- a global player profile once identified.
 CREATE TABLE IF NOT EXISTS roster_entries (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     team_id    INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     number     TEXT NOT NULL,
     name       TEXT NOT NULL,
@@ -116,7 +123,7 @@ CREATE TABLE IF NOT EXISTS roster_entries (
 
 -- Global coach profile — persists across every team/division they coach.
 CREATE TABLE IF NOT EXISTS coaches (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL,
     deleted_at  TEXT,
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
@@ -134,7 +141,7 @@ CREATE TABLE IF NOT EXISTS team_coaches (
 
 -- A single evaluation of a player for a given division/team.
 CREATE TABLE IF NOT EXISTS evaluations (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           SERIAL PRIMARY KEY,
     player_id    INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     division_id  INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
     team_id      INTEGER REFERENCES teams(id) ON DELETE SET NULL,
@@ -161,7 +168,7 @@ CREATE TABLE IF NOT EXISTS player_positions (
 -- Whether a row is "accounted for" is never stored here — it's re-evaluated
 -- live against the games table on every read, so it can't go stale.
 CREATE TABLE IF NOT EXISTS schedule_games (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           SERIAL PRIMARY KEY,
     division_id  INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
     order_num    INTEGER,
     round        TEXT,
@@ -177,7 +184,7 @@ CREATE TABLE IF NOT EXISTS schedule_games (
 
 -- Handy views for stat lookups
 
-CREATE VIEW IF NOT EXISTS player_goal_stats AS
+CREATE OR REPLACE VIEW player_goal_stats AS
 SELECT
     g.id AS game_id,
     g.side,
@@ -187,7 +194,7 @@ FROM goals g
 WHERE g.scorer_number IS NOT NULL AND g.scorer_number <> ''
 GROUP BY g.id, g.side, g.scorer_number;
 
-CREATE VIEW IF NOT EXISTS player_assist_stats AS
+CREATE OR REPLACE VIEW player_assist_stats AS
 SELECT game_id, side, player_number, SUM(cnt) AS assists FROM (
     SELECT game_id, side, assist1_number AS player_number, COUNT(*) AS cnt
     FROM goals WHERE assist1_number IS NOT NULL AND assist1_number <> ''
@@ -196,7 +203,7 @@ SELECT game_id, side, player_number, SUM(cnt) AS assists FROM (
     SELECT game_id, side, assist2_number AS player_number, COUNT(*) AS cnt
     FROM goals WHERE assist2_number IS NOT NULL AND assist2_number <> ''
     GROUP BY game_id, side, assist2_number
-)
+) sub
 GROUP BY game_id, side, player_number;
 
 -- Standings (points, W/L/OT-W/OT-L, head-to-head tiebreakers) are computed in

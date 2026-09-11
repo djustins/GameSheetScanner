@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(python -m py_compile game_sheet_core.py app.py scripts/migrate_sqlite_to_postgres.py process_game_sheet.py edit_game.py)",
+      "Bash(git check-ignore *)",
+      "Bash(mkdir -p /tmp/sqlite_compare)",
+      "Bash(git show *)",
+      "Read(//tmp/**)",
+      "Bash(cp uploaded_hockey.db /tmp/sqlite_compare/compare.db)"
+    ]
+  }
+}

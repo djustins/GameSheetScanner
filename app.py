@@ -191,17 +191,22 @@ def render_add_division_form(conn, key_prefix: str = ""):
     dcol1, dcol2 = st.columns(2)
     with dcol1:
         new_div_year = st.number_input(
-            "Year", min_value=2000, max_value=2100, value=2026, step=1, key=f"{key_prefix}new_div_year"
+            "Year", min_value=2000, max_value=2100, value=2026, step=1, key=f"{key_prefix}new_div_year",
+            disabled=is_read_only,
         )
     with dcol2:
         new_div_season = st.selectbox(
-            "Season", ["Summer", "Fall", "Winter", "Spring"], key=f"{key_prefix}new_div_season"
+            "Season", ["Summer", "Fall", "Winter", "Spring"], key=f"{key_prefix}new_div_season",
+            disabled=is_read_only,
         )
     new_div_age_group = st.selectbox(
         "Age Group", list(core.AGE_GROUPS), key=f"{key_prefix}new_div_age_group", format_func=division_label,
+        disabled=is_read_only,
     )
     st.caption(f"Category: {core.AGE_GROUPS[new_div_age_group]}")
-    if st.button("Add Division", key=f"{key_prefix}add_division_btn", type="primary"):
+    if st.button(
+        "Add Division", key=f"{key_prefix}add_division_btn", type="primary", disabled=is_read_only
+    ):
         core.add_division(conn, int(new_div_year), new_div_season, new_div_age_group)
         st.rerun()
 
@@ -661,15 +666,23 @@ def render_create_player_popover(
     of "create & link a player" regardless of where it's opened from."""
     with st.popover("➕ Create Player"):
         st.caption(f"Linking {core.display_text(team_name)} #{number}")
-        new_name = st.text_input("Player name", key=f"{key_prefix}_new_name")
-        new_dob = st.text_input("Birth date", key=f"{key_prefix}_new_dob", placeholder="YYYY-MM-DD")
+        new_name = st.text_input("Player name", key=f"{key_prefix}_new_name", disabled=is_read_only)
+        new_dob = st.text_input(
+            "Birth date", key=f"{key_prefix}_new_dob", placeholder="YYYY-MM-DD", disabled=is_read_only
+        )
         ncol1, ncol2 = st.columns(2)
-        new_cfn = ncol1.text_input("Contact first name", key=f"{key_prefix}_new_cfn")
-        new_cln = ncol2.text_input("Contact last name", key=f"{key_prefix}_new_cln")
-        ncol3, ncol4 = st.columns(2)
-        new_cph = ncol3.text_input("Contact phone", key=f"{key_prefix}_new_cph")
-        new_cem = ncol4.text_input("Contact email", key=f"{key_prefix}_new_cem")
-        if st.button("Create & Link", key=f"{key_prefix}_create_link", type="primary"):
+        new_cfn = ncol1.text_input("Contact first name", key=f"{key_prefix}_new_cfn", disabled=is_read_only)
+        new_cln = ncol2.text_input("Contact last name", key=f"{key_prefix}_new_cln", disabled=is_read_only)
+        new_cph = new_cem = ""
+        if hide_contact_details:
+            st.caption("🔒 Phone/email are hidden for your role.")
+        else:
+            ncol3, ncol4 = st.columns(2)
+            new_cph = ncol3.text_input("Contact phone", key=f"{key_prefix}_new_cph", disabled=is_read_only)
+            new_cem = ncol4.text_input("Contact email", key=f"{key_prefix}_new_cem", disabled=is_read_only)
+        if st.button(
+            "Create & Link", key=f"{key_prefix}_create_link", type="primary", disabled=is_read_only
+        ):
             if not new_name.strip():
                 st.error("Player name is required.")
             else:
@@ -855,10 +868,12 @@ def render_player_panel(
 
     st.subheader(player["name"])
     ecol1, ecol2 = st.columns(2)
-    edit_name = ecol1.text_input("Name", value=player["name"], key=f"{key_prefix}_name_{player_id}")
+    edit_name = ecol1.text_input(
+        "Name", value=player["name"], key=f"{key_prefix}_name_{player_id}", disabled=is_read_only
+    )
     edit_dob = ecol2.text_input(
         "Birth date", value=player["birth_date"] or "", key=f"{key_prefix}_dob_{player_id}",
-        placeholder="YYYY-MM-DD",
+        placeholder="YYYY-MM-DD", disabled=is_read_only,
     )
     division_ids = [None] + list(division_name_by_id)
     current_idx = (
@@ -868,7 +883,7 @@ def render_player_panel(
     edit_division = dcol1.selectbox(
         "Current division", options=division_ids,
         format_func=lambda i: "(none)" if i is None else division_name_by_id[i],
-        index=current_idx, key=f"{key_prefix}_division_{player_id}",
+        index=current_idx, key=f"{key_prefix}_division_{player_id}", disabled=is_read_only,
     )
     if player["current_division_id"] is not None:
         current_team_entries = [
@@ -890,22 +905,30 @@ def render_player_panel(
                 conn, player_id, player["current_division_id"], h["team_id"],
                 key=f"{key_prefix}_position_{player_id}_{h['team_id']}",
                 help=f"Position on {h['team_name']} for this division." if len(current_team_entries) > 1 else None,
+                disabled=is_read_only,
             )
 
     ecol3, ecol4 = st.columns(2)
     edit_cfn = ecol3.text_input(
-        "Contact first name", value=player["contact_first_name"] or "", key=f"{key_prefix}_cfn_{player_id}"
+        "Contact first name", value=player["contact_first_name"] or "", key=f"{key_prefix}_cfn_{player_id}",
+        disabled=is_read_only,
     )
     edit_cln = ecol4.text_input(
-        "Contact last name", value=player["contact_last_name"] or "", key=f"{key_prefix}_cln_{player_id}"
+        "Contact last name", value=player["contact_last_name"] or "", key=f"{key_prefix}_cln_{player_id}",
+        disabled=is_read_only,
     )
-    ecol5, ecol6 = st.columns(2)
-    edit_cph = ecol5.text_input(
-        "Contact phone", value=player["contact_phone"] or "", key=f"{key_prefix}_cph_{player_id}"
-    )
-    edit_cem = ecol6.text_input(
-        "Contact email", value=player["contact_email"] or "", key=f"{key_prefix}_cem_{player_id}"
-    )
+    if hide_contact_details:
+        st.caption("🔒 Phone/email are hidden for your role.")
+    else:
+        ecol5, ecol6 = st.columns(2)
+        edit_cph = ecol5.text_input(
+            "Contact phone", value=player["contact_phone"] or "", key=f"{key_prefix}_cph_{player_id}",
+            disabled=is_read_only,
+        )
+        edit_cem = ecol6.text_input(
+            "Contact email", value=player["contact_email"] or "", key=f"{key_prefix}_cem_{player_id}",
+            disabled=is_read_only,
+        )
 
     if working_division_id is None:
         st.caption("Select a Working Division above to set this player's Season Grade.")
@@ -914,6 +937,7 @@ def render_player_panel(
             conn, player_id, working_division_id, None, key=f"{key_prefix}_season_grade_{player_id}",
             help="This player's grade for the current Working Division — editing it here updates their "
                  "most recent evaluation for that division instead of adding a new one to its history.",
+            disabled=is_read_only,
         )
 
     show_nav = nav_ids is not None and nav_pending_key is not None
@@ -930,17 +954,25 @@ def render_player_panel(
     else:
         save_col, delete_col, eval_col = st.columns(3)
     with save_col:
-        if st.button("Save changes", key=f"{key_prefix}_save_{player_id}", type="primary"):
-            core.update_player(
-                conn, player_id, name=edit_name.strip(), birth_date=edit_dob.strip() or None,
-                current_division_id=edit_division,
-                contact_first_name=edit_cfn.strip() or None, contact_last_name=edit_cln.strip() or None,
-                contact_phone=edit_cph.strip() or None, contact_email=edit_cem.strip() or None,
-            )
+        if st.button(
+            "Save changes", key=f"{key_prefix}_save_{player_id}", type="primary", disabled=is_read_only
+        ):
+            save_fields = {
+                "name": edit_name.strip(), "birth_date": edit_dob.strip() or None,
+                "current_division_id": edit_division,
+                "contact_first_name": edit_cfn.strip() or None, "contact_last_name": edit_cln.strip() or None,
+            }
+            # Phone/email aren't even rendered (so there's nothing to read
+            # them from) when hide_contact_details hides them — leave those
+            # two columns untouched rather than saving over them.
+            if not hide_contact_details:
+                save_fields["contact_phone"] = edit_cph.strip() or None
+                save_fields["contact_email"] = edit_cem.strip() or None
+            core.update_player(conn, player_id, **save_fields)
             st.success("Saved.")
             st.rerun()
     with delete_col:
-        if st.button("🗑️ Delete player", key=f"{key_prefix}_delete_{player_id}"):
+        if st.button("🗑️ Delete player", key=f"{key_prefix}_delete_{player_id}", disabled=is_read_only):
             confirm_delete_player_dialog(key_prefix, player_id, player["name"])
     with eval_col:
         with st.popover("📋 Evaluations"):
@@ -962,7 +994,7 @@ def render_player_panel(
                         team_part = f" — {ev['team_name']}" if ev["team_name"] else ""
                         st.write(f"{ev['year']} {ev['season']} {ev['age_group']}{team_part}: **{ev['grade']}**")
                     with evcol2:
-                        if st.button("✕", key=f"{key_prefix}_delete_eval_{ev['id']}"):
+                        if st.button("✕", key=f"{key_prefix}_delete_eval_{ev['id']}", disabled=is_read_only):
                             core.delete_evaluation(conn, ev["id"])
                             st.rerun()
             else:
@@ -983,8 +1015,13 @@ def render_player_panel(
                     "Team", options=list(eval_team_options), format_func=lambda i: eval_team_options[i],
                     key=f"{key_prefix}_eval_team_{player_id}",
                 )
-                eval_grade = st.text_input("Grade", key=f"{key_prefix}_eval_grade_{player_id}")
-                if st.button("Add evaluation", key=f"{key_prefix}_add_eval_{player_id}", type="primary"):
+                eval_grade = st.text_input(
+                    "Grade", key=f"{key_prefix}_eval_grade_{player_id}", disabled=is_read_only
+                )
+                if st.button(
+                    "Add evaluation", key=f"{key_prefix}_add_eval_{player_id}", type="primary",
+                    disabled=is_read_only,
+                ):
                     if eval_grade.strip():
                         core.add_evaluation(conn, player_id, eval_division_id, eval_team_id, eval_grade.strip())
                         st.rerun()
@@ -1085,9 +1122,12 @@ if "user" not in st.session_state:
     st.stop()
 
 user = st.session_state["user"]
-# Admins aren't limited by user_pages rows at all — they always get every
-# page, including User Management, which non-admins can never be granted.
+# Admins aren't limited by their role at all — they always get every page
+# (including User Management, which non-admins can never be granted), can
+# always write, and always see full contact details.
 visible_pages = list(core.PAGES) if user["is_admin"] else [p for p in core.PAGES if p in user["pages"]]
+is_read_only = (not user["is_admin"]) and user["read_only"]
+hide_contact_details = (not user["is_admin"]) and user["hide_contact_details"]
 
 with st.sidebar:
     st.markdown(f"**Signed in:** {user['display_name'] or user['email']}" + (" (admin)" if user["is_admin"] else ""))
@@ -1244,6 +1284,19 @@ with tab_home:
         "here's what each tab does."
     )
 
+    if all_divisions:
+        st.info(
+            "👉 **Start here:** pick your **Working Division** from the selector at the top of "
+            "the page (next to the app title). It controls which season's games, standings, "
+            "stats, and rosters you see everywhere else in the app."
+        )
+    else:
+        st.warning(
+            "👉 **Start here:** no divisions exist yet. Create one in the **Divisions** tab "
+            "before doing anything else — everything else in the app (games, standings, stats, "
+            "rosters) is scoped to a division."
+        )
+
     st.subheader("What this app does, in short")
     st.markdown(
         "1. You upload a scanned or photographed game sheet.\n"
@@ -1314,6 +1367,11 @@ with tab_home:
 with tab_process:
     if "process" not in visible_pages:
         st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+    elif is_read_only:
+        st.info(
+            "Your account is read-only, and this page is entirely about creating new data — "
+            "there's nothing here for a read-only account to view."
+        )
     else:
         st.header("Process New Scoresheet")
         if working_division_id is None:
@@ -1558,7 +1616,7 @@ with tab_edit:
                     "stats by hand instead of processing a sheet."
                 )
                 manual_merged = render_game_form("add_new", {}, conn, working_division_id)
-                if st.button("Save new game", key="add_new_save", type="primary"):
+                if st.button("Save new game", key="add_new_save", type="primary", disabled=is_read_only):
                     form_error = game_form_error(manual_merged)
                     if form_error:
                         st.error(form_error)
@@ -1601,7 +1659,7 @@ with tab_edit:
                 delete_confirm_key = f"confirm_delete_game_{game_id}"
                 save_col, delete_col = st.columns(2)
                 with save_col:
-                    if st.button("Save changes", type="primary"):
+                    if st.button("Save changes", type="primary", disabled=is_read_only):
                         form_error = game_form_error(merged)
                         if form_error:
                             st.error(form_error)
@@ -1613,7 +1671,7 @@ with tab_edit:
                             except ValueError as e:
                                 st.error(str(e))
                 with delete_col:
-                    if st.button("🗑️ Delete this game", key=f"delete_game_{game_id}"):
+                    if st.button("🗑️ Delete this game", key=f"delete_game_{game_id}", disabled=is_read_only):
                         st.session_state[delete_confirm_key] = True
                         st.rerun()
 
@@ -1625,7 +1683,10 @@ with tab_edit:
                     )
                     confirm_col, cancel_col = st.columns(2)
                     with confirm_col:
-                        if st.button("Yes, delete", key=f"confirm_yes_delete_game_{game_id}", type="primary"):
+                        if st.button(
+                            "Yes, delete", key=f"confirm_yes_delete_game_{game_id}", type="primary",
+                            disabled=is_read_only,
+                        ):
                             core.delete_game(conn, game_id)
                             st.session_state.pop(delete_confirm_key, None)
                             for key in ("edit_game_id", "edit_source_file", "edit_data"):
@@ -1659,15 +1720,16 @@ with tab_schedule:
             with upload_col:
                 schedule_csv = st.file_uploader(
                     "Upload schedule CSV", type=["csv"], key=f"schedule_csv_{working_division_id}",
+                    disabled=is_read_only,
                 )
             with clear_col:
                 with st.popover("🗑️ Clear schedule"):
                     st.caption("Removes this division's entire saved schedule — e.g. if the wrong CSV was uploaded.")
-                    if st.button("Clear", key="clear_schedule_btn", type="primary"):
+                    if st.button("Clear", key="clear_schedule_btn", type="primary", disabled=is_read_only):
                         core.clear_schedule(conn, working_division_id)
                         st.rerun()
 
-            if schedule_csv is not None:
+            if schedule_csv is not None and not is_read_only:
                 schedule_df = None
                 try:
                     schedule_df = pd.read_csv(schedule_csv)
@@ -1803,8 +1865,8 @@ with tab_rosters:
             st.warning("No division selected. Add one in the Divisions tab first.")
         else:
             with st.expander("Add a new team"):
-                new_team_name = st.text_input("Team name", key="new_team_name")
-                if st.button("Add team"):
+                new_team_name = st.text_input("Team name", key="new_team_name", disabled=is_read_only)
+                if st.button("Add team", disabled=is_read_only):
                     if new_team_name.strip():
                         core.add_team(conn, working_division_id, new_team_name.strip())
                         st.rerun()
@@ -1832,6 +1894,7 @@ with tab_rosters:
                     width="stretch",
                     hide_index=True,
                     num_rows="dynamic",
+                    disabled=is_read_only,
                     column_config={
                         "Number": st.column_config.TextColumn("Number", required=True),
                         "Name": st.column_config.TextColumn("Name", required=True),
@@ -1839,7 +1902,7 @@ with tab_rosters:
                     key=f"roster_editor_{roster_team_id}",
                 )
 
-                if st.button("Save roster", type="primary"):
+                if st.button("Save roster", type="primary", disabled=is_read_only):
                     new_entries = [
                         {"number": str(row["Number"]).strip(), "name": str(row["Name"]).strip()}
                         for _, row in edited_df.iterrows()
@@ -1892,14 +1955,14 @@ with tab_rosters:
                                     conn, entry["player_id"], working_division_id, roster_team_id,
                                     key=f"roster_position_{roster_team_id}_{entry['id']}",
                                     prefetched=positions_by_player.get(entry["player_id"]),
-                                    label_visibility="collapsed",
+                                    label_visibility="collapsed", disabled=is_read_only,
                                 )
                             with row_cols[3]:
                                 season_grade_input(
                                     conn, entry["player_id"], working_division_id, roster_team_id,
                                     key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
                                     prefetched=grades_by_player.get(entry["player_id"]),
-                                    label_visibility="collapsed",
+                                    label_visibility="collapsed", disabled=is_read_only,
                                 )
 
                 st.divider()
@@ -1919,7 +1982,9 @@ with tab_rosters:
                         key=f"assign_coach_pick_{roster_team_id}",
                     ) if available_coaches else None
                 with acol2:
-                    if available_coaches and st.button("Assign", key=f"assign_coach_btn_{roster_team_id}"):
+                    if available_coaches and st.button(
+                        "Assign", key=f"assign_coach_btn_{roster_team_id}", disabled=is_read_only
+                    ):
                         core.assign_coach_to_team(conn, roster_team_id, coach_to_assign)
                         st.rerun()
                 if assigned:
@@ -1931,12 +1996,18 @@ with tab_rosters:
                             key=f"remove_coach_pick_{roster_team_id}",
                         )
                     with remove_col2:
-                        if st.button("Remove", key=f"remove_coach_btn_{roster_team_id}"):
+                        if st.button(
+                            "Remove", key=f"remove_coach_btn_{roster_team_id}", disabled=is_read_only
+                        ):
                             core.remove_coach_from_team(conn, roster_team_id, coach_to_remove)
                             st.rerun()
                 with st.popover("➕ New coach"):
-                    new_coach_name = st.text_input("Coach name", key=f"new_coach_name_{roster_team_id}")
-                    if st.button("Create coach", key=f"create_coach_btn_{roster_team_id}"):
+                    new_coach_name = st.text_input(
+                        "Coach name", key=f"new_coach_name_{roster_team_id}", disabled=is_read_only
+                    )
+                    if st.button(
+                        "Create coach", key=f"create_coach_btn_{roster_team_id}", disabled=is_read_only
+                    ):
                         if new_coach_name.strip():
                             new_coach_id = core.add_coach(conn, new_coach_name.strip())
                             core.assign_coach_to_team(conn, roster_team_id, new_coach_id)
@@ -1984,20 +2055,26 @@ with tab_players:
         }
 
         with st.expander("➕ Add a new player"):
-            pn_name = st.text_input("Name", key="new_player_name")
-            pn_dob = st.text_input("Birth date", key="new_player_dob", placeholder="YYYY-MM-DD")
+            pn_name = st.text_input("Name", key="new_player_name", disabled=is_read_only)
+            pn_dob = st.text_input(
+                "Birth date", key="new_player_dob", placeholder="YYYY-MM-DD", disabled=is_read_only
+            )
             pn_division = st.selectbox(
                 "Current division", options=[None] + list(division_name_by_id),
                 format_func=lambda i: "(none)" if i is None else division_name_by_id[i],
-                key="new_player_division",
+                key="new_player_division", disabled=is_read_only,
             )
             pcol1, pcol2 = st.columns(2)
-            pn_cfn = pcol1.text_input("Contact first name", key="new_player_cfn")
-            pn_cln = pcol2.text_input("Contact last name", key="new_player_cln")
-            pcol3, pcol4 = st.columns(2)
-            pn_cph = pcol3.text_input("Contact phone", key="new_player_cph")
-            pn_cem = pcol4.text_input("Contact email", key="new_player_cem")
-            if st.button("Add player", key="add_player_btn", type="primary"):
+            pn_cfn = pcol1.text_input("Contact first name", key="new_player_cfn", disabled=is_read_only)
+            pn_cln = pcol2.text_input("Contact last name", key="new_player_cln", disabled=is_read_only)
+            pn_cph = pn_cem = ""
+            if hide_contact_details:
+                st.caption("🔒 Phone/email are hidden for your role.")
+            else:
+                pcol3, pcol4 = st.columns(2)
+                pn_cph = pcol3.text_input("Contact phone", key="new_player_cph", disabled=is_read_only)
+                pn_cem = pcol4.text_input("Contact email", key="new_player_cem", disabled=is_read_only)
+            if st.button("Add player", key="add_player_btn", type="primary", disabled=is_read_only):
                 if pn_name.strip():
                     core.add_player(
                         conn, pn_name.strip(), birth_date=pn_dob.strip() or None,
@@ -2082,7 +2159,7 @@ with tab_players:
                     with dpcol1:
                         st.write(p["name"])
                     with dpcol2:
-                        if st.button("Restore", key=f"restore_player_{p['id']}"):
+                        if st.button("Restore", key=f"restore_player_{p['id']}", disabled=is_read_only):
                             core.restore_player(conn, p["id"])
                             st.rerun()
 
@@ -2112,7 +2189,7 @@ with tab_divisions:
                                 f"· {d['days_left']} days left"
                             )
                         with rbcol2:
-                            if st.button("Restore", key=f"restore_div_{d['id']}"):
+                            if st.button("Restore", key=f"restore_div_{d['id']}", disabled=is_read_only):
                                 core.restore_division(conn, d["id"])
                                 st.rerun()
 
@@ -2132,7 +2209,7 @@ with tab_divisions:
                 with dcol1:
                     st.write(f"**{d['year']} {d['season']}** — {division_label(d['age_group'])}")
                 with dcol2:
-                    if st.button("🗑️ Delete", key=f"delete_div_{d['id']}"):
+                    if st.button("🗑️ Delete", key=f"delete_div_{d['id']}", disabled=is_read_only):
                         st.session_state[confirm_key] = True
                         st.rerun()
                 if st.session_state.get(confirm_key):
@@ -2142,7 +2219,10 @@ with tab_divisions:
                     )
                     ccol1, ccol2 = st.columns(2)
                     with ccol1:
-                        if st.button("Yes, delete", key=f"confirm_yes_div_{d['id']}", type="primary"):
+                        if st.button(
+                            "Yes, delete", key=f"confirm_yes_div_{d['id']}", type="primary",
+                            disabled=is_read_only,
+                        ):
                             core.soft_delete_division(conn, d["id"])
                             st.session_state.pop(confirm_key, None)
                             st.rerun()
@@ -2192,10 +2272,21 @@ if user["is_admin"]:
                     "Pages", options=list(core.PAGES), default=role["pages"],
                     format_func=lambda k: core.PAGES[k], key=f"role_pages_{role['id']}",
                 )
+                edit_role_read_only = st.checkbox(
+                    "Read-only (can view its pages but not save/create/delete)",
+                    value=role["read_only"], key=f"role_read_only_{role['id']}",
+                )
+                edit_role_hide_contact = st.checkbox(
+                    "Hide contact details (parent name still visible, phone/email hidden)",
+                    value=role["hide_contact_details"], key=f"role_hide_contact_{role['id']}",
+                )
                 role_save_col, role_delete_col = st.columns(2)
                 with role_save_col:
                     if st.button("Save", key=f"role_save_{role['id']}"):
-                        core.update_role(conn, role["id"], name=edit_role_name, pages=edit_role_pages)
+                        core.update_role(
+                            conn, role["id"], name=edit_role_name, pages=edit_role_pages,
+                            read_only=edit_role_read_only, hide_contact_details=edit_role_hide_contact,
+                        )
                         st.success("Saved.")
                         st.rerun()
                 with role_delete_col:
@@ -2209,15 +2300,25 @@ if user["is_admin"]:
             new_role_pages = st.multiselect(
                 "Pages", options=list(core.PAGES), format_func=lambda k: core.PAGES[k], key="new_role_pages"
             )
+            new_role_read_only = st.checkbox(
+                "Read-only (can view its pages but not save/create/delete)", key="new_role_read_only"
+            )
+            new_role_hide_contact = st.checkbox(
+                "Hide contact details (parent name still visible, phone/email hidden)",
+                key="new_role_hide_contact",
+            )
             if st.button("Create Role", type="primary", key="create_role_btn"):
                 if not new_role_name.strip():
                     st.error("Enter a role name.")
                 elif any(r["name"].lower() == new_role_name.strip().lower() for r in roles):
                     st.error("A role with that name already exists.")
                 else:
-                    core.add_role(conn, new_role_name, pages=new_role_pages)
+                    core.add_role(
+                        conn, new_role_name, pages=new_role_pages,
+                        read_only=new_role_read_only, hide_contact_details=new_role_hide_contact,
+                    )
                     st.success(f"Created role {new_role_name}.")
-                    for _k in ("new_role_name", "new_role_pages"):
+                    for _k in ("new_role_name", "new_role_pages", "new_role_read_only", "new_role_hide_contact"):
                         st.session_state.pop(_k, None)
                     st.rerun()
 

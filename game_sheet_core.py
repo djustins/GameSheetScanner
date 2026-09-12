@@ -553,22 +553,35 @@ def set_role_pages(conn: PGConnection, role_id: int, pages: list[str]):
 
 
 def list_roles(conn: PGConnection) -> list[dict]:
-    rows = conn.execute("SELECT id, name FROM roles ORDER BY name").fetchall()
-    roles = [{"id": r[0], "name": r[1]} for r in rows]
+    rows = conn.execute("SELECT id, name, read_only, hide_contact_details FROM roles ORDER BY name").fetchall()
+    roles = [
+        {"id": r[0], "name": r[1], "read_only": bool(r[2]), "hide_contact_details": bool(r[3])} for r in rows
+    ]
     for role in roles:
         role["pages"] = list_role_pages(conn, role["id"])
     return roles
 
 
 def get_role(conn: PGConnection, role_id: int) -> dict | None:
-    row = conn.execute("SELECT id, name FROM roles WHERE id = %s", (role_id,)).fetchone()
+    row = conn.execute(
+        "SELECT id, name, read_only, hide_contact_details FROM roles WHERE id = %s", (role_id,)
+    ).fetchone()
     if not row:
         return None
-    return {"id": row[0], "name": row[1], "pages": list_role_pages(conn, row[0])}
+    return {
+        "id": row[0], "name": row[1], "read_only": bool(row[2]), "hide_contact_details": bool(row[3]),
+        "pages": list_role_pages(conn, row[0]),
+    }
 
 
-def add_role(conn: PGConnection, name: str, pages: list[str] | None = None) -> int:
-    cur = conn.execute("INSERT INTO roles (name) VALUES (%s) RETURNING id", (name.strip(),))
+def add_role(
+    conn: PGConnection, name: str, pages: list[str] | None = None,
+    read_only: bool = False, hide_contact_details: bool = False,
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO roles (name, read_only, hide_contact_details) VALUES (%s, %s, %s) RETURNING id",
+        (name.strip(), int(read_only), int(hide_contact_details)),
+    )
     role_id = cur.fetchone()[0]
     conn.commit()
     if pages:
@@ -576,9 +589,18 @@ def add_role(conn: PGConnection, name: str, pages: list[str] | None = None) -> i
     return role_id
 
 
-def update_role(conn: PGConnection, role_id: int, name: str | None = None, pages: list[str] | None = None):
+def update_role(
+    conn: PGConnection, role_id: int, name: str | None = None, pages: list[str] | None = None,
+    read_only: bool | None = None, hide_contact_details: bool | None = None,
+):
     if name is not None:
         conn.execute("UPDATE roles SET name = %s WHERE id = %s", (name.strip(), role_id))
+        conn.commit()
+    if read_only is not None:
+        conn.execute("UPDATE roles SET read_only = %s WHERE id = %s", (int(read_only), role_id))
+        conn.commit()
+    if hide_contact_details is not None:
+        conn.execute("UPDATE roles SET hide_contact_details = %s WHERE id = %s", (int(hide_contact_details), role_id))
         conn.commit()
     if pages is not None:
         set_role_pages(conn, role_id, pages)
@@ -592,6 +614,17 @@ def delete_role(conn: PGConnection, role_id: int):
 
 
 # --- Users --------------------------------------------------------------
+
+def _get_role_flags(conn: PGConnection, role_id: int | None) -> tuple[bool, bool]:
+    """(read_only, hide_contact_details) for a role, or (False, False) if
+    role_id is None — the defaults for a user with no role assigned."""
+    if role_id is None:
+        return False, False
+    row = conn.execute(
+        "SELECT read_only, hide_contact_details FROM roles WHERE id = %s", (role_id,)
+    ).fetchone()
+    return (bool(row[0]), bool(row[1])) if row else (False, False)
+
 
 def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
@@ -607,6 +640,7 @@ def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     ]
     for u in users:
         u["pages"] = list_role_pages(conn, u["role_id"])
+        u["read_only"], u["hide_contact_details"] = _get_role_flags(conn, u["role_id"])
     return users
 
 
@@ -626,9 +660,10 @@ def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
 
 def verify_login(conn: PGConnection, email: str, password: str) -> dict | None:
     """Returns the user dict (password hash stripped) plus their permitted
-    pages (derived from their role; empty if they have none) if email/
-    password match an active account, else None. Deliberately doesn't tell
-    the caller whether the email exists vs. the password was wrong — same
+    pages, read_only, and hide_contact_details flags (all derived from
+    their role; the defaults below if they have none) if email/password
+    match an active account, else None. Deliberately doesn't tell the
+    caller whether the email exists vs. the password was wrong — same
     generic failure either way, so a login form can't be used to enumerate
     registered emails."""
     user = get_user_by_email(conn, email)
@@ -638,6 +673,7 @@ def verify_login(conn: PGConnection, email: str, password: str) -> dict | None:
         return None
     user.pop("password_hash")
     user["pages"] = list_role_pages(conn, user["role_id"])
+    user["read_only"], user["hide_contact_details"] = _get_role_flags(conn, user["role_id"])
     return user
 
 

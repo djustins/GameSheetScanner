@@ -58,8 +58,11 @@ python scripts/manage_users.py add you@example.com --admin
 
 `scripts/manage_users.py` also handles `list`, `set-password`, `deactivate`, and
 `reactivate` — useful for emergency access if every admin ever gets locked out.
-Non-admin accounts are limited to whichever tabs an admin has checked off for
-them in User Management; admins always see every tab.
+Non-admin accounts are limited to whichever pages an admin has granted them
+through a role; admins always see every page. A role can also be marked
+**read-only** (can view its pages but not save/create/delete) and/or
+**hide contact details** (a player's parent contact *name* stays visible,
+but phone/email don't) — both configured per role in User Management.
 
 ## Usage
 

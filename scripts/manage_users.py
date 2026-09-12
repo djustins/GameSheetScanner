@@ -86,6 +86,13 @@ def main():
     p_add_role = sub.add_parser("add-role", help="Create a new role")
     p_add_role.add_argument("name")
     p_add_role.add_argument("--pages", help=f"Comma-separated page keys: {', '.join(core.PAGES)}")
+    p_add_role.add_argument(
+        "--read-only", action="store_true", help="Users with this role can view its pages but not save/create/delete"
+    )
+    p_add_role.add_argument(
+        "--hide-contact", action="store_true",
+        help="Users with this role see a player's parent contact NAME but not their phone/email",
+    )
 
     sub.add_parser("list-roles", help="List all roles and the pages each grants")
 
@@ -112,7 +119,11 @@ def main():
             print("No roles yet.")
             return
         for r in roles:
-            print(f"  {r['name']:20s} {', '.join(r['pages']) or '(no pages)'}")
+            flags = ", ".join(
+                f for f, on in [("read-only", r["read_only"]), ("hides contact details", r["hide_contact_details"])]
+                if on
+            )
+            print(f"  {r['name']:20s} {', '.join(r['pages']) or '(no pages)':40s} {flags}")
         return
 
     if args.command == "add-role":
@@ -120,7 +131,9 @@ def main():
         invalid = [p for p in pages if p not in core.PAGES]
         if invalid:
             sys.exit(f"Unknown page(s): {', '.join(invalid)}. Valid pages: {', '.join(core.PAGES)}")
-        role_id = core.add_role(conn, args.name, pages=pages)
+        role_id = core.add_role(
+            conn, args.name, pages=pages, read_only=args.read_only, hide_contact_details=args.hide_contact
+        )
         print(f"Created role #{role_id} ({args.name}).")
         return
 

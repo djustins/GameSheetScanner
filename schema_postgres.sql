@@ -210,6 +210,18 @@ CREATE TABLE IF NOT EXISTS roles (
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 1/0: a read-only role's users can view their granted pages but can't
+-- save/create/delete anything. Added via ALTER (not the CREATE TABLE
+-- above) so it reaches an already-existing roles table the same way a
+-- fresh one gets it.
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS read_only INTEGER NOT NULL DEFAULT 0;
+
+-- 1/0: a role with this set can still see a player's parent contact NAME
+-- (first/last) wherever it's shown, but not their phone/email — e.g. a
+-- Coach role that should be able to identify whose parent is whose without
+-- seeing everyone's personal contact details.
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS hide_contact_details INTEGER NOT NULL DEFAULT 0;
+
 -- Which tabs (page keys defined in game_sheet_core.PAGES) a role grants.
 CREATE TABLE IF NOT EXISTS role_pages (
     role_id  INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,

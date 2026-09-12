@@ -440,6 +440,18 @@ class _ConnWrapper:
     rewritten to use `RETURNING` instead."""
 
     def __init__(self, pg_conn):
+        # psycopg2 defaults to autocommit=False, so even a plain SELECT
+        # opens an implicit transaction that stays open ("idle in
+        # transaction") until something calls commit() — which read-only
+        # functions in this file never do. Since one connection is cached
+        # per browser session and reused for the session's whole lifetime,
+        # that left sessions sitting idle-in-transaction for hours between
+        # writes, which can block schema-changing DDL (ALTER TABLE, etc.)
+        # from ever acquiring its lock. Autocommit makes every statement
+        # its own transaction, closing that gap; nothing here relies on
+        # rolling back a multi-statement batch (see .rollback() below —
+        # it's never actually called anywhere in this codebase).
+        pg_conn.autocommit = True
         self._conn = pg_conn
 
     def execute(self, sql: str, params=()):

@@ -37,6 +37,7 @@ import altair as alt
 import anthropic
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 
 import game_sheet_core as core
@@ -1312,6 +1313,38 @@ with tab_home:
     )
 
     st.subheader("Page guide")
+    st.caption("Click a card to jump straight to that page.")
+
+    # Card order matches _tab_labels' order below exactly — index 0 is Home
+    # (this tab), so these start at 1. Whole-card navigation isn't something
+    # st.tabs() supports natively (Streamlit tabs are visual-only, no
+    # server-side "switch to tab N" API), so a card click is wired up via a
+    # tiny injected script that clicks the real tab button at that index —
+    # see the components.html call below. Fragile in the sense that it
+    # depends on Streamlit's tab buttons keeping the `data-testid="stTab"`
+    # attribute, but that's been stable across recent versions.
+    _card_colors = THEME_COLORS[theme_mode]
+    st.markdown(
+        f"""
+        <style>
+        .home-nav-card {{
+            border: 1px solid {_card_colors['secondary_bg']};
+            background-color: {_card_colors['panel_bg']};
+            border-radius: 10px;
+            padding: 0.9rem 1.1rem;
+            margin-bottom: 0.6rem;
+            cursor: pointer;
+            transition: border-color 0.15s ease;
+        }}
+        .home-nav-card:hover {{ border-color: {_card_colors['primary']}; }}
+        .home-nav-card .home-nav-title {{ font-weight: 700; margin-bottom: 0.2rem; color: {_card_colors['text']}; }}
+        .home-nav-card .home-nav-desc {{ font-size: 0.85rem; color: {_card_colors['text']}; opacity: 0.85; }}
+        .home-nav-card .home-nav-lock {{ font-size: 0.8rem; margin-top: 0.4rem; color: {_card_colors['text']}; opacity: 0.8; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     page_guides = [
         ("📄 Process New Scoresheet", "process",
          "Upload one or more scanned/photographed game sheets. Multi-page PDFs are split "
@@ -1342,20 +1375,63 @@ with tab_home:
          "Create and manage divisions — one per year/season/age-group combination (e.g. "
          "\"2026 Summer Penguin\"). Deleting one sends it to a 30-day recycle bin first."),
     ]
-    for title, page_key, description in page_guides:
-        with st.container(border=True):
-            st.markdown(f"**{title}**")
-            st.caption(description)
-            if page_key not in visible_pages and not user["is_admin"]:
-                st.caption("🔒 You don't currently have access to this page.")
+    for tab_index, (title, page_key, description) in enumerate(page_guides, start=1):
+        locked = page_key not in visible_pages and not user["is_admin"]
+        lock_html = (
+            '<div class="home-nav-lock">🔒 You don\'t currently have access to this page.</div>'
+            if locked else ""
+        )
+        st.markdown(
+            f"""
+            <div class="home-nav-card" data-tab-index="{tab_index}">
+                <div class="home-nav-title">{title}</div>
+                <div class="home-nav-desc">{description}</div>
+                {lock_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if user["is_admin"]:
-        with st.container(border=True):
-            st.markdown("**🔑 User Management** _(admins only)_")
-            st.caption(
-                "Create accounts and control who can see which pages above, using named roles "
-                "(e.g. \"Coach\") instead of picking pages one by one for every person."
-            )
+        st.markdown(
+            f"""
+            <div class="home-nav-card" data-tab-index="{len(page_guides) + 1}">
+                <div class="home-nav-title">🔑 User Management <span style="font-weight:400;">(admins only)</span></div>
+                <div class="home-nav-desc">Create accounts and control who can see which pages above, using
+                    named roles (e.g. "Coach") instead of picking pages one by one for every person.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Wires up card clicks to the real tab buttons. Runs inside its own
+    # (same-origin) iframe, which is why it reaches into window.parent to
+    # touch the main app's DOM — st.markdown's raw HTML can't run <script>
+    # tags itself. The MutationObserver re-wires after every rerun, since
+    # Streamlit replaces these elements' DOM nodes each time.
+    components.html(
+        """
+        <script>
+        (function() {
+            function wire() {
+                var doc = window.parent.document;
+                doc.querySelectorAll('.home-nav-card').forEach(function(card) {
+                    if (card.getAttribute('data-wired')) return;
+                    card.setAttribute('data-wired', '1');
+                    card.addEventListener('click', function() {
+                        var idx = parseInt(card.getAttribute('data-tab-index'), 10);
+                        var tabs = doc.querySelectorAll('[data-testid="stTab"]');
+                        if (tabs[idx]) { tabs[idx].click(); }
+                    });
+                });
+            }
+            wire();
+            new MutationObserver(wire).observe(window.parent.document.body, {childList: true, subtree: true});
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
     st.divider()
     st.caption(f"Team Pittsburgh Ball Hockey Game Sheet Scanner — v{APP_VERSION}")

@@ -753,10 +753,15 @@ def render_evaluation_progress_chart(evaluations: list[dict]):
     Only evaluations whose grade is one of the league's actual skill tiers
     (GRADE_TIERS) are plotted; a position note like "Goalie" or a status
     like "New" isn't a point on a skill axis and is left off, though it's
-    still visible in the Evaluations popover's full list. Needs at least 2
-    graded seasons to be worth showing as a trend."""
+    still visible in the Evaluations popover's full list. Shows a single
+    point for one graded season (no trend line yet, but still worth
+    seeing), or an explanatory caption instead of just going silent when
+    there's nothing gradeable to plot."""
     tiered = [e for e in evaluations if e["grade"] and e["grade"].strip().upper() in GRADE_TIERS]
-    if len(tiered) < 2:
+    if not tiered:
+        st.caption(
+            "No graded evaluations (A/B/C/D) on file yet — add one in the Evaluations popover above."
+        )
         return
 
     rows = [
@@ -775,7 +780,10 @@ def render_evaluation_progress_chart(evaluations: list[dict]):
     df = pd.DataFrame(by_season.values())
     season_order = list(by_season)
 
-    st.caption("Evaluation progress over time")
+    if len(by_season) == 1:
+        st.caption("Evaluation grade (only one graded season so far — add another to see a trend)")
+    else:
+        st.caption("Evaluation progress over time")
     chart = (
         alt.Chart(df)
         .mark_line(point={"size": 80, "filled": True}, strokeWidth=2, color="#FFC72C")

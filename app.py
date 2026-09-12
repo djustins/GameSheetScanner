@@ -1144,7 +1144,7 @@ if working_division_id is not None:
 with st.sidebar.expander("🔧 Utilities"):
     st.caption(
         "Split multi-page PDFs into individual single-page files — usually unnecessary, since "
-        "Process New Sheets already auto-splits on upload. Use this to just download the split "
+        "Process New Scoresheet already auto-splits on upload. Use this to just download the split "
         "pages without processing them."
     )
 
@@ -1176,7 +1176,7 @@ with st.sidebar.expander("🔧 Utilities"):
                 "Save all as ZIP", data=zip_buf.getvalue(), file_name="split_pages.zip",
                 mime="application/zip", type="primary",
             )
-            if st.button("Load into Process New Sheets", type="primary"):
+            if st.button("Load into Process New Scoresheet", type="primary"):
                 for key in list(st.session_state.keys()):
                     if key.startswith(("data_", "proc_", "replace_target_")):
                         del st.session_state[key]
@@ -1188,7 +1188,7 @@ with st.sidebar.expander("🔧 Utilities"):
                     for name, data in results
                 ]
                 st.session_state.queue_index = 0
-                st.success("Loaded — switch to the **Process New Sheets** tab to continue.")
+                st.success("Loaded — switch to the **Process New Scoresheet** tab to continue.")
 
 # ---------------------------------------------------------------------------
 # Global working division — stays selected for the whole session, wherever
@@ -1213,21 +1213,99 @@ if not all_divisions:
     with st.popover("➕ Create your first division"):
         render_add_division_form(conn, key_prefix="top_")
 
-# The 8 regular tabs are always in the bar for everyone — a signed-in user
-# without permission for one just sees an access-restricted message inside
-# it (each tab's `if page_key not in visible_pages:` guard below) rather
-# than the tab disappearing outright. User Management is different: it's
-# only ever meaningful for admins (granting page access requires already
-# having it), so it's the one tab that's actually absent for non-admins.
-_tab_labels = ["Process New Sheets", "Games", "Schedule", "Standings", "Player Stats",
+# Home is always first and visible to everyone regardless of role — it's
+# just a static tutorial/overview, not a data page, so it's never worth
+# restricting (someone with only one or two pages granted still needs
+# somewhere to learn what the app does at all). The 8 regular tabs after
+# it are always in the bar too — a signed-in user without permission for
+# one just sees an access-restricted message inside it (each tab's
+# `if page_key not in visible_pages:` guard below) rather than the tab
+# disappearing outright. User Management is different: it's only ever
+# meaningful for admins (granting page access requires already having
+# it), so it's the one tab that's actually absent for non-admins.
+_tab_labels = ["🏠 Home", "Process New Scoresheet", "Games", "Schedule", "Standings", "Player Stats",
                "Team Rosters", "Players", "Divisions"]
 if user["is_admin"]:
     _tab_labels.append("User Management")
 
 _tabs = st.tabs(_tab_labels)
-(tab_process, tab_edit, tab_schedule, tab_standings, tab_stats,
- tab_rosters, tab_players, tab_divisions) = _tabs[:8]
-tab_users = _tabs[8] if user["is_admin"] else None
+(tab_home, tab_process, tab_edit, tab_schedule, tab_standings, tab_stats,
+ tab_rosters, tab_players, tab_divisions) = _tabs[:9]
+tab_users = _tabs[9] if user["is_admin"] else None
+
+# ---------------------------------------------------------------------------
+# Tab 0: home (tutorial/overview landing page)
+# ---------------------------------------------------------------------------
+
+with tab_home:
+    st.header("Welcome to Team Pittsburgh Ball Hockey")
+    st.caption(
+        "This app turns handwritten game sheets into stored stats, standings, and rosters — "
+        "here's what each tab does."
+    )
+
+    st.subheader("What this app does, in short")
+    st.markdown(
+        "1. You upload a scanned or photographed game sheet.\n"
+        "2. Claude (Anthropic's AI) reads the handwriting and extracts the teams, score, goals, "
+        "assists, penalties, and shootout rounds.\n"
+        "3. You review and correct that extraction before anything is saved — nothing is written "
+        "to the database without your confirmation.\n"
+        "4. From there, standings, player stats, and rosters are all computed automatically from "
+        "the games you've entered — no separate data entry.\n\n"
+        "Everything is scoped to a **Working Division** (one season's instance of an age group, "
+        "e.g. \"2026 Summer Penguin\") — pick it from the selector near the top of the page, and "
+        "it applies across every tab below."
+    )
+
+    st.subheader("Page guide")
+    page_guides = [
+        ("📄 Process New Scoresheet", "process",
+         "Upload one or more scanned/photographed game sheets. Multi-page PDFs are split "
+         "automatically. Review the AI's extraction and correct anything before saving."),
+        ("🏒 Games", "edit",
+         "Browse every game already saved for the Working Division, and correct or delete one — "
+         "for example if a sheet was mis-scanned or a score needs fixing."),
+        ("📅 Schedule", "schedule",
+         "Upload the season's schedule (CSV) once. It's saved to the database and compared "
+         "against entered games every time you view it, so you always know which games still "
+         "need a sheet."),
+        ("🏆 Standings", "standings",
+         "Live standings for the Working Division — points, record, and the full tiebreaker "
+         "chain — computed from every game entered so far."),
+        ("📊 Player Stats", "stats",
+         "Goals, assists, points, penalty minutes, and shootout results per player, for the "
+         "Working Division."),
+        ("👥 Team Rosters", "rosters",
+         "Add players to a team by jersey number so stats can be attributed by name instead of "
+         "just a number. Also sets each player's position and this season's grade, and manages "
+         "which coach(es) are assigned to the team."),
+        ("🧑 Players", "players",
+         "Every player's profile — contact info, birth date, evaluation history across every "
+         "season they've been rated in (with a progress chart), and their stats in each division "
+         "they've played in. A player profile is global and persists across seasons; a roster row "
+         "is just that season's jersey number, linked to a profile once someone identifies who it is."),
+        ("🗓️ Divisions", "divisions",
+         "Create and manage divisions — one per year/season/age-group combination (e.g. "
+         "\"2026 Summer Penguin\"). Deleting one sends it to a 30-day recycle bin first."),
+    ]
+    for title, page_key, description in page_guides:
+        with st.container(border=True):
+            st.markdown(f"**{title}**")
+            st.caption(description)
+            if page_key not in visible_pages and not user["is_admin"]:
+                st.caption("🔒 You don't currently have access to this page.")
+
+    if user["is_admin"]:
+        with st.container(border=True):
+            st.markdown("**🔑 User Management** _(admins only)_")
+            st.caption(
+                "Create accounts and control who can see which pages above, using named roles "
+                "(e.g. \"Coach\") instead of picking pages one by one for every person."
+            )
+
+    st.divider()
+    st.caption(f"Team Pittsburgh Ball Hockey Game Sheet Scanner — v{APP_VERSION}")
 
 # ---------------------------------------------------------------------------
 # Tab 1: process new sheets
@@ -1237,7 +1315,7 @@ with tab_process:
     if "process" not in visible_pages:
         st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
     else:
-        st.header("Process New Sheets")
+        st.header("Process New Scoresheet")
         if working_division_id is None:
             st.warning("No division selected. Add one in the Divisions tab first.")
         # Keyed with a version counter so Clear/Cancel below can force the

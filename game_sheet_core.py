@@ -517,7 +517,7 @@ def set_setting(conn: PGConnection, key: str, value: str):
 # (scripts/manage_users.py) validates against the same set without
 # duplicating it, and so it can't silently drift out of sync with app.py.
 PAGES = {
-    "process": "Process New Sheets",
+    "process": "Process New Scoresheet",
     "edit": "Games",
     "schedule": "Schedule",
     "standings": "Standings",

@@ -1174,13 +1174,29 @@ else:
     working_division_id = None
 
 if working_division_id is not None:
-    st.sidebar.download_button(
-        "Export to Excel",
-        data=core.export_workbook(conn, working_division_id),
-        file_name="hockey_export.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Downloads the working division's Games, Standings, Player Stats, and Rosters as sheets in one .xlsx file.",
-    )
+    # st.download_button needs its data ready upfront, unlike a plain
+    # button — so calling export_workbook() directly here would rebuild
+    # the whole workbook (several sheets, each its own query) on *every*
+    # rerun just to keep the button armed, whether or not it's ever
+    # clicked. Cached per division instead: built once, on request, and
+    # reused until the division changes or a rebuild is asked for.
+    _export_cache_key = f"export_workbook_{working_division_id}"
+    if _export_cache_key not in st.session_state:
+        if st.sidebar.button("Prepare Excel export", width="stretch"):
+            st.session_state[_export_cache_key] = core.export_workbook(conn, working_division_id)
+            st.rerun()
+    else:
+        st.sidebar.download_button(
+            "Export to Excel",
+            data=st.session_state[_export_cache_key],
+            file_name="hockey_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Downloads the working division's Games, Standings, Player Stats, and Rosters as sheets in "
+                 "one .xlsx file. Built as of when you clicked Prepare — click it again for a fresh copy.",
+        )
+        if st.sidebar.button("↻ Rebuild export", help="Data changed since this was built? Regenerate it."):
+            del st.session_state[_export_cache_key]
+            st.rerun()
 
 with st.sidebar.expander("🔧 Utilities"):
     st.caption(
@@ -1897,6 +1913,16 @@ with tab_stats:
             for col, label in zip(headers, ["Team", "#", "Name", "G", "A", "PTS", "PIM", "SO Made", "SO Missed", ""]):
                 col.markdown(f"**{label}**")
 
+            # A player's full panel (used to sit inline in a per-row
+            # st.popover here) is now a button that just remembers which
+            # player was picked — st.popover's body runs on every rerun
+            # regardless of whether it's open, same as a tab's, so putting
+            # the panel (with its evaluation chart and per-division stats
+            # queries) inside one for every row meant rendering ~18 players'
+            # full panels, unopened, on every single interaction anywhere
+            # in the app. Rendering the (at most one) selected player's
+            # panel once, below the table, does the same job for a fraction
+            # of the queries.
             for s in stats:
                 row_key = f"{s['team_id']}_{s['number']}"
                 with highlighted_row(s.get("player_id")):
@@ -1915,12 +1941,23 @@ with tab_stats:
                             render_create_player_popover(
                                 conn, f"stats_{row_key}", s["team_id"], s["team"], s["number"], working_division_id
                             )
-                        else:
-                            with st.popover("👤 Player Panel"):
-                                render_player_panel(
-                                    conn, s["player_id"], division_name_by_id_stats, all_divisions_for_stats,
-                                    key_prefix=f"stats_panel_{row_key}",
-                                )
+                        elif st.button("👤 Player Panel", key=f"stats_panel_btn_{row_key}"):
+                            st.session_state["stats_selected_player_id"] = s["player_id"]
+                            st.rerun()
+
+            selected_stats_player_id = st.session_state.get("stats_selected_player_id")
+            if selected_stats_player_id is not None:
+                st.divider()
+                close_col, _spacer = st.columns([1, 5])
+                with close_col:
+                    if st.button("✕ Close panel", key="stats_panel_close"):
+                        del st.session_state["stats_selected_player_id"]
+                        st.rerun()
+                with st.container(border=True):
+                    render_player_panel(
+                        conn, selected_stats_player_id, division_name_by_id_stats, all_divisions_for_stats,
+                        key_prefix="stats_panel_selected",
+                    )
 
 # ---------------------------------------------------------------------------
 # Tab 6: team rosters

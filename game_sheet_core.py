@@ -189,33 +189,44 @@ def normalize_division(value: str | None) -> str | None:
     return normalize_text(matched) if matched else normalize_text(value)
 
 
-def match_team_name(conn: PGConnection, division_id: int, value: str | None) -> str | None:
+def match_team_name(
+    conn: PGConnection, division_id: int, value: str | None, existing_teams: list[str] | None = None,
+) -> str | None:
     """Best-effort match of free text (extraction/typos) to a team already in
     this division, e.g. "Avachale" -> "Avalanche". Returns None if there's no
-    confident match (including when this division has no teams yet)."""
+    confident match (including when this division has no teams yet).
+
+    `existing_teams` lets a caller matching many values against the same
+    division (e.g. list_schedule, once per scheduled game) pass the team
+    list in once instead of this re-querying it — unchanging within that
+    caller — on every single call."""
     if not value or not value.strip():
         return None
     value = value.strip()
-    existing = [
-        row[0] for row in conn.execute(
-            "SELECT name FROM teams WHERE division_id = %s", (division_id,)
-        ).fetchall()
-    ]
-    if not existing:
+    if existing_teams is None:
+        existing_teams = [
+            row[0] for row in conn.execute(
+                "SELECT name FROM teams WHERE division_id = %s", (division_id,)
+            ).fetchall()
+        ]
+    if not existing_teams:
         return None
-    exact = next((n for n in existing if n.lower() == value.lower()), None)
+    exact = next((n for n in existing_teams if n.lower() == value.lower()), None)
     if exact:
         return display_text(exact)
-    match = _best_fuzzy_match(value, existing)
+    match = _best_fuzzy_match(value, existing_teams)
     return display_text(match) if match else None
 
 
-def normalize_team_name(conn: PGConnection, division_id: int, value: str | None) -> str | None:
+def normalize_team_name(
+    conn: PGConnection, division_id: int, value: str | None, existing_teams: list[str] | None = None,
+) -> str | None:
     """Storage form for a team name field: auto-corrected to an existing team
     in this division (fuzzy-matched) when there's a confident match, else
     just lowercased/trimmed like any other identity field so unrecognized
-    text (e.g. a genuinely new team) isn't lost."""
-    matched = match_team_name(conn, division_id, value)
+    text (e.g. a genuinely new team) isn't lost. `existing_teams` is passed
+    straight through to match_team_name — see its docstring."""
+    matched = match_team_name(conn, division_id, value, existing_teams=existing_teams)
     return normalize_text(matched) if matched else normalize_text(value)
 
 
@@ -1032,13 +1043,20 @@ def list_schedule(conn: PGConnection, division_id: int) -> list[dict]:
            ORDER BY game_date, order_num""",
         (division_id,),
     ).fetchall()
+    # Fetched once and reused for every row below — this division's team
+    # list doesn't change mid-call, so re-querying it per scheduled game
+    # (as match_team_name does by default) was one extra round trip per
+    # game, twice over (home and away), for no different a result.
+    existing_teams = [
+        row[0] for row in conn.execute("SELECT name FROM teams WHERE division_id = %s", (division_id,)).fetchall()
+    ]
     cols = ["id", "order_num", "round", "game_date", "home_team", "away_team",
             "start_time", "end_time", "location", "field"]
     result = []
     for values in rows:
         r = dict(zip(cols, values))
-        home_key = normalize_team_name(conn, division_id, r["home_team"])
-        away_key = normalize_team_name(conn, division_id, r["away_team"])
+        home_key = normalize_team_name(conn, division_id, r["home_team"], existing_teams=existing_teams)
+        away_key = normalize_team_name(conn, division_id, r["away_team"], existing_teams=existing_teams)
         r["accounted_for"] = (r["game_date"], frozenset((home_key, away_key))) in played
         r["game_date"] = display_date(r["game_date"])
         r["home_team"] = display_text(r["home_team"])

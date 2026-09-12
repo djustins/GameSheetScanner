@@ -2225,8 +2225,8 @@ with tab_players:
                     "Has an evaluation for", options=list(division_name_by_id),
                     format_func=lambda i: division_name_by_id[i],
                     key="players_tab_eval_filter",
-                    help="Pick one or more divisions/seasons — matches anyone rated in at least one of them. "
-                         "e.g. pick past seasons' divisions to find players who were already rated in either.",
+                    help="Pick one or more divisions/seasons — matches only players rated in every one of "
+                         "them, not just any. e.g. pick two past seasons to find who was rated in both.",
                 )
 
             filtered_players = players_list
@@ -2236,9 +2236,12 @@ with tab_players:
             if division_filter is not None:
                 filtered_players = [p for p in filtered_players if p["current_division_id"] == division_filter]
             if eval_filter:
-                evaluated_ids: set[int] = set()
+                # Intersection, not union — only players evaluated in every
+                # selected division, not just any one of them.
+                evaluated_ids: set[int] | None = None
                 for division_id in eval_filter:
-                    evaluated_ids |= core.list_evaluated_player_ids(conn, division_id)
+                    ids = core.list_evaluated_player_ids(conn, division_id)
+                    evaluated_ids = ids if evaluated_ids is None else evaluated_ids & ids
                 filtered_players = [p for p in filtered_players if p["id"] in evaluated_ids]
 
             st.caption(f"Showing {len(filtered_players)} of {len(players_list)} players.")

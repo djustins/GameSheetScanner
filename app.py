@@ -621,7 +621,7 @@ def season_grade_input(
         st.rerun()
 
 
-POSITION_OPTIONS = ["", "Forward", "Defense", "Goalie"]
+POSITION_OPTIONS = ["", "Forward", "Defense", "Forward or Defense", "Goalie"]
 
 
 def position_input(

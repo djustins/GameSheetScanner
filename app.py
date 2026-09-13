@@ -123,6 +123,14 @@ def inject_theme_css(mode: str):
             background-color: {c['panel_bg']} !important;
             border-radius: 10px; padding: 1rem 1.25rem;
         }}
+        /* Zebra striping for the "tables" built from repeated st.columns()
+           rows rather than a real st.dataframe (Player Stats, Team Rosters
+           Player Details) — those need per-row buttons/inputs a dataframe
+           can't host. Matched by a "zebraeven"/"zebraodd" substring baked
+           into each row container's key (see highlighted_row()), since
+           st.container has no class= param of its own to target directly. */
+        div[class*="zebraeven"] {{ background-color: {c['background']}; border-radius: 6px; }}
+        div[class*="zebraodd"] {{ background-color: {c['panel_bg']}; border-radius: 6px; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -649,13 +657,35 @@ def position_input(
         st.rerun()
 
 
-def highlighted_row(player_id: int | None):
-    """A bordered container around one player row, drawn with a border only
-    for the player most recently created via a "Create Player" popover —
-    so that row stands out from the rest of a freshly re-rendered list
-    right after it appears."""
+def zebra_style(df: pd.DataFrame):
+    """Alternating row background colors for a real st.dataframe table.
+    st.dataframe's grid is canvas-rendered (glide-data-grid), so the plain
+    CSS row-striping that works for the app's other, manually-built
+    "tables" (see highlighted_row) can't reach it — a pandas Styler is the
+    one styling channel st.dataframe actually respects."""
+    c = THEME_COLORS[theme_mode]
+    colors = [c["background"], c["panel_bg"]]
+    return df.style.apply(lambda row: [f"background-color: {colors[row.name % 2]}"] * len(row), axis=1)
+
+
+def highlighted_row(player_id: int | None, row_key: str, index: int):
+    """A row container for a "table" that's actually built from repeated
+    st.columns() calls (Player Stats, Team Rosters Player Details) rather
+    than a real st.dataframe, which can't host per-row buttons/inputs the
+    way these need. Gives it the same alternating background every other
+    table in the app has (see the "zebraeven"/"zebraodd" CSS in
+    inject_theme_css, matched against this container's key), plus a border
+    for the player most recently created via a "Create Player" popover so
+    that row stands out from the rest right after it appears.
+
+    row_key must be unique among this call site's own rows (e.g. a roster
+    entry id) — it's combined with a caller-specific prefix internally so
+    two different tables' rows never collide on the same Streamlit widget
+    key, since every tab's rows render on every rerun regardless of which
+    tab is visible."""
     is_new = player_id is not None and player_id == st.session_state.get("just_linked_player_id")
-    return st.container(border=is_new)
+    zebra = "zebraeven" if index % 2 == 0 else "zebraodd"
+    return st.container(border=is_new, key=f"row_{zebra}_{row_key}")
 
 
 def render_create_player_popover(
@@ -1742,7 +1772,7 @@ with tab_edit:
         if not rows:
             st.write("No games in the database yet.")
         else:
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.dataframe(zebra_style(pd.DataFrame(rows)), width="stretch", hide_index=True)
 
             game_id = st.selectbox("Select a game to edit", options=[r["id"] for r in rows])
             if st.button("Load for editing"):
@@ -1874,7 +1904,32 @@ with tab_schedule:
                         "round": "Round", "game_date": "Date", "away_team": "Away Team",
                         "home_team": "Home Team", "start_time": "Start Time", "location": "Location",
                     })
-                    st.dataframe(display_df, width="stretch", hide_index=True)
+                    st.dataframe(zebra_style(display_df), width="stretch", hide_index=True)
+
+                    # A stored game between the same two teams, filed under
+                    # a date that doesn't match any scheduled date for that
+                    # matchup, is almost always this same game with a
+                    # mis-transcribed date (most often the year) rather
+                    # than an actual gap — flag it so the real fix (correct
+                    # that game's date in the Games tab) can be found
+                    # instead of assumed. Once fixed, the existing
+                    # date+teams match picks it up automatically — nothing
+                    # else needs to change for it to show as accounted for.
+                    flagged = [r for r in unaccounted if r["possible_matches"]]
+                    if flagged:
+                        st.caption(
+                            "Some of these may already be entered under the wrong date (a mis-typed "
+                            "year is the usual culprit) rather than genuinely missing:"
+                        )
+                        for r in flagged:
+                            for m in r["possible_matches"]:
+                                st.warning(
+                                    f"**{r['away_team']} @ {r['home_team']}**, scheduled for "
+                                    f"{r['game_date']} — game #{m['id']} between these two teams is on "
+                                    f"file dated **{m['game_date']}** instead. Check/fix its date in "
+                                    f"the Games tab; it'll show as accounted for here automatically "
+                                    f"once corrected."
+                                )
                 else:
                     st.success("Every scheduled game has been entered.")
 
@@ -1896,7 +1951,7 @@ with tab_standings:
         if not table:
             st.write("No completed games yet.")
         else:
-            st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
+            st.dataframe(zebra_style(pd.DataFrame(table)), width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------------------
 # Tab 5: player stats
@@ -1932,9 +1987,9 @@ with tab_stats:
             # in the app. Rendering the (at most one) selected player's
             # panel once, below the table, does the same job for a fraction
             # of the queries.
-            for s in stats:
+            for stats_idx, s in enumerate(stats):
                 row_key = f"{s['team_id']}_{s['number']}"
-                with highlighted_row(s.get("player_id")):
+                with highlighted_row(s.get("player_id"), row_key=f"stats_{row_key}", index=stats_idx):
                     c = st.columns(col_widths)
                     c[0].write(core.display_text(s["team"]))
                     c[1].write(s["number"])
@@ -2035,57 +2090,60 @@ with tab_rosters:
                     st.rerun()
 
                 st.divider()
-                st.subheader(f"{team_options[roster_team_id]} — Player Details")
-                st.caption(
-                    "Position and Season Grade for the Working Division above — edits here update that "
-                    "player's position on this team, and their most recent evaluation for this division "
-                    "(see the player's Evaluations popover for full grade history)."
-                )
-                # Reuses `roster` (already fetched above for the data editor)
-                # instead of a second list_roster() round trip.
-                roster_rows = roster
-                if not roster_rows:
-                    st.caption("No players on this roster yet.")
-                else:
-                    # Batch-fetched once for the whole grid instead of one
-                    # get_position()/get_season_grade() round trip per row —
-                    # over a remote connection that N+1 pattern was slow
-                    # enough to make every interaction anywhere in the app
-                    # feel sluggish, since every tab's body runs every rerun.
-                    positions_by_player = core.get_positions_for_team(conn, working_division_id, roster_team_id)
-                    grades_by_player = core.get_season_grades_for_division(conn, working_division_id)
+                with st.expander(f"{team_options[roster_team_id]} — Player Details", expanded=True):
+                    st.caption(
+                        "Position and Season Grade for the Working Division above — edits here update that "
+                        "player's position on this team, and their most recent evaluation for this division "
+                        "(see the player's Evaluations popover for full grade history)."
+                    )
+                    # Reuses `roster` (already fetched above for the data
+                    # editor) instead of a second list_roster() round trip.
+                    roster_rows = roster
+                    if not roster_rows:
+                        st.caption("No players on this roster yet.")
+                    else:
+                        # Batch-fetched once for the whole grid instead of one
+                        # get_position()/get_season_grade() round trip per row —
+                        # over a remote connection that N+1 pattern was slow
+                        # enough to make every interaction anywhere in the app
+                        # feel sluggish, since every tab's body runs every rerun.
+                        positions_by_player = core.get_positions_for_team(conn, working_division_id, roster_team_id)
+                        grades_by_player = core.get_season_grades_for_division(conn, working_division_id)
 
-                    detail_cols = st.columns([1, 3, 1.5, 1.5])
-                    detail_cols[0].markdown("**Number**")
-                    detail_cols[1].markdown("**Name**")
-                    detail_cols[2].markdown("**Position**")
-                    detail_cols[3].markdown("**Season Grade**")
-                    for entry in roster_rows:
-                        with highlighted_row(entry["player_id"]):
-                            row_cols = st.columns([1, 3, 1.5, 1.5])
-                            row_cols[0].write(entry["number"])
-                            row_cols[1].write(entry["name"])
-                            if entry["player_id"] is None:
+                        detail_cols = st.columns([1, 3, 1.5, 1.5])
+                        detail_cols[0].markdown("**Number**")
+                        detail_cols[1].markdown("**Name**")
+                        detail_cols[2].markdown("**Position**")
+                        detail_cols[3].markdown("**Season Grade**")
+                        for roster_idx, entry in enumerate(roster_rows):
+                            with highlighted_row(
+                                entry["player_id"], row_key=f"roster_{roster_team_id}_{entry['id']}",
+                                index=roster_idx,
+                            ):
+                                row_cols = st.columns([1, 3, 1.5, 1.5])
+                                row_cols[0].write(entry["number"])
+                                row_cols[1].write(entry["name"])
+                                if entry["player_id"] is None:
+                                    with row_cols[2]:
+                                        render_create_player_popover(
+                                            conn, f"roster_{roster_team_id}_{entry['id']}", roster_team_id,
+                                            team_options[roster_team_id], entry["number"], working_division_id,
+                                        )
+                                    continue
                                 with row_cols[2]:
-                                    render_create_player_popover(
-                                        conn, f"roster_{roster_team_id}_{entry['id']}", roster_team_id,
-                                        team_options[roster_team_id], entry["number"], working_division_id,
+                                    position_input(
+                                        conn, entry["player_id"], working_division_id, roster_team_id,
+                                        key=f"roster_position_{roster_team_id}_{entry['id']}",
+                                        prefetched=positions_by_player.get(entry["player_id"]),
+                                        label_visibility="collapsed", disabled=is_read_only,
                                     )
-                                continue
-                            with row_cols[2]:
-                                position_input(
-                                    conn, entry["player_id"], working_division_id, roster_team_id,
-                                    key=f"roster_position_{roster_team_id}_{entry['id']}",
-                                    prefetched=positions_by_player.get(entry["player_id"]),
-                                    label_visibility="collapsed", disabled=is_read_only,
-                                )
-                            with row_cols[3]:
-                                season_grade_input(
-                                    conn, entry["player_id"], working_division_id, roster_team_id,
-                                    key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
-                                    prefetched=grades_by_player.get(entry["player_id"]),
-                                    label_visibility="collapsed", disabled=is_read_only,
-                                )
+                                with row_cols[3]:
+                                    season_grade_input(
+                                        conn, entry["player_id"], working_division_id, roster_team_id,
+                                        key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
+                                        prefetched=grades_by_player.get(entry["player_id"]),
+                                        label_visibility="collapsed", disabled=is_read_only,
+                                    )
 
                 st.divider()
                 st.subheader(f"{team_options[roster_team_id]} — Coaches")
@@ -2154,7 +2212,13 @@ with tab_rosters:
                         }
                         for s in team_stats
                     ])
-                    st.dataframe(stats_df, width="stretch", hide_index=True)
+                    # Explicit height sized to every row (Streamlit's default
+                    # caps at a fixed box and scrolls beyond it) so the whole
+                    # team's stats are visible at once, never clipped.
+                    st.dataframe(
+                        zebra_style(stats_df), width="stretch", hide_index=True,
+                        height=(len(team_stats) + 1) * 35 + 3,
+                    )
 
 # ---------------------------------------------------------------------------
 # Tab 7: players (global profiles, persisting across every division/season)

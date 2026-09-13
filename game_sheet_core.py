@@ -1030,11 +1030,20 @@ def list_schedule(conn: PGConnection, division_id: int) -> list[dict]:
     "Kings" from the CSV) can otherwise differ just enough from that team's
     actual stored spelling (a first-sheet typo that became canonical, extra
     whitespace, etc.) that an exact-string match silently never fires even
-    though the game is plainly right there in the Games tab."""
+    though the game is plainly right there in the Games tab.
+
+    An unaccounted row also gets "possible_matches": stored games between
+    those same two teams whose date doesn't correspond to *any* scheduled
+    date for that matchup — i.e. a game that's plainly for this matchup but
+    filed under the wrong date (most often a mis-transcribed year), not a
+    same-teams rematch that's simply scheduled for later. Surfaced so a
+    date-entry typo can be found and fixed rather than guessed at
+    automatically — silently declaring two different-year games "the same"
+    would risk masking an actual gap."""
     stored = conn.execute(
-        "SELECT game_date, home_team, away_team FROM games WHERE division_id = %s", (division_id,)
+        "SELECT id, game_date, home_team, away_team FROM games WHERE division_id = %s", (division_id,)
     ).fetchall()
-    played = {(date, frozenset((home, away))) for date, home, away in stored}
+    played = {(date, frozenset((home, away))) for _id, date, home, away in stored}
 
     rows = conn.execute(
         """SELECT id, order_num, round, game_date, home_team, away_team,
@@ -1052,12 +1061,35 @@ def list_schedule(conn: PGConnection, division_id: int) -> list[dict]:
     ]
     cols = ["id", "order_num", "round", "game_date", "home_team", "away_team",
             "start_time", "end_time", "location", "field"]
-    result = []
+
+    # Pass 1: normalize every row's teams once, and note every date each
+    # matchup is scheduled for anywhere in the season (not just this row) —
+    # needed below to tell "a rematch scheduled for a different day" apart
+    # from "the same game filed under a typo'd date".
+    parsed = []
+    scheduled_dates_by_teams: dict[frozenset, set[str]] = {}
     for values in rows:
         r = dict(zip(cols, values))
         home_key = normalize_team_name(conn, division_id, r["home_team"], existing_teams=existing_teams)
         away_key = normalize_team_name(conn, division_id, r["away_team"], existing_teams=existing_teams)
-        r["accounted_for"] = (r["game_date"], frozenset((home_key, away_key))) in played
+        r["_teams"] = frozenset((home_key, away_key))
+        parsed.append(r)
+        scheduled_dates_by_teams.setdefault(r["_teams"], set()).add(r["game_date"])
+
+    # Pass 2: any stored game whose date isn't one of its matchup's
+    # scheduled dates is an "orphan" — a candidate for being an unaccounted
+    # row's actual game, just filed under the wrong date.
+    orphans_by_teams: dict[frozenset, list[dict]] = {}
+    for game_id, date, home, away in stored:
+        teams = frozenset((home, away))
+        if date not in scheduled_dates_by_teams.get(teams, set()):
+            orphans_by_teams.setdefault(teams, []).append({"id": game_id, "game_date": display_date(date)})
+
+    result = []
+    for r in parsed:
+        r["accounted_for"] = (r["game_date"], r["_teams"]) in played
+        r["possible_matches"] = [] if r["accounted_for"] else orphans_by_teams.get(r["_teams"], [])
+        del r["_teams"]
         r["game_date"] = display_date(r["game_date"])
         r["home_team"] = display_text(r["home_team"])
         r["away_team"] = display_text(r["away_team"])

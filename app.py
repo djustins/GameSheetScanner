@@ -917,27 +917,28 @@ def render_player_panel(
                 disabled=is_read_only,
             )
 
-    ecol3, ecol4 = st.columns(2)
-    edit_cfn = ecol3.text_input(
-        "Contact first name", value=player["contact_first_name"] or "", key=f"{key_prefix}_cfn_{player_id}",
-        disabled=is_read_only,
-    )
-    edit_cln = ecol4.text_input(
-        "Contact last name", value=player["contact_last_name"] or "", key=f"{key_prefix}_cln_{player_id}",
-        disabled=is_read_only,
-    )
-    if hide_contact_details:
-        st.caption("🔒 Phone/email are hidden for your role.")
-    else:
-        ecol5, ecol6 = st.columns(2)
-        edit_cph = ecol5.text_input(
-            "Contact phone", value=player["contact_phone"] or "", key=f"{key_prefix}_cph_{player_id}",
+    with st.expander("📇 Contact info"):
+        ecol3, ecol4 = st.columns(2)
+        edit_cfn = ecol3.text_input(
+            "Contact first name", value=player["contact_first_name"] or "", key=f"{key_prefix}_cfn_{player_id}",
             disabled=is_read_only,
         )
-        edit_cem = ecol6.text_input(
-            "Contact email", value=player["contact_email"] or "", key=f"{key_prefix}_cem_{player_id}",
+        edit_cln = ecol4.text_input(
+            "Contact last name", value=player["contact_last_name"] or "", key=f"{key_prefix}_cln_{player_id}",
             disabled=is_read_only,
         )
+        if hide_contact_details:
+            st.caption("🔒 Phone/email are hidden for your role.")
+        else:
+            ecol5, ecol6 = st.columns(2)
+            edit_cph = ecol5.text_input(
+                "Contact phone", value=player["contact_phone"] or "", key=f"{key_prefix}_cph_{player_id}",
+                disabled=is_read_only,
+            )
+            edit_cem = ecol6.text_input(
+                "Contact email", value=player["contact_email"] or "", key=f"{key_prefix}_cem_{player_id}",
+                disabled=is_read_only,
+            )
 
     if working_division_id is None:
         st.caption("Select a Working Division above to set this player's Season Grade.")

@@ -2222,13 +2222,18 @@ with tab_players:
                     key="players_tab_division_filter",
                 )
             with filter_col3:
-                eval_filter = st.multiselect(
-                    "Has an evaluation for", options=list(division_name_by_id),
-                    format_func=lambda i: division_name_by_id[i],
-                    key="players_tab_eval_filter",
-                    help="Pick one or more divisions/seasons — matches only players rated in every one of "
-                         "them, not just any. e.g. pick two past seasons to find who was rated in both.",
-                )
+                st.caption("Has an evaluation for")
+                eval_filter = []
+                with st.popover("Filter by division", width="stretch"):
+                    st.caption(
+                        "Matches only players rated in every division checked, not just any one of them."
+                    )
+                    for division_id in division_name_by_id:
+                        checked = st.checkbox(
+                            division_name_by_id[division_id], key=f"players_tab_eval_cb_{division_id}"
+                        )
+                        if checked:
+                            eval_filter.append(division_id)
 
             filtered_players = players_list
             if name_filter.strip():

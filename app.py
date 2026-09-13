@@ -2208,7 +2208,12 @@ with tab_players:
                 else:
                     st.error("Name is required.")
 
-        players_list = core.list_players(conn)
+        # "Sub"/"SUB" placeholder players (one per team, created by linking
+        # a roster's generic "Sub" jersey row rather than identifying a
+        # real person) aren't a real, pickable individual — exclude them
+        # from this list. They still exist and keep their stats/roster
+        # link; they just don't clutter or get selected from here.
+        players_list = [p for p in core.list_players(conn) if p["name"].strip().lower() != "sub"]
         if not players_list:
             st.write("No players yet — add one above.")
         else:

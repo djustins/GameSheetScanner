@@ -101,6 +101,8 @@ def import_players(conn, ws, current_division_id: int) -> None:
         summer_rating = _clean(row[idx["Summer 25 Rating"]])
         fall_rating = _clean(row[idx["Fall Rating"]])
 
+        first_name, last_name = core.split_full_name(name)
+
         matches = by_name.get(name.lower(), [])
         if len(matches) > 1:
             print(f"  SKIPPED (ambiguous — {len(matches)} existing players named {name!r}): not auto-merging")
@@ -116,7 +118,7 @@ def import_players(conn, ws, current_division_id: int) -> None:
             updated += 1
         else:
             player_id = core.add_player(
-                conn, name, birth_date=birth_date, current_division_id=current_division_id,
+                conn, first_name, last_name, birth_date=birth_date, current_division_id=current_division_id,
                 contact_first_name=contact_first, contact_last_name=contact_last,
                 contact_phone=contact_phone, contact_email=contact_email,
             )
@@ -155,7 +157,8 @@ def import_coaches(conn, coaches_ws, current_division_id: int) -> None:
         if key in existing:
             coach_ids[name] = existing[key]
         else:
-            coach_id = core.add_coach(conn, name)
+            first_name, last_name = core.split_full_name(name)
+            coach_id = core.add_coach(conn, first_name, last_name)
             existing[key] = coach_id
             coach_ids[name] = coach_id
             added += 1

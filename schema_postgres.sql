@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS players (
     created_at           TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- The player's own first/last name, plus an optional nickname ("known as")
+-- shown alongside it — replaces the single `name` column above. Added via
+-- ALTER (not the CREATE TABLE, whose `name` column predates this and still
+-- has data in it) so it reaches an already-existing table the same way a
+-- fresh one gets it; game_sheet_core._migrate_legacy_names() does the
+-- one-time backfill from `name` into these and then drops it.
+ALTER TABLE players ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS nickname TEXT;
+
 -- Per-team jersey-number roster row, auto-extracted from game sheets and
 -- used to attribute goals/assists/penalties by number. Optionally linked to
 -- a global player profile once identified.
@@ -129,14 +139,45 @@ CREATE TABLE IF NOT EXISTS coaches (
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- First/last name plus an optional nickname (mirrors players' first_name/
+-- last_name/nickname above, and is migrated off the legacy `name` column
+-- the same way — see game_sheet_core._migrate_legacy_names()), and the
+-- coach's own contact info. Unlike players.contact_* (which names a third
+-- party — the player's parent/guardian), a coach IS the contact, so these
+-- are plain phone/email fields rather than a contact_* pair.
+ALTER TABLE coaches ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE coaches ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE coaches ADD COLUMN IF NOT EXISTS nickname TEXT;
+ALTER TABLE coaches ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE coaches ADD COLUMN IF NOT EXISTS email TEXT;
+
 -- Which coach(es) are assigned to which team. The team already ties this to
 -- one division (teams.division_id) and one roster (roster_entries.team_id),
 -- so this single join relates a coach to a division and to that division's
--- players.
+-- players. A coach can coach only one team per division (enforced in
+-- game_sheet_core.assign_coach_to_team, not here — Postgres has no native
+-- "unique per team_id's division_id" constraint without a second table or a
+-- trigger), but that's multiple teams across a season's different divisions
+-- (e.g. U10 Summer and U13 Summer) or across different seasons entirely.
+-- Since teams are scoped one-per-season (a returning coach gets a new row
+-- here each season rather than reusing last season's team_id), this table
+-- also doubles as that coach's full multi-season coaching history — nothing
+-- else needs to track "teams coached" separately.
 CREATE TABLE IF NOT EXISTS team_coaches (
     team_id   INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     coach_id  INTEGER NOT NULL REFERENCES coaches(id) ON DELETE CASCADE,
     PRIMARY KEY (team_id, coach_id)
+);
+
+-- Explicit link from a coach to their own registered child/children (a
+-- player row) — lets "does this coach have kids registered" and "which
+-- ones" be answered directly, the same way roster_entries.player_id links a
+-- roster row to a player profile explicitly rather than guessing from a
+-- name/contact-info match.
+CREATE TABLE IF NOT EXISTS coach_children (
+    coach_id   INTEGER NOT NULL REFERENCES coaches(id) ON DELETE CASCADE,
+    player_id  INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    PRIMARY KEY (coach_id, player_id)
 );
 
 -- A single evaluation of a player for a given division/team.

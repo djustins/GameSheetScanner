@@ -502,6 +502,54 @@ def _apply_schema(conn: _ConnWrapper):
     conn.commit()
 
 
+def full_name(first_name: str | None, last_name: str | None) -> str:
+    """Display name from first/last, e.g. for players/coaches — skips a
+    missing last name rather than leaving a trailing space."""
+    return " ".join(part for part in (first_name, last_name) if part)
+
+
+def split_full_name(name: str | None) -> tuple[str, str | None]:
+    """Best-effort split of a single "Full Name" string into (first, last),
+    on the first space — used for one-time data migration (see
+    _migrate_legacy_names) and by scripts/import_summer_player_list.py,
+    whose source spreadsheet only has one name column per player/coach."""
+    parts = (name or "").strip().split(None, 1)
+    if not parts:
+        return "", None
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[0], parts[1]
+
+
+def _column_exists(conn: PGConnection, table: str, column: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+        (table, column),
+    ).fetchone()
+    return row is not None
+
+
+def _migrate_legacy_names(conn: PGConnection):
+    """One-time backfill: players and coaches used to store a single `name`
+    column; first_name/last_name/nickname (see schema_postgres.sql) replaced
+    it. Splits any not-yet-migrated `name` value into first_name/last_name
+    and drops the column once every row is converted. Safe to call on every
+    startup — a no-op as soon as `name` is gone, which the raw schema file
+    can't express on its own (its statement-splitter can't handle the
+    conditional logic a real migration needs — see _apply_schema)."""
+    for table in ("players", "coaches"):
+        if not _column_exists(conn, table, "name"):
+            continue
+        rows = conn.execute(f"SELECT id, name FROM {table} WHERE first_name IS NULL").fetchall()
+        for row_id, name in rows:
+            first, last = split_full_name(name)
+            conn.execute(
+                f"UPDATE {table} SET first_name = %s, last_name = %s WHERE id = %s", (first, last, row_id)
+            )
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN name")
+        conn.commit()
+
+
 def init_db(dsn: str) -> _ConnWrapper:
     """Connect to the Postgres database identified by dsn (a full connection
     string / DSN, e.g. "postgresql://user:pass@host:port/dbname?sslmode=require"),
@@ -509,6 +557,7 @@ def init_db(dsn: str) -> _ConnWrapper:
     divisions (see purge_expired_divisions)."""
     conn = _ConnWrapper(psycopg2.connect(dsn))
     _apply_schema(conn)
+    _migrate_legacy_names(conn)
     purge_expired_divisions(conn)
     return conn
 
@@ -547,6 +596,7 @@ PAGES = {
     "stats": "Player Stats",
     "rosters": "Team Rosters",
     "players": "Players",
+    "coaches": "Coaches",
     "divisions": "Divisions",
 }
 
@@ -1350,7 +1400,8 @@ def list_roster(conn: PGConnection, team_id: int) -> list[dict]:
     player re-links it automatically."""
     sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
-        f"""SELECT re.id, re.number, COALESCE(p.name, re.name), p.id
+        f"""SELECT re.id, re.number,
+                   COALESCE(NULLIF(TRIM(CONCAT_WS(' ', p.first_name, p.last_name)), ''), re.name), p.id
            FROM roster_entries re
            LEFT JOIN players p ON p.id = re.player_id AND p.deleted_at IS NULL
            WHERE re.team_id = %s ORDER BY {sort_key}, re.number""",
@@ -1398,13 +1449,19 @@ def link_roster_entry_to_player(conn: PGConnection, roster_entry_id: int, player
 def list_players(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(
-        f"""SELECT id, name, birth_date, current_division_id, contact_first_name,
-                   contact_last_name, contact_phone, contact_email, deleted_at
-            FROM players {where} ORDER BY name"""
+        f"""SELECT id, first_name, last_name, nickname, birth_date, current_division_id,
+                   contact_first_name, contact_last_name, contact_phone, contact_email, deleted_at
+            FROM players {where} ORDER BY last_name, first_name"""
     ).fetchall()
-    cols = ["id", "name", "birth_date", "current_division_id", "contact_first_name",
-            "contact_last_name", "contact_phone", "contact_email", "deleted_at"]
-    return [dict(zip(cols, r)) for r in rows]
+    cols = ["id", "first_name", "last_name", "nickname", "birth_date", "current_division_id",
+            "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "deleted_at"]
+    players = [dict(zip(cols, r)) for r in rows]
+    # "name" is a derived display convenience (not a real column — see
+    # first_name/last_name above), kept so the many read-only call sites
+    # that just want "the player's name" don't need to know about the split.
+    for p in players:
+        p["name"] = full_name(p["first_name"], p["last_name"])
+    return players
 
 
 def get_player(conn: PGConnection, player_id: int) -> dict | None:
@@ -1413,19 +1470,19 @@ def get_player(conn: PGConnection, player_id: int) -> dict | None:
 
 
 def add_player(
-    conn: PGConnection, name: str, birth_date: str | None = None,
-    current_division_id: int | None = None, contact_first_name: str | None = None,
-    contact_last_name: str | None = None, contact_phone: str | None = None,
-    contact_email: str | None = None,
+    conn: PGConnection, first_name: str, last_name: str | None = None, nickname: str | None = None,
+    birth_date: str | None = None, current_division_id: int | None = None,
+    contact_first_name: str | None = None, contact_last_name: str | None = None,
+    contact_phone: str | None = None, contact_email: str | None = None,
 ) -> int:
     cur = conn.execute(
         """INSERT INTO players
-           (name, birth_date, current_division_id, contact_first_name,
+           (first_name, last_name, nickname, birth_date, current_division_id, contact_first_name,
             contact_last_name, contact_phone, contact_email)
-           VALUES (%s, %s, %s, %s, %s, %s, %s)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id""",
-        (name.strip(), birth_date, current_division_id, contact_first_name,
-         contact_last_name, contact_phone, contact_email),
+        (first_name.strip(), (last_name or "").strip() or None, (nickname or "").strip() or None,
+         birth_date, current_division_id, contact_first_name, contact_last_name, contact_phone, contact_email),
     )
     player_id = cur.fetchone()[0]
     conn.commit()
@@ -1434,10 +1491,10 @@ def add_player(
 
 def update_player(conn: PGConnection, player_id: int, **fields):
     """Update any subset of a player's profile fields, e.g.
-    update_player(conn, 5, name="Alex Smith", contact_phone="412-555-0100")."""
+    update_player(conn, 5, first_name="Alex", contact_phone="412-555-0100")."""
     allowed = {
-        "name", "birth_date", "current_division_id", "contact_first_name",
-        "contact_last_name", "contact_phone", "contact_email",
+        "first_name", "last_name", "nickname", "birth_date", "current_division_id",
+        "contact_first_name", "contact_last_name", "contact_phone", "contact_email",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
@@ -1554,19 +1611,48 @@ def list_evaluated_player_ids(conn: PGConnection, division_id: int) -> set[int]:
 
 def list_coaches(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
-    rows = conn.execute(f"SELECT id, name, deleted_at FROM coaches {where} ORDER BY name").fetchall()
-    return [{"id": r[0], "name": r[1], "deleted_at": r[2]} for r in rows]
+    rows = conn.execute(
+        f"""SELECT id, first_name, last_name, nickname, phone, email, deleted_at
+            FROM coaches {where} ORDER BY last_name, first_name"""
+    ).fetchall()
+    cols = ["id", "first_name", "last_name", "nickname", "phone", "email", "deleted_at"]
+    coaches = [dict(zip(cols, r)) for r in rows]
+    # "name" is a derived display convenience, same as players.name — see
+    # list_players.
+    for c in coaches:
+        c["name"] = full_name(c["first_name"], c["last_name"])
+    return coaches
 
 
-def add_coach(conn: PGConnection, name: str) -> int:
-    cur = conn.execute("INSERT INTO coaches (name) VALUES (%s) RETURNING id", (name.strip(),))
+def get_coach(conn: PGConnection, coach_id: int) -> dict | None:
+    coaches = {c["id"]: c for c in list_coaches(conn, include_deleted=True)}
+    return coaches.get(coach_id)
+
+
+def add_coach(
+    conn: PGConnection, first_name: str, last_name: str | None = None, nickname: str | None = None,
+    phone: str | None = None, email: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """INSERT INTO coaches (first_name, last_name, nickname, phone, email)
+           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+        (first_name.strip(), (last_name or "").strip() or None, (nickname or "").strip() or None,
+         phone, email),
+    )
     coach_id = cur.fetchone()[0]
     conn.commit()
     return coach_id
 
 
-def update_coach(conn: PGConnection, coach_id: int, name: str):
-    conn.execute("UPDATE coaches SET name = %s WHERE id = %s", (name.strip(), coach_id))
+def update_coach(conn: PGConnection, coach_id: int, **fields):
+    """Update any subset of a coach's profile fields, e.g.
+    update_coach(conn, 5, first_name="Alex", phone="412-555-0100")."""
+    allowed = {"first_name", "last_name", "nickname", "phone", "email"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    conn.execute(f"UPDATE coaches SET {set_clause} WHERE id = %s", (*updates.values(), coach_id))
     conn.commit()
 
 
@@ -1584,6 +1670,23 @@ def restore_coach(conn: PGConnection, coach_id: int):
 
 
 def assign_coach_to_team(conn: PGConnection, team_id: int, coach_id: int):
+    """Raises ValueError if this coach already coaches a different team in
+    the same division — a coach can coach only one team per division,
+    though that's still multiple teams across a season's different
+    divisions (e.g. U10 Summer and U13 Summer) or across different
+    seasons."""
+    row = conn.execute("SELECT division_id FROM teams WHERE id = %s", (team_id,)).fetchone()
+    if row is None:
+        raise ValueError("Team not found.")
+    division_id = row[0]
+    conflict = conn.execute(
+        """SELECT t.name FROM team_coaches tc
+           JOIN teams t ON t.id = tc.team_id
+           WHERE tc.coach_id = %s AND t.division_id = %s AND t.id != %s""",
+        (coach_id, division_id, team_id),
+    ).fetchone()
+    if conflict:
+        raise ValueError(f"This coach already coaches {conflict[0]} in this division.")
     conn.execute(
         "INSERT INTO team_coaches (team_id, coach_id) VALUES (%s, %s) "
         "ON CONFLICT (team_id, coach_id) DO NOTHING",
@@ -1601,12 +1704,74 @@ def remove_coach_from_team(conn: PGConnection, team_id: int, coach_id: int):
 
 def list_team_coaches(conn: PGConnection, team_id: int) -> list[dict]:
     rows = conn.execute(
-        """SELECT c.id, c.name FROM team_coaches tc
+        """SELECT c.id, c.first_name, c.last_name, c.nickname FROM team_coaches tc
            JOIN coaches c ON c.id = tc.coach_id
-           WHERE tc.team_id = %s AND c.deleted_at IS NULL ORDER BY c.name""",
+           WHERE tc.team_id = %s AND c.deleted_at IS NULL ORDER BY c.last_name, c.first_name""",
         (team_id,),
     ).fetchall()
-    return [{"id": r[0], "name": r[1]} for r in rows]
+    return [
+        {"id": r[0], "first_name": r[1], "last_name": r[2], "nickname": r[3], "name": full_name(r[1], r[2])}
+        for r in rows
+    ]
+
+
+def list_coach_teams(conn: PGConnection, coach_id: int) -> list[dict]:
+    """Every team this coach is/has been assigned to, across every division
+    and season — since teams are scoped one-per-season (a returning coach
+    gets a new team_coaches row each season rather than reusing last
+    season's team_id), this naturally accumulates the coach's full
+    multi-season coaching history, not just their current assignment(s)."""
+    rows = conn.execute(
+        """SELECT t.id, t.name, d.id, d.year, d.season, d.age_group, d.category
+           FROM team_coaches tc
+           JOIN teams t ON t.id = tc.team_id
+           JOIN divisions d ON d.id = t.division_id
+           WHERE tc.coach_id = %s
+           ORDER BY d.year DESC, d.season, t.name""",
+        (coach_id,),
+    ).fetchall()
+    cols = ["team_id", "team_name", "division_id", "year", "season", "age_group", "category"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+# --- Coach children: explicit link from a coach to their own registered --
+# player(s), so "does this coach have kids registered" and "which ones" can
+# be answered directly rather than guessed from a name/contact-info match.
+
+def list_coach_children(conn: PGConnection, coach_id: int) -> list[dict]:
+    rows = conn.execute(
+        """SELECT p.id, p.first_name, p.last_name, p.nickname, p.current_division_id
+           FROM coach_children cc JOIN players p ON p.id = cc.player_id
+           WHERE cc.coach_id = %s AND p.deleted_at IS NULL
+           ORDER BY p.last_name, p.first_name""",
+        (coach_id,),
+    ).fetchall()
+    cols = ["id", "first_name", "last_name", "nickname", "current_division_id"]
+    children = [dict(zip(cols, r)) for r in rows]
+    for c in children:
+        c["name"] = full_name(c["first_name"], c["last_name"])
+    return children
+
+
+def link_coach_child(conn: PGConnection, coach_id: int, player_id: int):
+    conn.execute(
+        "INSERT INTO coach_children (coach_id, player_id) VALUES (%s, %s) "
+        "ON CONFLICT (coach_id, player_id) DO NOTHING",
+        (coach_id, player_id),
+    )
+    conn.commit()
+
+
+def unlink_coach_child(conn: PGConnection, coach_id: int, player_id: int):
+    conn.execute("DELETE FROM coach_children WHERE coach_id = %s AND player_id = %s", (coach_id, player_id))
+    conn.commit()
+
+
+def coach_ids_with_children(conn: PGConnection) -> set[int]:
+    """Every coach_id with at least one linked child — used to filter/flag
+    "has children registered" without an N+1 query per coach."""
+    rows = conn.execute("SELECT DISTINCT coach_id FROM coach_children").fetchall()
+    return {r[0] for r in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -1803,7 +1968,8 @@ def get_player_stats(conn: PGConnection, division_id: int) -> list[dict]:
     roster = {
         (team, number): (name, player_id)
         for team, number, name, player_id in conn.execute(
-            """SELECT t.name, re.number, COALESCE(p.name, re.name), p.id
+            """SELECT t.name, re.number,
+                      COALESCE(NULLIF(TRIM(CONCAT_WS(' ', p.first_name, p.last_name)), ''), re.name), p.id
                FROM roster_entries re
                JOIN teams t ON t.id = re.team_id
                LEFT JOIN players p ON p.id = re.player_id AND p.deleted_at IS NULL

@@ -697,7 +697,13 @@ def render_create_player_popover(
     of "create & link a player" regardless of where it's opened from."""
     with st.popover("➕ Create Player"):
         st.caption(f"Linking {core.display_text(team_name)} #{number}")
-        new_name = st.text_input("Player name", key=f"{key_prefix}_new_name", disabled=is_read_only)
+        ncol0a, ncol0b = st.columns(2)
+        new_first = ncol0a.text_input("First name", key=f"{key_prefix}_new_first", disabled=is_read_only)
+        new_last = ncol0b.text_input("Last name", key=f"{key_prefix}_new_last", disabled=is_read_only)
+        new_nickname = st.text_input(
+            "Nickname", key=f"{key_prefix}_new_nickname", disabled=is_read_only,
+            help="Optional — shown alongside their name wherever it's picked or displayed.",
+        )
         new_dob = st.text_input(
             "Birth date", key=f"{key_prefix}_new_dob", placeholder="YYYY-MM-DD", disabled=is_read_only
         )
@@ -714,12 +720,12 @@ def render_create_player_popover(
         if st.button(
             "Create & Link", key=f"{key_prefix}_create_link", type="primary", disabled=is_read_only
         ):
-            if not new_name.strip():
-                st.error("Player name is required.")
+            if not new_first.strip():
+                st.error("First name is required.")
             else:
                 new_player_id = core.add_player(
-                    conn, new_name.strip(), birth_date=new_dob.strip() or None,
-                    current_division_id=working_division_id,
+                    conn, new_first.strip(), new_last.strip() or None, new_nickname.strip() or None,
+                    birth_date=new_dob.strip() or None, current_division_id=working_division_id,
                     contact_first_name=new_cfn.strip() or None, contact_last_name=new_cln.strip() or None,
                     contact_phone=new_cph.strip() or None, contact_email=new_cem.strip() or None,
                 )
@@ -729,7 +735,8 @@ def render_create_player_popover(
                 ).fetchone()
                 if entry:
                     core.link_roster_entry_to_player(conn, entry[0], new_player_id)
-                st.success(f"Created and linked {new_name.strip()}.")
+                display_name = core.full_name(new_first.strip(), new_last.strip())
+                st.success(f"Created and linked {display_name}.")
                 st.session_state["just_linked_player_id"] = new_player_id
                 st.rerun()
 
@@ -744,13 +751,14 @@ def player_label(conn, player: dict, prefetched_history: list[dict] | None = _UN
     pass core.player_division_histories()' result (keyed by player id) when
     labeling many players at once (the Players tab's picker) to avoid one
     player_division_history() round trip per player."""
+    base_name = f'{player["name"]} "{player["nickname"]}"' if player.get("nickname") else player["name"]
     if player["current_division_id"] is not None:
         history = core.player_division_history(conn, player["id"]) if prefetched_history is _UNSET else prefetched_history
         entries = [h for h in history if h["division_id"] == player["current_division_id"]]
         if entries:
             numbers = ", ".join(f"#{h['number']} {h['team_name']}" for h in entries)
-            return f"{player['name']} ({numbers})"
-    return player["name"]
+            return f"{base_name} ({numbers})"
+    return base_name
 
 
 @st.dialog("Delete player?")
@@ -774,6 +782,180 @@ def confirm_delete_player_dialog(key_prefix: str, player_id: int, player_name: s
     with cancel_col:
         if st.button("Cancel", key=f"{key_prefix}_delete_cancel_{player_id}", width="stretch"):
             st.rerun()
+
+
+@st.dialog("Delete coach?")
+def confirm_delete_coach_dialog(key_prefix: str, coach_id: int, coach_name: str):
+    st.write(f"Delete **{coach_name}**? This can be undone in the Coaches tab's Deleted Coaches list.")
+    yes_col, cancel_col = st.columns(2)
+    with yes_col:
+        if st.button(
+            "Yes, delete this coach", key=f"{key_prefix}_delete_confirm_{coach_id}",
+            type="primary", width="stretch",
+        ):
+            core.soft_delete_coach(conn, coach_id)
+            st.rerun()
+    with cancel_col:
+        if st.button("Cancel", key=f"{key_prefix}_delete_cancel_{coach_id}", width="stretch"):
+            st.rerun()
+
+
+def coach_label(coach: dict) -> str:
+    return f'{coach["name"]} "{coach["nickname"]}"' if coach.get("nickname") else coach["name"]
+
+
+def render_coach_panel(
+    conn, coach_id: int, division_name_by_id: dict, all_divisions: list[dict], key_prefix: str,
+    nav_ids: list[int] | None = None, nav_pending_key: str | None = None,
+):
+    """The full coach profile editor — name/contact/children/teams coached,
+    mirroring render_player_panel's shape (see its docstring for the
+    nav_ids/nav_pending_key mechanism, reused as-is here)."""
+    coach = core.get_coach(conn, coach_id)
+    if coach is None:
+        st.error("Coach not found.")
+        return
+
+    st.subheader(coach_label(coach))
+    ccol1, ccol2, ccol3 = st.columns(3)
+    edit_first_name = ccol1.text_input(
+        "First name", value=coach["first_name"] or "", key=f"{key_prefix}_first_{coach_id}",
+        disabled=is_read_only,
+    )
+    edit_last_name = ccol2.text_input(
+        "Last name", value=coach["last_name"] or "", key=f"{key_prefix}_last_{coach_id}",
+        disabled=is_read_only,
+    )
+    edit_nickname = ccol3.text_input(
+        "Nickname", value=coach["nickname"] or "", key=f"{key_prefix}_nickname_{coach_id}",
+        disabled=is_read_only,
+    )
+
+    with st.expander("📇 Contact info"):
+        if hide_contact_details:
+            st.caption("🔒 Phone/email are hidden for your role.")
+        else:
+            phcol1, phcol2 = st.columns(2)
+            edit_phone = phcol1.text_input(
+                "Phone", value=coach["phone"] or "", key=f"{key_prefix}_phone_{coach_id}", disabled=is_read_only
+            )
+            edit_email = phcol2.text_input(
+                "Email", value=coach["email"] or "", key=f"{key_prefix}_email_{coach_id}", disabled=is_read_only
+            )
+
+    with st.expander("👶 Children registered"):
+        children = core.list_coach_children(conn, coach_id)
+        if children:
+            for child in children:
+                chcol1, chcol2 = st.columns([4, 1])
+                with chcol1:
+                    child_div = (
+                        division_name_by_id.get(child["current_division_id"], "—")
+                        if child["current_division_id"] else "—"
+                    )
+                    st.write(f'{child["name"]} ({child_div})')
+                with chcol2:
+                    if st.button("✕", key=f"{key_prefix}_unlink_child_{coach_id}_{child['id']}", disabled=is_read_only):
+                        core.unlink_coach_child(conn, coach_id, child["id"])
+                        st.rerun()
+        else:
+            st.caption("No registered children linked yet.")
+
+        linked_ids = {c["id"] for c in children}
+        # "Sub"/"SUB" placeholder players aren't a real person to link —
+        # same exclusion the Players tab applies (see its picker below).
+        pickable_players = [
+            p for p in core.list_players(conn)
+            if p["id"] not in linked_ids and p["name"].strip().lower() != "sub"
+        ]
+        if pickable_players:
+            player_pick_options = {p["id"]: p["name"] for p in pickable_players}
+            pcol1, pcol2 = st.columns([3, 1])
+            with pcol1:
+                child_to_link = st.selectbox(
+                    "Link a registered player as this coach's child", options=list(player_pick_options),
+                    format_func=lambda i: player_pick_options[i], key=f"{key_prefix}_link_child_pick_{coach_id}",
+                )
+            with pcol2:
+                if st.button("Link", key=f"{key_prefix}_link_child_btn_{coach_id}", disabled=is_read_only):
+                    core.link_coach_child(conn, coach_id, child_to_link)
+                    st.rerun()
+
+    with st.expander("🏒 Teams coached"):
+        history = core.list_coach_teams(conn, coach_id)
+        if history:
+            for h in history:
+                st.write(f"- {h['year']} {h['season']} — {division_label(h['age_group'])} ({h['team_name']})")
+        else:
+            st.caption("Not assigned to any team yet.")
+
+        st.divider()
+        st.caption("Assign to a team")
+        if not all_divisions:
+            st.write("No divisions yet — add one in the Divisions tab.")
+        else:
+            assign_division_id = st.selectbox(
+                "Division", options=list(division_name_by_id), format_func=lambda i: division_name_by_id[i],
+                key=f"{key_prefix}_assign_division_{coach_id}",
+            )
+            assign_teams = core.list_teams(conn, assign_division_id)
+            already_coaching = {h["team_id"] for h in history if h["division_id"] == assign_division_id}
+            assignable_teams = [t for t in assign_teams if t["id"] not in already_coaching]
+            if not assignable_teams:
+                st.caption("No unassigned teams in this division.")
+            else:
+                assign_team_options = {t["id"]: t["name"] for t in assignable_teams}
+                assign_team_id = st.selectbox(
+                    "Team", options=list(assign_team_options), format_func=lambda i: assign_team_options[i],
+                    key=f"{key_prefix}_assign_team_{coach_id}",
+                )
+                if st.button(
+                    "Assign", key=f"{key_prefix}_assign_team_btn_{coach_id}", type="primary", disabled=is_read_only
+                ):
+                    try:
+                        core.assign_coach_to_team(conn, assign_team_id, coach_id)
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+
+    show_nav = nav_ids is not None and nav_pending_key is not None
+    nav_idx = nav_ids.index(coach_id) if show_nav and coach_id in nav_ids else None
+    if show_nav:
+        prev_col, save_col, delete_col, next_col = st.columns(4)
+        with prev_col:
+            can_prev = nav_idx is not None and nav_idx > 0
+            if st.button(
+                "◀ Previous", key=f"{key_prefix}_nav_prev_{coach_id}", disabled=not can_prev, width="stretch"
+            ):
+                st.session_state[nav_pending_key] = nav_ids[nav_idx - 1]
+                st.rerun()
+    else:
+        save_col, delete_col = st.columns(2)
+    with save_col:
+        if st.button(
+            "Save changes", key=f"{key_prefix}_save_{coach_id}", type="primary", disabled=is_read_only
+        ):
+            save_fields = {
+                "first_name": edit_first_name.strip(), "last_name": edit_last_name.strip() or None,
+                "nickname": edit_nickname.strip() or None,
+            }
+            if not hide_contact_details:
+                save_fields["phone"] = edit_phone.strip() or None
+                save_fields["email"] = edit_email.strip() or None
+            core.update_coach(conn, coach_id, **save_fields)
+            st.success("Saved.")
+            st.rerun()
+    with delete_col:
+        if st.button("🗑️ Delete coach", key=f"{key_prefix}_delete_{coach_id}", disabled=is_read_only):
+            confirm_delete_coach_dialog(key_prefix, coach_id, coach_label(coach))
+    if show_nav:
+        with next_col:
+            can_next = nav_idx is not None and nav_idx < len(nav_ids) - 1
+            if st.button(
+                "Next ▶", key=f"{key_prefix}_nav_next_{coach_id}", disabled=not can_next, width="stretch"
+            ):
+                st.session_state[nav_pending_key] = nav_ids[nav_idx + 1]
+                st.rerun()
 
 
 def render_evaluation_progress_chart(evaluations: list[dict]):
@@ -905,12 +1087,21 @@ def render_player_panel(
         st.error("Player not found.")
         return
 
-    st.subheader(player["name"])
-    ecol1, ecol2 = st.columns(2)
-    edit_name = ecol1.text_input(
-        "Name", value=player["name"], key=f"{key_prefix}_name_{player_id}", disabled=is_read_only
+    st.subheader(f'{player["name"]} "{player["nickname"]}"' if player["nickname"] else player["name"])
+    ecol1, ecol2, ecol2b = st.columns(3)
+    edit_first_name = ecol1.text_input(
+        "First name", value=player["first_name"] or "", key=f"{key_prefix}_first_{player_id}",
+        disabled=is_read_only,
     )
-    edit_dob = ecol2.text_input(
+    edit_last_name = ecol2.text_input(
+        "Last name", value=player["last_name"] or "", key=f"{key_prefix}_last_{player_id}",
+        disabled=is_read_only,
+    )
+    edit_nickname = ecol2b.text_input(
+        "Nickname", value=player["nickname"] or "", key=f"{key_prefix}_nickname_{player_id}",
+        disabled=is_read_only,
+    )
+    edit_dob = st.text_input(
         "Birth date", value=player["birth_date"] or "", key=f"{key_prefix}_dob_{player_id}",
         placeholder="YYYY-MM-DD", disabled=is_read_only,
     )
@@ -998,7 +1189,8 @@ def render_player_panel(
             "Save changes", key=f"{key_prefix}_save_{player_id}", type="primary", disabled=is_read_only
         ):
             save_fields = {
-                "name": edit_name.strip(), "birth_date": edit_dob.strip() or None,
+                "first_name": edit_first_name.strip(), "last_name": edit_last_name.strip() or None,
+                "nickname": edit_nickname.strip() or None, "birth_date": edit_dob.strip() or None,
                 "current_division_id": edit_division,
                 "contact_first_name": edit_cfn.strip() or None, "contact_last_name": edit_cln.strip() or None,
             }
@@ -1320,14 +1512,14 @@ if not all_divisions:
 # meaningful for admins (granting page access requires already having
 # it), so it's the one tab that's actually absent for non-admins.
 _tab_labels = ["🏠 Home", "Process New Scoresheet", "Games", "Schedule", "Standings", "Player Stats",
-               "Team Rosters", "Players", "Divisions"]
+               "Team Rosters", "Players", "Coaches", "Divisions"]
 if user["is_admin"]:
     _tab_labels.append("User Management")
 
 _tabs = st.tabs(_tab_labels)
 (tab_home, tab_process, tab_edit, tab_schedule, tab_standings, tab_stats,
- tab_rosters, tab_players, tab_divisions) = _tabs[:9]
-tab_users = _tabs[9] if user["is_admin"] else None
+ tab_rosters, tab_players, tab_coaches, tab_divisions) = _tabs[:10]
+tab_users = _tabs[10] if user["is_admin"] else None
 
 # ---------------------------------------------------------------------------
 # Tab 0: home (tutorial/overview landing page)
@@ -1426,6 +1618,10 @@ with tab_home:
          "season they've been rated in (with a progress chart), and their stats in each division "
          "they've played in. A player profile is global and persists across seasons; a roster row "
          "is just that season's jersey number, linked to a profile once someone identifies who it is."),
+        ("🧑‍🏫 Coaches", "coaches",
+         "Every coach's profile — contact info, whether they have a registered child (and which "
+         "one), and every team they've coached across every division/season. A coach profile is "
+         "global and persists across seasons; assign one to a team here or from Team Rosters."),
         ("🗓️ Divisions", "divisions",
          "Create and manage divisions — one per year/season/age-group combination (e.g. "
          "\"2026 Summer Penguin\"). Deleting one sends it to a 30-day recycle bin first."),
@@ -2165,8 +2361,11 @@ with tab_rosters:
                     if available_coaches and st.button(
                         "Assign", key=f"assign_coach_btn_{roster_team_id}", disabled=is_read_only
                     ):
-                        core.assign_coach_to_team(conn, roster_team_id, coach_to_assign)
-                        st.rerun()
+                        try:
+                            core.assign_coach_to_team(conn, roster_team_id, coach_to_assign)
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
                 if assigned:
                     assigned_names = {c["id"]: c["name"] for c in assigned}
                     remove_col1, remove_col2 = st.columns([3, 1])
@@ -2182,18 +2381,26 @@ with tab_rosters:
                             core.remove_coach_from_team(conn, roster_team_id, coach_to_remove)
                             st.rerun()
                 with st.popover("➕ New coach"):
-                    new_coach_name = st.text_input(
-                        "Coach name", key=f"new_coach_name_{roster_team_id}", disabled=is_read_only
+                    ncc1, ncc2 = st.columns(2)
+                    new_coach_first = ncc1.text_input(
+                        "First name", key=f"new_coach_first_{roster_team_id}", disabled=is_read_only
                     )
+                    new_coach_last = ncc2.text_input(
+                        "Last name", key=f"new_coach_last_{roster_team_id}", disabled=is_read_only
+                    )
+                    st.caption("Add phone/email/nickname/children for this coach in the Coaches tab.")
                     if st.button(
                         "Create coach", key=f"create_coach_btn_{roster_team_id}", disabled=is_read_only
                     ):
-                        if new_coach_name.strip():
-                            new_coach_id = core.add_coach(conn, new_coach_name.strip())
-                            core.assign_coach_to_team(conn, roster_team_id, new_coach_id)
-                            st.rerun()
+                        if new_coach_first.strip():
+                            new_coach_id = core.add_coach(conn, new_coach_first.strip(), new_coach_last.strip() or None)
+                            try:
+                                core.assign_coach_to_team(conn, roster_team_id, new_coach_id)
+                                st.rerun()
+                            except ValueError as e:
+                                st.error(str(e))
                         else:
-                            st.error("Coach name is required.")
+                            st.error("First name is required.")
 
                 st.divider()
                 st.subheader(f"{team_options[roster_team_id]} — Player Stats")
@@ -2241,7 +2448,10 @@ with tab_players:
         }
 
         with st.expander("➕ Add a new player"):
-            pn_name = st.text_input("Name", key="new_player_name", disabled=is_read_only)
+            pncol1, pncol2, pncol3 = st.columns(3)
+            pn_first = pncol1.text_input("First name", key="new_player_first", disabled=is_read_only)
+            pn_last = pncol2.text_input("Last name", key="new_player_last", disabled=is_read_only)
+            pn_nickname = pncol3.text_input("Nickname", key="new_player_nickname", disabled=is_read_only)
             pn_dob = st.text_input(
                 "Birth date", key="new_player_dob", placeholder="YYYY-MM-DD", disabled=is_read_only
             )
@@ -2261,16 +2471,16 @@ with tab_players:
                 pn_cph = pcol3.text_input("Contact phone", key="new_player_cph", disabled=is_read_only)
                 pn_cem = pcol4.text_input("Contact email", key="new_player_cem", disabled=is_read_only)
             if st.button("Add player", key="add_player_btn", type="primary", disabled=is_read_only):
-                if pn_name.strip():
+                if pn_first.strip():
                     core.add_player(
-                        conn, pn_name.strip(), birth_date=pn_dob.strip() or None,
-                        current_division_id=pn_division,
+                        conn, pn_first.strip(), pn_last.strip() or None, pn_nickname.strip() or None,
+                        birth_date=pn_dob.strip() or None, current_division_id=pn_division,
                         contact_first_name=pn_cfn.strip() or None, contact_last_name=pn_cln.strip() or None,
                         contact_phone=pn_cph.strip() or None, contact_email=pn_cem.strip() or None,
                     )
                     st.rerun()
                 else:
-                    st.error("Name is required.")
+                    st.error("First name is required.")
 
         # "Sub"/"SUB" placeholder players (one per team, created by linking
         # a roster's generic "Sub" jersey row rather than identifying a
@@ -2307,7 +2517,10 @@ with tab_players:
             filtered_players = players_list
             if name_filter.strip():
                 needle = name_filter.strip().lower()
-                filtered_players = [p for p in filtered_players if needle in p["name"].lower()]
+                filtered_players = [
+                    p for p in filtered_players
+                    if needle in p["name"].lower() or needle in (p["nickname"] or "").lower()
+                ]
             if division_filter is not None:
                 filtered_players = [p for p in filtered_players if p["current_division_id"] == division_filter]
             if eval_filter:
@@ -2363,7 +2576,105 @@ with tab_players:
                             st.rerun()
 
 # ---------------------------------------------------------------------------
-# Tab 8: divisions
+# Tab 8: coaches
+# ---------------------------------------------------------------------------
+
+with tab_coaches:
+    if "coaches" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+    else:
+        st.header("Coaches")
+        st.caption(
+            "Coach profiles are global — the same coach keeps one profile across every division/season "
+            "they coach in. A coach can coach one team per division (still multiple teams across a "
+            "season's different divisions, e.g. U10 Summer and U13 Summer), but not two teams in the "
+            "same division."
+        )
+
+        all_divisions_for_coaches = core.list_divisions(conn)
+        coach_division_name_by_id = {
+            d["id"]: f"{d['year']} {d['season']} — {division_label(d['age_group'])}" for d in all_divisions_for_coaches
+        }
+
+        with st.expander("➕ Add a new coach"):
+            cncol1, cncol2, cncol3 = st.columns(3)
+            cn_first = cncol1.text_input("First name", key="new_coach_first_tab", disabled=is_read_only)
+            cn_last = cncol2.text_input("Last name", key="new_coach_last_tab", disabled=is_read_only)
+            cn_nickname = cncol3.text_input("Nickname", key="new_coach_nickname_tab", disabled=is_read_only)
+            cn_phone = cn_email = ""
+            if hide_contact_details:
+                st.caption("🔒 Phone/email are hidden for your role.")
+            else:
+                cncol4, cncol5 = st.columns(2)
+                cn_phone = cncol4.text_input("Phone", key="new_coach_phone_tab", disabled=is_read_only)
+                cn_email = cncol5.text_input("Email", key="new_coach_email_tab", disabled=is_read_only)
+            if st.button("Add coach", key="add_coach_btn_tab", type="primary", disabled=is_read_only):
+                if cn_first.strip():
+                    core.add_coach(
+                        conn, cn_first.strip(), cn_last.strip() or None, cn_nickname.strip() or None,
+                        phone=cn_phone.strip() or None, email=cn_email.strip() or None,
+                    )
+                    st.rerun()
+                else:
+                    st.error("First name is required.")
+
+        coaches_list = core.list_coaches(conn)
+        if not coaches_list:
+            st.write("No coaches yet — add one above.")
+        else:
+            coach_filter_col1, coach_filter_col2 = st.columns([2, 1.5])
+            with coach_filter_col1:
+                coach_name_filter = st.text_input("Search by name", key="coaches_tab_name_filter")
+            with coach_filter_col2:
+                children_filter = st.checkbox("Has a registered child", key="coaches_tab_children_filter")
+
+            filtered_coaches = coaches_list
+            if coach_name_filter.strip():
+                needle = coach_name_filter.strip().lower()
+                filtered_coaches = [
+                    c for c in filtered_coaches
+                    if needle in c["name"].lower() or needle in (c["nickname"] or "").lower()
+                ]
+            if children_filter:
+                with_children = core.coach_ids_with_children(conn)
+                filtered_coaches = [c for c in filtered_coaches if c["id"] in with_children]
+
+            st.caption(f"Showing {len(filtered_coaches)} of {len(coaches_list)} coaches.")
+
+            if not filtered_coaches:
+                st.write("No coaches match these filters.")
+            else:
+                coach_options = {c["id"]: coach_label(c) for c in filtered_coaches}
+                coach_ids = list(coach_options)
+
+                coach_pending_key = "coaches_tab_pending_select"
+                if coach_pending_key in st.session_state:
+                    st.session_state["coaches_tab_select"] = st.session_state.pop(coach_pending_key)
+
+                selected_coach_id = st.selectbox(
+                    "Select a coach", options=coach_ids, format_func=lambda i: coach_options[i],
+                    key="coaches_tab_select",
+                )
+                render_coach_panel(
+                    conn, selected_coach_id, coach_division_name_by_id, all_divisions_for_coaches,
+                    key_prefix="coaches_tab", nav_ids=coach_ids, nav_pending_key=coach_pending_key,
+                )
+
+        deleted_coaches = core.list_coaches(conn, include_deleted=True)
+        deleted_coaches = [c for c in deleted_coaches if c["deleted_at"]]
+        if deleted_coaches:
+            with st.expander(f"🗑️ Deleted Coaches ({len(deleted_coaches)})"):
+                for c in deleted_coaches:
+                    dccol1, dccol2 = st.columns([4, 1])
+                    with dccol1:
+                        st.write(coach_label(c))
+                    with dccol2:
+                        if st.button("Restore", key=f"restore_coach_{c['id']}", disabled=is_read_only):
+                            core.restore_coach(conn, c["id"])
+                            st.rerun()
+
+# ---------------------------------------------------------------------------
+# Tab 9: divisions
 # ---------------------------------------------------------------------------
 
 with tab_divisions:
@@ -2435,7 +2746,7 @@ with tab_divisions:
             render_add_division_form(conn)
 
 # ---------------------------------------------------------------------------
-# Tab 9: user management (admin only)
+# Tab 10: user management (admin only)
 # ---------------------------------------------------------------------------
 
 if user["is_admin"]:

@@ -89,6 +89,15 @@ CREATE TABLE IF NOT EXISTS teams (
     UNIQUE(division_id, name)
 );
 
+-- A team's assigned jersey color (e.g. "Red") — distinct from
+-- games.home_color/away_color, which is whatever color a given *game
+-- sheet* recorded for that game (occasionally different from the team's
+-- usual color). Managed from the Divisions tab, alongside deleted_at, a
+-- soft-delete matching players/coaches (no recycle-bin purge timer like
+-- divisions get — a team is low-stakes enough not to need one).
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS color TEXT;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+
 -- Global player profile — one row per real player, persisting across every
 -- division/season they ever play in. Distinct from roster_entries below,
 -- which is the per-team jersey-number row auto-extracted from game sheets;
@@ -199,6 +208,58 @@ CREATE TABLE IF NOT EXISTS player_positions (
     team_id      INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     position     TEXT,
     PRIMARY KEY (player_id, division_id, team_id)
+);
+
+-- ---------------------------------------------------------------------------
+-- Player draft — a live, snake-order draft of a division's registered-but-
+-- unrostered players onto its teams. Only one draft per division at a time
+-- (UNIQUE(division_id) below) — delete it to start over.
+-- ---------------------------------------------------------------------------
+
+-- Links a login to the coach identity it represents, so the app can tell
+-- "is this signed-in user this team's coach" (the Draft page uses it to
+-- gate who may submit a pick for a team). Optional — a user need not be
+-- tied to a coach profile at all (e.g. an admin who never coaches).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS coach_id INTEGER REFERENCES coaches(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS drafts (
+    id                   SERIAL PRIMARY KEY,
+    division_id          INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
+    status               TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'completed')),
+    current_pick_number  INTEGER NOT NULL DEFAULT 1,
+    created_at           TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(division_id)
+);
+
+-- Round-1 draft order (1-based slot per team); whose turn a given overall
+-- pick number is follows from this plus snake logic (odd rounds go
+-- slot 1..N, even rounds go N..1) — computed in game_sheet_core's draft
+-- functions rather than materialized here.
+CREATE TABLE IF NOT EXISTS draft_order (
+    draft_id  INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+    team_id   INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    slot      INTEGER NOT NULL,
+    PRIMARY KEY (draft_id, team_id),
+    UNIQUE(draft_id, slot)
+);
+
+-- The draft's own pick history — also what "has this player already been
+-- drafted" checks against. Drafting a player also creates a roster_entries
+-- row for them (see game_sheet_core.submit_draft_pick); roster_entry_id
+-- lets undo_last_pick find and remove exactly that row, and is nulled
+-- (rather than the pick itself disappearing) if that roster row is later
+-- deleted independently.
+CREATE TABLE IF NOT EXISTS draft_picks (
+    id               SERIAL PRIMARY KEY,
+    draft_id         INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+    pick_number      INTEGER NOT NULL,
+    round            INTEGER NOT NULL,
+    team_id          INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    player_id        INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    roster_entry_id  INTEGER REFERENCES roster_entries(id) ON DELETE SET NULL,
+    picked_at        TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(draft_id, pick_number),
+    UNIQUE(draft_id, player_id)
 );
 
 -- Official season schedule, uploaded as a CSV and persisted here so it

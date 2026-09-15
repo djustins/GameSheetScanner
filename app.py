@@ -27,6 +27,7 @@ Requires:
 
 import base64
 import os
+import random
 import secrets
 import urllib.parse
 import zipfile
@@ -675,8 +676,8 @@ def highlighted_row(player_id: int | None, row_key: str, index: int):
     way these need. Gives it the same alternating background every other
     table in the app has (see the "zebraeven"/"zebraodd" CSS in
     inject_theme_css, matched against this container's key), plus a border
-    for the player most recently created via a "Create Player" popover so
-    that row stands out from the rest right after it appears.
+    for the player most recently linked/created via a "Link / Create Player"
+    popover so that row stands out from the rest right after it appears.
 
     row_key must be unique among this call site's own rows (e.g. a roster
     entry id) — it's combined with a caller-specific prefix internally so
@@ -691,12 +692,52 @@ def highlighted_row(player_id: int | None, row_key: str, index: int):
 def render_create_player_popover(
     conn, key_prefix: str, team_id: int, team_name: str, number: str, working_division_id
 ):
-    """A "Create Player" popover that creates a new global player profile
-    and links it to one roster row (by team_id + number). Reused by the
-    Player Stats tab and the Team Rosters tab so there's one implementation
-    of "create & link a player" regardless of where it's opened from."""
-    with st.popover("➕ Create Player"):
+    """A "Link / Create Player" popover — search existing player profiles
+    first (players are global, so the person filling this roster slot may
+    already have a profile from another team/division/season and shouldn't
+    get a duplicate), falling back to creating a brand-new profile. Reused
+    by the Player Stats tab and the Team Rosters tab so there's one
+    implementation of "link or create & link a player" regardless of where
+    it's opened from."""
+    with st.popover("➕ Link / Create Player"):
         st.caption(f"Linking {core.display_text(team_name)} #{number}")
+
+        st.markdown("**Search for an existing player**")
+        search_needle = st.text_input("Search by name", key=f"{key_prefix}_link_search")
+        # "Sub"/"SUB" placeholder players aren't a real person to link —
+        # same exclusion the Players tab applies to its own picker.
+        searchable_players = [p for p in core.list_players(conn) if p["name"].strip().lower() != "sub"]
+        if search_needle.strip():
+            needle = search_needle.strip().lower()
+            matches = [
+                p for p in searchable_players
+                if needle in p["name"].lower() or needle in (p["nickname"] or "").lower()
+            ]
+            if not matches:
+                st.caption("No matching players.")
+            else:
+                histories = core.player_division_histories(conn, [p["id"] for p in matches])
+                match_options = {p["id"]: player_label(conn, p, histories.get(p["id"], [])) for p in matches}
+                lcol1, lcol2 = st.columns([3, 1])
+                with lcol1:
+                    link_pick_id = st.selectbox(
+                        "Matches", options=list(match_options), format_func=lambda i: match_options[i],
+                        key=f"{key_prefix}_link_pick", label_visibility="collapsed",
+                    )
+                with lcol2:
+                    if st.button("Link", key=f"{key_prefix}_link_btn", type="primary", disabled=is_read_only):
+                        entry = conn.execute(
+                            "SELECT id FROM roster_entries WHERE team_id = %s AND number = %s",
+                            (team_id, number),
+                        ).fetchone()
+                        if entry:
+                            core.link_roster_entry_to_player(conn, entry[0], link_pick_id)
+                        st.success(f"Linked {match_options[link_pick_id]}.")
+                        st.session_state["just_linked_player_id"] = link_pick_id
+                        st.rerun()
+
+        st.divider()
+        st.markdown("**Or create a new player**")
         ncol0a, ncol0b = st.columns(2)
         new_first = ncol0a.text_input("First name", key=f"{key_prefix}_new_first", disabled=is_read_only)
         new_last = ncol0b.text_input("Last name", key=f"{key_prefix}_new_last", disabled=is_read_only)
@@ -802,6 +843,68 @@ def confirm_delete_coach_dialog(key_prefix: str, coach_id: int, coach_name: str)
 
 def coach_label(coach: dict) -> str:
     return f'{coach["name"]} "{coach["nickname"]}"' if coach.get("nickname") else coach["name"]
+
+
+def render_team_coach_manager(conn, team_id: int, team_name: str, key_prefix: str):
+    """Assign/remove/create coaches for one team — reused by the Team
+    Rosters tab (scoped to the Working Division) and the Divisions tab
+    (which manages every division, not just the working one), so both stay
+    on one implementation of "the coach manager for a team" instead of two
+    copies that can quietly drift apart."""
+    assigned = core.list_team_coaches(conn, team_id)
+    if assigned:
+        st.write(", ".join(coach_label(c) for c in assigned))
+    else:
+        st.caption("No coaches assigned to this team yet.")
+    all_coaches = core.list_coaches(conn)
+    assigned_ids = {c["id"] for c in assigned}
+    available_coaches = {c["id"]: coach_label(c) for c in all_coaches if c["id"] not in assigned_ids}
+    acol1, acol2 = st.columns([3, 1])
+    with acol1:
+        coach_to_assign = st.selectbox(
+            "Assign coach", options=list(available_coaches), format_func=lambda i: available_coaches[i],
+            key=f"{key_prefix}_assign_coach_pick_{team_id}",
+        ) if available_coaches else None
+    with acol2:
+        if available_coaches and st.button(
+            "Assign", key=f"{key_prefix}_assign_coach_btn_{team_id}", disabled=is_read_only
+        ):
+            try:
+                core.assign_coach_to_team(conn, team_id, coach_to_assign)
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+    if assigned:
+        assigned_names = {c["id"]: coach_label(c) for c in assigned}
+        remove_col1, remove_col2 = st.columns([3, 1])
+        with remove_col1:
+            coach_to_remove = st.selectbox(
+                "Remove coach", options=list(assigned_ids), format_func=lambda i: assigned_names[i],
+                key=f"{key_prefix}_remove_coach_pick_{team_id}",
+            )
+        with remove_col2:
+            if st.button("Remove", key=f"{key_prefix}_remove_coach_btn_{team_id}", disabled=is_read_only):
+                core.remove_coach_from_team(conn, team_id, coach_to_remove)
+                st.rerun()
+    with st.popover("➕ New coach"):
+        ncc1, ncc2 = st.columns(2)
+        new_coach_first = ncc1.text_input(
+            "First name", key=f"{key_prefix}_new_coach_first_{team_id}", disabled=is_read_only
+        )
+        new_coach_last = ncc2.text_input(
+            "Last name", key=f"{key_prefix}_new_coach_last_{team_id}", disabled=is_read_only
+        )
+        st.caption("Add phone/email/nickname/children for this coach in the Coaches tab.")
+        if st.button("Create coach", key=f"{key_prefix}_create_coach_btn_{team_id}", disabled=is_read_only):
+            if new_coach_first.strip():
+                new_coach_id = core.add_coach(conn, new_coach_first.strip(), new_coach_last.strip() or None)
+                try:
+                    core.assign_coach_to_team(conn, team_id, new_coach_id)
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+            else:
+                st.error("First name is required.")
 
 
 def render_coach_panel(
@@ -956,6 +1059,160 @@ def render_coach_panel(
             ):
                 st.session_state[nav_pending_key] = nav_ids[nav_idx + 1]
                 st.rerun()
+
+
+@st.fragment(run_every="5s")
+def render_draft_live(conn, draft_division_id: int):
+    """The stateful part of the Draft tab — setup-vs-in-progress-vs-completed,
+    current turn, pick pool/controls, and history. Streamlit has no
+    cross-session push, so this is wrapped in a fragment that reruns on its
+    own every 5s: every open Draft tab (any division) picks up picks made
+    elsewhere without anyone needing to hit Refresh. Only this fragment
+    reruns on its timer, not the whole page, so it doesn't disturb state
+    elsewhere (other tabs, the Working Division picker, widgets mid-edit)."""
+    draft = core.get_draft(conn, draft_division_id)
+
+    if draft is None:
+        st.subheader("Set up a new draft")
+        draft_teams = core.list_teams(conn, draft_division_id)
+        pool = core.draft_pool(conn, draft_division_id)
+        st.caption(f"{len(pool)} player(s) currently eligible for this division's pool.")
+        if len(draft_teams) < 2:
+            st.warning("Add at least two teams to this division (in the Divisions tab) before drafting.")
+        elif not pool:
+            st.warning(
+                "No eligible players — everyone registered for this division is already rostered, "
+                "or nobody's current division is set to this one yet."
+            )
+        else:
+            order_pending_key = "draft_tab_order_pending"
+            if order_pending_key in st.session_state:
+                st.session_state["draft_tab_order_pick"] = st.session_state.pop(order_pending_key)
+            if st.button("🔀 Randomize order", key="draft_tab_shuffle"):
+                shuffled = [t["id"] for t in draft_teams]
+                random.shuffle(shuffled)
+                st.session_state[order_pending_key] = shuffled
+                st.rerun()
+
+            team_name_by_id = {t["id"]: t["name"] for t in draft_teams}
+            order_pick = st.multiselect(
+                "Draft order — click teams in the order they should pick (round 1; later rounds snake back)",
+                options=list(team_name_by_id), format_func=lambda i: team_name_by_id[i],
+                key="draft_tab_order_pick",
+            )
+            missing = [t for t in draft_teams if t["id"] not in order_pick]
+            if missing:
+                st.caption(f"Still need to add: {', '.join(t['name'] for t in missing)}")
+            if st.button(
+                "Start Draft", key="draft_tab_start", type="primary",
+                disabled=is_read_only or bool(missing),
+            ):
+                try:
+                    core.start_draft(conn, draft_division_id, order_pick)
+                    st.session_state.pop("draft_tab_order_pick", None)
+                    st.success("Draft started!")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
+    else:
+        order = core.list_draft_order(conn, draft["id"])
+        picks = core.list_draft_picks(conn, draft["id"])
+        pool = core.draft_pool(conn, draft_division_id)
+
+        if draft["status"] == "completed":
+            st.success("🏁 Draft complete!")
+        else:
+            current_team_id = core.current_pick_team_id(conn, draft["id"])
+            current_team_name = next((t["team_name"] for t in order if t["team_id"] == current_team_id), "?")
+            n_teams = len(order)
+            round_num = (draft["current_pick_number"] - 1) // n_teams + 1
+            st.info(
+                f"**Round {round_num}, Pick #{draft['current_pick_number']}** — "
+                f"it's **{current_team_name}**'s turn. {len(pool)} player(s) left in the pool."
+            )
+
+            team_coach_ids = {c["id"] for c in core.list_team_coaches(conn, current_team_id)}
+            can_pick = user["is_admin"] or (user.get("coach_id") is not None and user["coach_id"] in team_coach_ids)
+
+            if not pool:
+                st.warning("The pool is empty but the draft hasn't been marked complete — try Undo below.")
+            elif not can_pick:
+                st.caption(f"Waiting for {current_team_name}'s coach (or an admin) to make this pick.")
+            else:
+                pick_search = st.text_input("Search the pool", key="draft_tab_pick_search")
+                pool_matches = pool
+                if pick_search.strip():
+                    needle = pick_search.strip().lower()
+                    pool_matches = [
+                        p for p in pool
+                        if needle in p["name"].lower() or needle in (p["nickname"] or "").lower()
+                    ]
+                if not pool_matches:
+                    st.caption("No matching players in the pool.")
+                else:
+                    pool_options = {
+                        p["id"]: (f'{p["name"]} "{p["nickname"]}"' if p["nickname"] else p["name"])
+                        for p in pool_matches
+                    }
+                    pcol1, pcol2 = st.columns([3, 1])
+                    with pcol1:
+                        pick_player_id = st.selectbox(
+                            "Pool", options=list(pool_options), format_func=lambda i: pool_options[i],
+                            key="draft_tab_pick_select", label_visibility="collapsed",
+                        )
+                    with pcol2:
+                        if st.button(
+                            "Draft", key="draft_tab_pick_btn", type="primary", disabled=is_read_only
+                        ):
+                            try:
+                                core.submit_draft_pick(conn, draft["id"], pick_player_id)
+                                st.rerun()
+                            except ValueError as e:
+                                st.error(str(e))
+
+        if user["is_admin"] and picks and st.button("↩️ Undo last pick", key="draft_tab_undo"):
+            try:
+                core.undo_last_pick(conn, draft["id"])
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+        with st.expander(f"Draft order ({len(order)} teams)"):
+            st.write(" → ".join(o["team_name"] for o in order) + " → (reverses each round)")
+
+        with st.expander(f"Pick history ({len(picks)})", expanded=True):
+            if not picks:
+                st.caption("No picks yet.")
+            else:
+                for p in picks:
+                    nickname_part = f' "{p["nickname"]}"' if p["nickname"] else ""
+                    st.write(
+                        f"**#{p['pick_number']}** (Rd {p['round']}) — {p['team_name']}: "
+                        f"{p['player_name']}{nickname_part}"
+                    )
+
+        if user["is_admin"]:
+            st.divider()
+            draft_delete_confirm_key = f"confirm_delete_draft_{draft['id']}"
+            if st.button("🗑️ Delete this draft", key=f"delete_draft_{draft['id']}"):
+                st.session_state[draft_delete_confirm_key] = True
+                st.rerun()
+            if st.session_state.get(draft_delete_confirm_key):
+                st.warning(
+                    "Delete this draft's order and pick history? Players already drafted stay on "
+                    "their team's roster — this only resets the draft itself so it can be re-run."
+                )
+                dcol1, dcol2 = st.columns(2)
+                with dcol1:
+                    if st.button("Yes, delete", key=f"confirm_yes_draft_{draft['id']}", type="primary"):
+                        core.delete_draft(conn, draft["id"])
+                        st.session_state.pop(draft_delete_confirm_key, None)
+                        st.rerun()
+                with dcol2:
+                    if st.button("Cancel", key=f"confirm_no_draft_{draft['id']}"):
+                        st.session_state.pop(draft_delete_confirm_key, None)
+                        st.rerun()
 
 
 def render_evaluation_progress_chart(evaluations: list[dict]):
@@ -1512,14 +1769,14 @@ if not all_divisions:
 # meaningful for admins (granting page access requires already having
 # it), so it's the one tab that's actually absent for non-admins.
 _tab_labels = ["🏠 Home", "Process New Scoresheet", "Games", "Schedule", "Standings", "Player Stats",
-               "Team Rosters", "Players", "Coaches", "Divisions"]
+               "Team Rosters", "Players", "Coaches", "Divisions", "Draft"]
 if user["is_admin"]:
     _tab_labels.append("User Management")
 
 _tabs = st.tabs(_tab_labels)
 (tab_home, tab_process, tab_edit, tab_schedule, tab_standings, tab_stats,
- tab_rosters, tab_players, tab_coaches, tab_divisions) = _tabs[:10]
-tab_users = _tabs[10] if user["is_admin"] else None
+ tab_rosters, tab_players, tab_coaches, tab_divisions, tab_draft) = _tabs[:11]
+tab_users = _tabs[11] if user["is_admin"] else None
 
 # ---------------------------------------------------------------------------
 # Tab 0: home (tutorial/overview landing page)
@@ -1625,6 +1882,10 @@ with tab_home:
         ("🗓️ Divisions", "divisions",
          "Create and manage divisions — one per year/season/age-group combination (e.g. "
          "\"2026 Summer Penguin\"). Deleting one sends it to a 30-day recycle bin first."),
+        ("🎯 Draft", "draft",
+         "Run a live, snake-order draft of a division's registered-but-unrostered players onto its "
+         "teams. Each team's coach (or an admin) submits that team's pick when it's their turn; a "
+         "drafted player is added straight to that team's roster."),
     ]
     for tab_index, (title, page_key, description) in enumerate(page_guides, start=1):
         locked = page_key not in visible_pages and not user["is_admin"]
@@ -2343,64 +2604,7 @@ with tab_rosters:
 
                 st.divider()
                 st.subheader(f"{team_options[roster_team_id]} — Coaches")
-                assigned = core.list_team_coaches(conn, roster_team_id)
-                if assigned:
-                    st.write(", ".join(c["name"] for c in assigned))
-                else:
-                    st.caption("No coaches assigned to this team yet.")
-                all_coaches = core.list_coaches(conn)
-                assigned_ids = {c["id"] for c in assigned}
-                available_coaches = {c["id"]: c["name"] for c in all_coaches if c["id"] not in assigned_ids}
-                acol1, acol2 = st.columns([3, 1])
-                with acol1:
-                    coach_to_assign = st.selectbox(
-                        "Assign coach", options=list(available_coaches), format_func=lambda i: available_coaches[i],
-                        key=f"assign_coach_pick_{roster_team_id}",
-                    ) if available_coaches else None
-                with acol2:
-                    if available_coaches and st.button(
-                        "Assign", key=f"assign_coach_btn_{roster_team_id}", disabled=is_read_only
-                    ):
-                        try:
-                            core.assign_coach_to_team(conn, roster_team_id, coach_to_assign)
-                            st.rerun()
-                        except ValueError as e:
-                            st.error(str(e))
-                if assigned:
-                    assigned_names = {c["id"]: c["name"] for c in assigned}
-                    remove_col1, remove_col2 = st.columns([3, 1])
-                    with remove_col1:
-                        coach_to_remove = st.selectbox(
-                            "Remove coach", options=list(assigned_ids), format_func=lambda i: assigned_names[i],
-                            key=f"remove_coach_pick_{roster_team_id}",
-                        )
-                    with remove_col2:
-                        if st.button(
-                            "Remove", key=f"remove_coach_btn_{roster_team_id}", disabled=is_read_only
-                        ):
-                            core.remove_coach_from_team(conn, roster_team_id, coach_to_remove)
-                            st.rerun()
-                with st.popover("➕ New coach"):
-                    ncc1, ncc2 = st.columns(2)
-                    new_coach_first = ncc1.text_input(
-                        "First name", key=f"new_coach_first_{roster_team_id}", disabled=is_read_only
-                    )
-                    new_coach_last = ncc2.text_input(
-                        "Last name", key=f"new_coach_last_{roster_team_id}", disabled=is_read_only
-                    )
-                    st.caption("Add phone/email/nickname/children for this coach in the Coaches tab.")
-                    if st.button(
-                        "Create coach", key=f"create_coach_btn_{roster_team_id}", disabled=is_read_only
-                    ):
-                        if new_coach_first.strip():
-                            new_coach_id = core.add_coach(conn, new_coach_first.strip(), new_coach_last.strip() or None)
-                            try:
-                                core.assign_coach_to_team(conn, roster_team_id, new_coach_id)
-                                st.rerun()
-                            except ValueError as e:
-                                st.error(str(e))
-                        else:
-                            st.error("First name is required.")
+                render_team_coach_manager(conn, roster_team_id, team_options[roster_team_id], key_prefix="rosters_tab")
 
                 st.divider()
                 st.subheader(f"{team_options[roster_team_id]} — Player Stats")
@@ -2687,10 +2891,10 @@ with tab_divisions:
         with recycle_col:
             with st.popover("♻️ Recycle Bin"):
                 deleted_divisions = core.list_deleted_divisions(conn)
+                st.caption("Divisions — permanently deleted 30 days after removal, unless restored first.")
                 if not deleted_divisions:
-                    st.write("Recycle bin is empty.")
+                    st.write("No deleted divisions.")
                 else:
-                    st.caption("Permanently deleted 30 days after removal, unless restored first.")
                     for d in deleted_divisions:
                         rbcol1, rbcol2 = st.columns([4, 1])
                         with rbcol1:
@@ -2703,10 +2907,28 @@ with tab_divisions:
                                 core.restore_division(conn, d["id"])
                                 st.rerun()
 
+                st.divider()
+                deleted_teams = core.list_deleted_teams(conn)
+                st.caption("Teams — no auto-purge, kept until restored.")
+                if not deleted_teams:
+                    st.write("No deleted teams.")
+                else:
+                    for t in deleted_teams:
+                        rtcol1, rtcol2 = st.columns([4, 1])
+                        with rtcol1:
+                            st.write(
+                                f"{t['name']} ({t['year']} {t['season']} — {division_label(t['age_group'])})"
+                            )
+                        with rtcol2:
+                            if st.button("Restore", key=f"restore_team_{t['id']}", disabled=is_read_only):
+                                core.restore_team(conn, t["id"])
+                                st.rerun()
+
         st.caption(
             "A division is one season's instance of an age group, e.g. 2026 Summer Penguin (U10). "
             "The same age group recurs as a new division every season. The Working Division picker "
-            "at the top right applies across the whole session and defaults new sheets' Division field."
+            "at the top right applies across the whole session and defaults new sheets' Division field. "
+            "Expand a division below to manage its teams — name, jersey color, and assigned coach(es)."
         )
 
         divisions = core.list_divisions(conn)
@@ -2714,39 +2936,158 @@ with tab_divisions:
             st.write("No divisions yet.")
         else:
             for d in divisions:
-                confirm_key = f"confirm_delete_div_{d['id']}"
-                dcol1, dcol2 = st.columns([5, 1])
-                with dcol1:
-                    st.write(f"**{d['year']} {d['season']}** — {division_label(d['age_group'])}")
-                with dcol2:
-                    if st.button("🗑️ Delete", key=f"delete_div_{d['id']}", disabled=is_read_only):
+                division_title = f"{d['year']} {d['season']} — {division_label(d['age_group'])}"
+                with st.expander(division_title):
+                    st.subheader("Teams")
+                    teams = core.list_teams(conn, d["id"])
+                    if not teams:
+                        st.caption("No teams yet in this division.")
+                    else:
+                        head1, head2, head3 = st.columns([2, 1.5, 3])
+                        head1.markdown("**Team**")
+                        head2.markdown("**Color**")
+                        head3.markdown("**Coach(es)**")
+                        for team_idx, t in enumerate(teams):
+                            with highlighted_row(None, row_key=f"div_team_row_{t['id']}", index=team_idx):
+                                trow1, trow2, trow3, trow4 = st.columns([2, 1.5, 3, 0.7])
+                                trow1.write(t["name"])
+                                trow2.write(t["color"] or "—")
+                                team_coaches = core.list_team_coaches(conn, t["id"])
+                                trow3.write(
+                                    ", ".join(coach_label(c) for c in team_coaches) if team_coaches else "—"
+                                )
+                                with trow4:
+                                    with st.popover("⚙️"):
+                                        st.caption(f"Manage {t['name']}")
+                                        mcol1, mcol2 = st.columns(2)
+                                        edit_team_name = mcol1.text_input(
+                                            "Name", value=t["name"], key=f"div_team_name_{t['id']}",
+                                            disabled=is_read_only,
+                                        )
+                                        edit_team_color = mcol2.text_input(
+                                            "Color", value=t["color"] or "", key=f"div_team_color_{t['id']}",
+                                            disabled=is_read_only,
+                                        )
+                                        if st.button(
+                                            "Save", key=f"div_team_save_{t['id']}", type="primary",
+                                            disabled=is_read_only,
+                                        ):
+                                            try:
+                                                core.update_team(
+                                                    conn, t["id"], name=edit_team_name.strip(),
+                                                    color=edit_team_color.strip() or None,
+                                                )
+                                                st.rerun()
+                                            except ValueError as e:
+                                                st.error(str(e))
+
+                                        st.divider()
+                                        st.caption("Coaches")
+                                        render_team_coach_manager(
+                                            conn, t["id"], t["name"], key_prefix=f"div_{d['id']}"
+                                        )
+
+                                        st.divider()
+                                        team_confirm_key = f"confirm_delete_team_{t['id']}"
+                                        if st.button(
+                                            "🗑️ Delete team", key=f"delete_team_{t['id']}", disabled=is_read_only
+                                        ):
+                                            st.session_state[team_confirm_key] = True
+                                            st.rerun()
+                                        if st.session_state.get(team_confirm_key):
+                                            st.warning(
+                                                f"Delete {t['name']}? Its roster and coach assignments go with "
+                                                "it (recoverable from the Recycle Bin above)."
+                                            )
+                                            tccol1, tccol2 = st.columns(2)
+                                            with tccol1:
+                                                if st.button(
+                                                    "Yes, delete", key=f"confirm_yes_team_{t['id']}",
+                                                    type="primary", disabled=is_read_only,
+                                                ):
+                                                    core.soft_delete_team(conn, t["id"])
+                                                    st.session_state.pop(team_confirm_key, None)
+                                                    st.rerun()
+                                            with tccol2:
+                                                if st.button("Cancel", key=f"confirm_no_team_{t['id']}"):
+                                                    st.session_state.pop(team_confirm_key, None)
+                                                    st.rerun()
+
+                    with st.popover("➕ Add a team"):
+                        new_div_team_name = st.text_input(
+                            "Team name", key=f"new_div_team_name_{d['id']}", disabled=is_read_only
+                        )
+                        if st.button("Add team", key=f"add_div_team_btn_{d['id']}", disabled=is_read_only):
+                            if new_div_team_name.strip():
+                                core.add_team(conn, d["id"], new_div_team_name.strip())
+                                st.rerun()
+                            else:
+                                st.error("Team name is required.")
+
+                    st.divider()
+                    confirm_key = f"confirm_delete_div_{d['id']}"
+                    if st.button("🗑️ Delete division", key=f"delete_div_{d['id']}", disabled=is_read_only):
                         st.session_state[confirm_key] = True
                         st.rerun()
-                if st.session_state.get(confirm_key):
-                    st.warning(
-                        f"Delete {d['year']} {d['season']} — {division_label(d['age_group'])}? "
-                        "It goes to the recycle bin for 30 days before being permanently removed."
-                    )
-                    ccol1, ccol2 = st.columns(2)
-                    with ccol1:
-                        if st.button(
-                            "Yes, delete", key=f"confirm_yes_div_{d['id']}", type="primary",
-                            disabled=is_read_only,
-                        ):
-                            core.soft_delete_division(conn, d["id"])
-                            st.session_state.pop(confirm_key, None)
-                            st.rerun()
-                    with ccol2:
-                        if st.button("Cancel", key=f"confirm_no_div_{d['id']}"):
-                            st.session_state.pop(confirm_key, None)
-                            st.rerun()
-                st.divider()
+                    if st.session_state.get(confirm_key):
+                        st.warning(
+                            f"Delete {division_title}? It goes to the recycle bin for 30 days before being "
+                            "permanently removed."
+                        )
+                        ccol1, ccol2 = st.columns(2)
+                        with ccol1:
+                            if st.button(
+                                "Yes, delete", key=f"confirm_yes_div_{d['id']}", type="primary",
+                                disabled=is_read_only,
+                            ):
+                                core.soft_delete_division(conn, d["id"])
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                        with ccol2:
+                            if st.button("Cancel", key=f"confirm_no_div_{d['id']}"):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
 
         with st.popover("➕ Add Division"):
             render_add_division_form(conn)
 
 # ---------------------------------------------------------------------------
-# Tab 10: user management (admin only)
+# Tab 10: draft
+# ---------------------------------------------------------------------------
+
+with tab_draft:
+    if "draft" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+    else:
+        st.header("Draft")
+        st.caption(
+            "A live, snake-order draft of a division's registered-but-unrostered players onto its teams. "
+            "Each team's coach (or an admin) submits that team's pick when it's their turn; a drafted "
+            "player is added straight to that team's roster (jersey number left as a placeholder for the "
+            "coach to fill in later). The board below refreshes itself every few seconds, so every open "
+            "Draft tab picks up picks made elsewhere automatically."
+        )
+
+        draft_divisions = core.list_divisions(conn)
+        if not draft_divisions:
+            st.write("No divisions yet — add one in the Divisions tab first.")
+        else:
+            draft_division_options = {
+                d["id"]: f"{d['year']} {d['season']} — {division_label(d['age_group'])}" for d in draft_divisions
+            }
+            default_idx = (
+                list(draft_division_options).index(working_division_id)
+                if working_division_id in draft_division_options else 0
+            )
+            draft_division_id = st.selectbox(
+                "Division", options=list(draft_division_options), format_func=lambda i: draft_division_options[i],
+                index=default_idx, key="draft_tab_division",
+            )
+
+            render_draft_live(conn, draft_division_id)
+
+# ---------------------------------------------------------------------------
+# Tab 11: user management (admin only)
 # ---------------------------------------------------------------------------
 
 if user["is_admin"]:
@@ -2842,6 +3183,9 @@ if user["is_admin"]:
         active_users = core.list_users(conn)
         deactivated_users = [u for u in core.list_users(conn, include_deleted=True) if u["deleted_at"]]
         active_admin_count = sum(1 for u in active_users if u["is_admin"])
+        all_coaches_for_users = core.list_coaches(conn)
+        coach_link_options = [None] + [c["id"] for c in all_coaches_for_users]
+        coach_link_names = {c["id"]: coach_label(c) for c in all_coaches_for_users}
 
         for row_user in active_users:
             is_self = row_user["id"] == user["id"]
@@ -2863,12 +3207,20 @@ if user["is_admin"]:
                     disabled=edit_admin,
                     help="Ignored while Admin is checked — admins get every page." if edit_admin else None,
                 )
+                edit_coach_id = st.selectbox(
+                    "Linked coach profile", options=coach_link_options,
+                    format_func=lambda i: "— None —" if i is None else coach_link_names[i],
+                    index=coach_link_options.index(row_user["coach_id"]), key=f"user_coach_{row_user['id']}",
+                    help="Ties this login to a coach identity so they can submit picks for their team(s) "
+                         "on the Draft page.",
+                )
 
                 save_col, reset_col, deactivate_col = st.columns(3)
                 with save_col:
                     if st.button("Save", key=f"user_save_{row_user['id']}"):
                         core.update_user(conn, row_user["id"], display_name=edit_name, is_admin=edit_admin)
                         core.set_user_role(conn, row_user["id"], edit_role_id)
+                        core.set_user_coach(conn, row_user["id"], edit_coach_id)
                         st.success("Saved.")
                         st.rerun()
                 with reset_col:

@@ -598,6 +598,7 @@ PAGES = {
     "players": "Players",
     "coaches": "Coaches",
     "divisions": "Divisions",
+    "draft": "Draft",
 }
 
 
@@ -702,12 +703,12 @@ def _get_role_flags(conn: PGConnection, role_id: int | None) -> tuple[bool, bool
 def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(
-        f"SELECT id, email, display_name, is_admin, role_id, deleted_at FROM users {where} ORDER BY email"
+        f"SELECT id, email, display_name, is_admin, role_id, coach_id, deleted_at FROM users {where} ORDER BY email"
     ).fetchall()
     users = [
         {
             "id": r[0], "email": r[1], "display_name": r[2], "is_admin": bool(r[3]),
-            "role_id": r[4], "deleted_at": r[5],
+            "role_id": r[4], "coach_id": r[5], "deleted_at": r[6],
         }
         for r in rows
     ]
@@ -719,7 +720,7 @@ def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
 
 def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, email, password_hash, display_name, is_admin, role_id, deleted_at "
+        "SELECT id, email, password_hash, display_name, is_admin, role_id, coach_id, deleted_at "
         "FROM users WHERE email = %s",
         (email.strip().lower(),),
     ).fetchone()
@@ -727,7 +728,7 @@ def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
         return None
     return {
         "id": row[0], "email": row[1], "password_hash": row[2], "display_name": row[3],
-        "is_admin": bool(row[4]), "role_id": row[5], "deleted_at": row[6],
+        "is_admin": bool(row[4]), "role_id": row[5], "coach_id": row[6], "deleted_at": row[7],
     }
 
 
@@ -779,6 +780,13 @@ def update_user(
 
 def set_user_role(conn: PGConnection, user_id: int, role_id: int | None):
     conn.execute("UPDATE users SET role_id = %s WHERE id = %s", (role_id, user_id))
+    conn.commit()
+
+
+def set_user_coach(conn: PGConnection, user_id: int, coach_id: int | None):
+    """Link (or clear) which coach profile this login represents — lets the
+    Draft page tell whether a signed-in user is a given team's coach."""
+    conn.execute("UPDATE users SET coach_id = %s WHERE id = %s", (coach_id, user_id))
     conn.commit()
 
 
@@ -1360,11 +1368,12 @@ def purge_expired_divisions(conn: PGConnection, days: int = 30):
 # Team rosters
 # ---------------------------------------------------------------------------
 
-def list_teams(conn: PGConnection, division_id: int) -> list[dict]:
+def list_teams(conn: PGConnection, division_id: int, include_deleted: bool = False) -> list[dict]:
+    where = "WHERE division_id = %s" + ("" if include_deleted else " AND deleted_at IS NULL")
     rows = conn.execute(
-        "SELECT id, name FROM teams WHERE division_id = %s ORDER BY name", (division_id,)
+        f"SELECT id, name, color, deleted_at FROM teams {where} ORDER BY name", (division_id,)
     ).fetchall()
-    return [{"id": r[0], "name": display_text(r[1])} for r in rows]
+    return [{"id": r[0], "name": display_text(r[1]), "color": r[2], "deleted_at": r[3]} for r in rows]
 
 
 def add_team(conn: PGConnection, division_id: int, name: str) -> int:
@@ -1378,6 +1387,60 @@ def add_team(conn: PGConnection, division_id: int, name: str) -> int:
     return conn.execute(
         "SELECT id FROM teams WHERE division_id = %s AND name = %s", (division_id, name)
     ).fetchone()[0]
+
+
+def update_team(conn: PGConnection, team_id: int, **fields):
+    """Update a team's editable fields (name, color), e.g.
+    update_team(conn, 5, color="Red"). Raises ValueError if renaming would
+    collide with another team already in the same division."""
+    allowed = {"name", "color"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    if "name" in updates:
+        updates["name"] = normalize_text(updates["name"])
+        row = conn.execute("SELECT division_id FROM teams WHERE id = %s", (team_id,)).fetchone()
+        if row is None:
+            raise ValueError("Team not found.")
+        conflict = conn.execute(
+            "SELECT id FROM teams WHERE division_id = %s AND name = %s AND id != %s",
+            (row[0], updates["name"], team_id),
+        ).fetchone()
+        if conflict:
+            raise ValueError(f"A team named {display_text(updates['name'])!r} already exists in this division.")
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    conn.execute(f"UPDATE teams SET {set_clause} WHERE id = %s", (*updates.values(), team_id))
+    conn.commit()
+
+
+def soft_delete_team(conn: PGConnection, team_id: int):
+    conn.execute(
+        "UPDATE teams SET deleted_at = %s WHERE id = %s",
+        (datetime.utcnow().isoformat(timespec="seconds"), team_id),
+    )
+    conn.commit()
+
+
+def restore_team(conn: PGConnection, team_id: int):
+    conn.execute("UPDATE teams SET deleted_at = NULL WHERE id = %s", (team_id,))
+    conn.commit()
+
+
+def list_deleted_teams(conn: PGConnection) -> list[dict]:
+    """Every soft-deleted team, across every division, with enough division
+    context (year/season/age_group) to show which one it belonged to —
+    used by the Divisions tab's recycle bin."""
+    rows = conn.execute(
+        """SELECT t.id, t.name, t.color, t.deleted_at, t.division_id, d.year, d.season, d.age_group
+           FROM teams t JOIN divisions d ON d.id = t.division_id
+           WHERE t.deleted_at IS NOT NULL
+           ORDER BY t.deleted_at DESC"""
+    ).fetchall()
+    cols = ["id", "name", "color", "deleted_at", "division_id", "year", "season", "age_group"]
+    teams = [dict(zip(cols, r)) for r in rows]
+    for t in teams:
+        t["name"] = display_text(t["name"])
+    return teams
 
 
 # A jersey number is usually numeric but can be a placeholder like "G" or
@@ -1440,6 +1503,19 @@ def link_roster_entry_to_player(conn: PGConnection, roster_entry_id: int, player
         "UPDATE roster_entries SET player_id = %s WHERE id = %s", (player_id, roster_entry_id)
     )
     conn.commit()
+
+
+def add_roster_entry(conn: PGConnection, team_id: int, number: str, name: str, player_id: int | None = None) -> int:
+    """A single new roster row — unlike replace_roster (which replaces a
+    team's whole roster from the editor grid), this adds just one, e.g. for
+    a drafted player."""
+    cur = conn.execute(
+        "INSERT INTO roster_entries (team_id, number, name, player_id) VALUES (%s, %s, %s, %s) RETURNING id",
+        (team_id, number.strip(), normalize_text(name) or "", player_id),
+    )
+    entry_id = cur.fetchone()[0]
+    conn.commit()
+    return entry_id
 
 
 # ---------------------------------------------------------------------------
@@ -1603,6 +1679,186 @@ def list_evaluated_player_ids(conn: PGConnection, division_id: int) -> set[int]:
         "SELECT DISTINCT player_id FROM evaluations WHERE division_id = %s", (division_id,)
     ).fetchall()
     return {r[0] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Player draft — a live, snake-order draft of a division's registered-but-
+# unrostered players onto its teams. One active draft per division; delete
+# it (delete_draft) to start over.
+# ---------------------------------------------------------------------------
+
+def get_draft(conn: PGConnection, division_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, division_id, status, current_pick_number FROM drafts WHERE division_id = %s",
+        (division_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "division_id": row[1], "status": row[2], "current_pick_number": row[3]}
+
+
+def list_draft_order(conn: PGConnection, draft_id: int) -> list[dict]:
+    rows = conn.execute(
+        """SELECT o.slot, o.team_id, t.name FROM draft_order o
+           JOIN teams t ON t.id = o.team_id
+           WHERE o.draft_id = %s ORDER BY o.slot""",
+        (draft_id,),
+    ).fetchall()
+    return [{"slot": r[0], "team_id": r[1], "team_name": display_text(r[2])} for r in rows]
+
+
+def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
+    """Players eligible to be drafted: registered for this division
+    (current_division_id) and not already on any of its teams' rosters."""
+    rows = conn.execute(
+        """SELECT p.id, p.first_name, p.last_name, p.nickname
+           FROM players p
+           WHERE p.current_division_id = %s AND p.deleted_at IS NULL
+             AND p.id NOT IN (
+                 SELECT re.player_id FROM roster_entries re
+                 JOIN teams t ON t.id = re.team_id
+                 WHERE t.division_id = %s AND re.player_id IS NOT NULL
+             )
+           ORDER BY p.last_name, p.first_name""",
+        (division_id, division_id),
+    ).fetchall()
+    cols = ["id", "first_name", "last_name", "nickname"]
+    players = [dict(zip(cols, r)) for r in rows]
+    for p in players:
+        p["name"] = full_name(p["first_name"], p["last_name"])
+    return players
+
+
+def _snake_team_id(order: list[dict], pick_number: int) -> tuple[int, int]:
+    """(team_id, round) for a 1-based overall pick_number, given round-1
+    order — odd rounds go slot 1..N, even rounds reverse to N..1."""
+    n = len(order)
+    round_num = (pick_number - 1) // n + 1
+    pos_in_round = (pick_number - 1) % n
+    if round_num % 2 == 0:
+        pos_in_round = n - 1 - pos_in_round
+    return order[pos_in_round]["team_id"], round_num
+
+
+def current_pick_team_id(conn: PGConnection, draft_id: int) -> int | None:
+    """The team whose turn the current pick is — None if the draft has no
+    team order (shouldn't happen once started) or has finished."""
+    order = list_draft_order(conn, draft_id)
+    draft = conn.execute(
+        "SELECT status, current_pick_number FROM drafts WHERE id = %s", (draft_id,)
+    ).fetchone()
+    if not order or draft is None or draft[0] != "in_progress":
+        return None
+    team_id, _ = _snake_team_id(order, draft[1])
+    return team_id
+
+
+def start_draft(conn: PGConnection, division_id: int, team_ids_in_order: list[int]) -> int:
+    """Create a new draft for a division with the given round-1 team order.
+    Raises ValueError if one's already active for this division."""
+    if get_draft(conn, division_id) is not None:
+        raise ValueError("A draft already exists for this division — delete it first to start over.")
+    if not team_ids_in_order:
+        raise ValueError("Need at least one team to draft into.")
+    cur = conn.execute("INSERT INTO drafts (division_id) VALUES (%s) RETURNING id", (division_id,))
+    draft_id = cur.fetchone()[0]
+    for slot, team_id in enumerate(team_ids_in_order, start=1):
+        conn.execute(
+            "INSERT INTO draft_order (draft_id, team_id, slot) VALUES (%s, %s, %s)", (draft_id, team_id, slot)
+        )
+    conn.commit()
+    return draft_id
+
+
+def delete_draft(conn: PGConnection, draft_id: int):
+    """Deletes the draft's own tracking (order/pick history) only — NOT the
+    roster rows its picks already created, which by now are just normal
+    roster entries like any other (edit/remove those from Team Rosters)."""
+    conn.execute("DELETE FROM drafts WHERE id = %s", (draft_id,))
+    conn.commit()
+
+
+def submit_draft_pick(conn: PGConnection, draft_id: int, player_id: int) -> int:
+    """Records the next pick for whichever team's turn it is, and creates a
+    roster row for that player on that team — jersey number left as a
+    placeholder ("TBD<n>") for the coach to fill in later via Team Rosters,
+    same as any other roster row. Raises ValueError if the draft isn't in
+    progress or the player isn't in its pool. Returns the new roster row's
+    id."""
+    draft = conn.execute(
+        "SELECT status, current_pick_number, division_id FROM drafts WHERE id = %s", (draft_id,)
+    ).fetchone()
+    if draft is None:
+        raise ValueError("Draft not found.")
+    status, pick_number, division_id = draft
+    if status != "in_progress":
+        raise ValueError("This draft has already finished.")
+
+    order = list_draft_order(conn, draft_id)
+    team_id, round_num = _snake_team_id(order, pick_number)
+
+    pool = draft_pool(conn, division_id)
+    pool_ids = {p["id"] for p in pool}
+    if player_id not in pool_ids:
+        raise ValueError(
+            "That player isn't in this draft's pool (already rostered, or not registered for this division)."
+        )
+
+    already_on_team = conn.execute(
+        "SELECT COUNT(*) FROM roster_entries WHERE team_id = %s AND number LIKE 'TBD%%'", (team_id,)
+    ).fetchone()[0]
+    player = get_player(conn, player_id)
+    roster_entry_id = add_roster_entry(conn, team_id, f"TBD{already_on_team + 1}", player["name"], player_id=player_id)
+
+    conn.execute(
+        """INSERT INTO draft_picks (draft_id, pick_number, round, team_id, player_id, roster_entry_id)
+           VALUES (%s, %s, %s, %s, %s, %s)""",
+        (draft_id, pick_number, round_num, team_id, player_id, roster_entry_id),
+    )
+    new_status = "completed" if len(pool_ids) <= 1 else "in_progress"
+    conn.execute(
+        "UPDATE drafts SET current_pick_number = %s, status = %s WHERE id = %s",
+        (pick_number + 1, new_status, draft_id),
+    )
+    conn.commit()
+    return roster_entry_id
+
+
+def undo_last_pick(conn: PGConnection, draft_id: int):
+    """Removes the most recent pick and the roster row it created, and
+    rewinds current_pick_number so that pick is up for grabs again."""
+    last = conn.execute(
+        "SELECT id, pick_number, roster_entry_id FROM draft_picks WHERE draft_id = %s ORDER BY pick_number DESC LIMIT 1",
+        (draft_id,),
+    ).fetchone()
+    if last is None:
+        raise ValueError("No picks to undo.")
+    pick_id, pick_number, roster_entry_id = last
+    conn.execute("DELETE FROM draft_picks WHERE id = %s", (pick_id,))
+    if roster_entry_id is not None:
+        conn.execute("DELETE FROM roster_entries WHERE id = %s", (roster_entry_id,))
+    conn.execute(
+        "UPDATE drafts SET current_pick_number = %s, status = 'in_progress' WHERE id = %s",
+        (pick_number, draft_id),
+    )
+    conn.commit()
+
+
+def list_draft_picks(conn: PGConnection, draft_id: int) -> list[dict]:
+    rows = conn.execute(
+        """SELECT dp.pick_number, dp.round, t.name, p.first_name, p.last_name, p.nickname, dp.picked_at
+           FROM draft_picks dp
+           JOIN teams t ON t.id = dp.team_id
+           JOIN players p ON p.id = dp.player_id
+           WHERE dp.draft_id = %s ORDER BY dp.pick_number""",
+        (draft_id,),
+    ).fetchall()
+    cols = ["pick_number", "round", "team_name", "first_name", "last_name", "nickname", "picked_at"]
+    picks = [dict(zip(cols, r)) for r in rows]
+    for p in picks:
+        p["team_name"] = display_text(p["team_name"])
+        p["player_name"] = full_name(p["first_name"], p["last_name"])
+    return picks
 
 
 # ---------------------------------------------------------------------------

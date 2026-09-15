@@ -28,6 +28,7 @@ Requires:
 import base64
 import os
 import random
+import re
 import secrets
 import urllib.parse
 import zipfile
@@ -843,6 +844,29 @@ def confirm_delete_coach_dialog(key_prefix: str, coach_id: int, coach_name: str)
 
 def coach_label(coach: dict) -> str:
     return f'{coach["name"]} "{coach["nickname"]}"' if coach.get("nickname") else coach["name"]
+
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def render_color_swatch(color: str | None):
+    """A small colored square next to a team's color code, so it reads as
+    an actual color rather than a hex string — mirrors what st.color_picker
+    itself already shows on its swatch button."""
+    if not color:
+        st.write("—")
+    elif _HEX_COLOR_RE.match(color):
+        # Only ever a plain #RRGGBB from st.color_picker, but validated
+        # before going into raw HTML regardless — never trust stored text.
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:6px;">'
+            f'<span style="display:inline-block;width:14px;height:14px;border-radius:3px;'
+            f'background:{color};border:1px solid rgba(128,128,128,0.4);flex-shrink:0;"></span>'
+            f'<span>{color}</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.write(color)
 
 
 def render_team_coach_manager(conn, team_id: int, team_name: str, key_prefix: str):
@@ -2951,7 +2975,8 @@ with tab_divisions:
                             with highlighted_row(None, row_key=f"div_team_row_{t['id']}", index=team_idx):
                                 trow1, trow2, trow3, trow4 = st.columns([2, 1.5, 3, 0.7])
                                 trow1.write(t["name"])
-                                trow2.write(t["color"] or "—")
+                                with trow2:
+                                    render_color_swatch(t["color"])
                                 team_coaches = core.list_team_coaches(conn, t["id"])
                                 trow3.write(
                                     ", ".join(coach_label(c) for c in team_coaches) if team_coaches else "—"
@@ -2964,8 +2989,12 @@ with tab_divisions:
                                             "Name", value=t["name"], key=f"div_team_name_{t['id']}",
                                             disabled=is_read_only,
                                         )
-                                        edit_team_color = mcol2.text_input(
-                                            "Color", value=t["color"] or "", key=f"div_team_color_{t['id']}",
+                                        default_team_color = (
+                                            t["color"] if t["color"] and _HEX_COLOR_RE.match(t["color"])
+                                            else "#CCCCCC"
+                                        )
+                                        edit_team_color = mcol2.color_picker(
+                                            "Color", value=default_team_color, key=f"div_team_color_{t['id']}",
                                             disabled=is_read_only,
                                         )
                                         if st.button(
@@ -2975,7 +3004,7 @@ with tab_divisions:
                                             try:
                                                 core.update_team(
                                                     conn, t["id"], name=edit_team_name.strip(),
-                                                    color=edit_team_color.strip() or None,
+                                                    color=edit_team_color,
                                                 )
                                                 st.rerun()
                                             except ValueError as e:

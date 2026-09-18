@@ -74,6 +74,10 @@ SEASON_ORDER = {"Spring": 0, "Summer": 1, "Fall": 2, "Winter": 3}
 # left off the chart, though it still shows in the evaluations list.
 GRADE_TIERS = ["A", "B", "C", "D"]
 
+# Numeric weight for averaging a team's grades on the Teams tab — A is the
+# top tier (see above), so it gets the highest value.
+GRADE_VALUES = {tier: len(GRADE_TIERS) - i for i, tier in enumerate(GRADE_TIERS)}
+
 # Sentinel distinguishing "no prefetched value was passed" from "the
 # prefetched value is legitimately empty/None" for season_grade_input's and
 # position_input's `prefetched` parameter below.
@@ -846,6 +850,15 @@ def coach_label(coach: dict) -> str:
     return f'{coach["name"]} "{coach["nickname"]}"' if coach.get("nickname") else coach["name"]
 
 
+def team_label_with_coaches(team: dict, coaches_by_team: dict) -> str:
+    """A team's label for pickers: name plus its assigned coach(es), so
+    picking a team doesn't mean going to look up who coaches it first —
+    e.g. for the Draft setup order, or "which team is this evaluation for"."""
+    coaches = coaches_by_team.get(team["id"], [])
+    coach_part = ", ".join(coach_label(c) for c in coaches) if coaches else "no coach"
+    return f'{team["name"]} ({coach_part})'
+
+
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -1031,7 +1044,10 @@ def render_coach_panel(
             if not assignable_teams:
                 st.caption("No unassigned teams in this division.")
             else:
-                assign_team_options = {t["id"]: t["name"] for t in assignable_teams}
+                assign_coaches_by_team = core.list_team_coaches_for_division(conn, assign_division_id)
+                assign_team_options = {
+                    t["id"]: team_label_with_coaches(t, assign_coaches_by_team) for t in assignable_teams
+                }
                 assign_team_id = st.selectbox(
                     "Team", options=list(assign_team_options), format_func=lambda i: assign_team_options[i],
                     key=f"{key_prefix}_assign_team_{coach_id}",
@@ -1118,7 +1134,8 @@ def render_draft_live(conn, draft_division_id: int):
                 st.session_state[order_pending_key] = shuffled
                 st.rerun()
 
-            team_name_by_id = {t["id"]: t["name"] for t in draft_teams}
+            draft_coaches_by_team = core.list_team_coaches_for_division(conn, draft_division_id)
+            team_name_by_id = {t["id"]: team_label_with_coaches(t, draft_coaches_by_team) for t in draft_teams}
             order_pick = st.multiselect(
                 "Draft order — click teams in the order they should pick (round 1; later rounds snake back)",
                 options=list(team_name_by_id), format_func=lambda i: team_name_by_id[i],
@@ -1523,7 +1540,10 @@ def render_player_panel(
                     key=f"{key_prefix}_eval_division_{player_id}",
                 )
                 eval_teams = core.list_teams(conn, eval_division_id)
-                eval_team_options = {None: "(none)"} | {t["id"]: t["name"] for t in eval_teams}
+                eval_coaches_by_team = core.list_team_coaches_for_division(conn, eval_division_id)
+                eval_team_options = {None: "(none)"} | {
+                    t["id"]: team_label_with_coaches(t, eval_coaches_by_team) for t in eval_teams
+                }
                 eval_team_id = st.selectbox(
                     "Team", options=list(eval_team_options), format_func=lambda i: eval_team_options[i],
                     key=f"{key_prefix}_eval_team_{player_id}",
@@ -1793,14 +1813,14 @@ if not all_divisions:
 # meaningful for admins (granting page access requires already having
 # it), so it's the one tab that's actually absent for non-admins.
 _tab_labels = ["🏠 Home", "Process New Scoresheet", "Games", "Schedule", "Standings", "Player Stats",
-               "Team Rosters", "Players", "Coaches", "Divisions", "Draft"]
+               "Team Rosters", "Teams", "Players", "Coaches", "Divisions", "Draft"]
 if user["is_admin"]:
     _tab_labels.append("User Management")
 
 _tabs = st.tabs(_tab_labels)
 (tab_home, tab_process, tab_edit, tab_schedule, tab_standings, tab_stats,
- tab_rosters, tab_players, tab_coaches, tab_divisions, tab_draft) = _tabs[:11]
-tab_users = _tabs[11] if user["is_admin"] else None
+ tab_rosters, tab_teams, tab_players, tab_coaches, tab_divisions, tab_draft) = _tabs[:12]
+tab_users = _tabs[12] if user["is_admin"] else None
 
 # ---------------------------------------------------------------------------
 # Tab 0: home (tutorial/overview landing page)
@@ -1894,6 +1914,9 @@ with tab_home:
          "Add players to a team by jersey number so stats can be attributed by name instead of "
          "just a number. Also sets each player's position and this season's grade, and manages "
          "which coach(es) are assigned to the team."),
+        ("📋 Teams", "teams",
+         "Every team in a division at a glance — coach(es), whether players have been added, and "
+         "whether they've been graded, with an average rating and A/B/C/D breakdown once they have."),
         ("🧑 Players", "players",
          "Every player's profile — contact info, birth date, evaluation history across every "
          "season they've been rated in (with a progress chart), and their stats in each division "
@@ -2536,8 +2559,10 @@ with tab_rosters:
                 st.write("No teams yet in this division — process a game sheet, or add one above.")
             else:
                 team_options = {t["id"]: t["name"] for t in teams}
+                roster_coaches_by_team = core.list_team_coaches_for_division(conn, working_division_id)
+                team_select_labels = {t["id"]: team_label_with_coaches(t, roster_coaches_by_team) for t in teams}
                 roster_team_id = st.selectbox(
-                    "Select a team", options=list(team_options), format_func=lambda i: team_options[i]
+                    "Select a team", options=list(team_options), format_func=lambda i: team_select_labels[i]
                 )
                 st.caption("Click a column header to sort. Edit cells directly, or use the blank bottom row to add a player.")
 
@@ -2656,7 +2681,90 @@ with tab_rosters:
                     )
 
 # ---------------------------------------------------------------------------
-# Tab 7: players (global profiles, persisting across every division/season)
+# Tab 7: teams (per-division overview: coaches, roster status, grading)
+# ---------------------------------------------------------------------------
+
+with tab_teams:
+    if "teams" not in visible_pages:
+        st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+    else:
+        st.header("Teams")
+        st.caption(
+            "Every team in a division at a glance: coach(es), whether players have been added, and "
+            "whether they've been graded — with an average rating and A/B/C/D breakdown once they have."
+        )
+
+        teams_divisions = core.list_divisions(conn)
+        if not teams_divisions:
+            st.write("No divisions yet — add one in the Divisions tab first.")
+        else:
+            teams_division_options = {
+                d["id"]: f"{d['year']} {d['season']} — {division_label(d['age_group'])}" for d in teams_divisions
+            }
+            teams_default_idx = (
+                list(teams_division_options).index(working_division_id)
+                if working_division_id in teams_division_options else 0
+            )
+            teams_division_id = st.selectbox(
+                "Division", options=list(teams_division_options), format_func=lambda i: teams_division_options[i],
+                index=teams_default_idx, key="teams_tab_division",
+            )
+
+            all_division_teams = core.list_teams(conn, teams_division_id)
+            if not all_division_teams:
+                st.write("No teams yet in this division — add one in the Divisions tab.")
+            else:
+                # Batch-fetched once for every team in this division, instead
+                # of one get_season_grade() round trip per player.
+                grades_by_player = core.get_season_grades_for_division(conn, teams_division_id)
+
+                col_widths = [1.8, 1, 2.3, 1.8, 1.3, 2.8]
+                head1, head2, head3, head4, head5, head6 = st.columns(col_widths)
+                head1.markdown("**Team**")
+                head2.markdown("**Color**")
+                head3.markdown("**Coach(es)**")
+                head4.markdown("**Players**")
+                head5.markdown("**Avg**")
+                head6.markdown("**Breakdown**")
+
+                for team_idx, t in enumerate(all_division_teams):
+                    with highlighted_row(None, row_key=f"teams_tab_row_{t['id']}", index=team_idx):
+                        c1, c2, c3, c4, c5, c6 = st.columns(col_widths)
+                        c1.write(t["name"])
+                        with c2:
+                            render_color_swatch(t["color"])
+
+                        team_coaches = core.list_team_coaches(conn, t["id"])
+                        c3.write(", ".join(coach_label(tc) for tc in team_coaches) if team_coaches else "—")
+
+                        roster = core.list_roster(conn, t["id"])
+                        if not roster:
+                            c4.write("No players yet")
+                            c5.write("—")
+                            c6.write("—")
+                            continue
+
+                        tiered_grades = []
+                        for entry in roster:
+                            if entry["player_id"] is None:
+                                continue
+                            grade = grades_by_player.get(entry["player_id"])
+                            if grade and grade.strip().upper() in GRADE_TIERS:
+                                tiered_grades.append(grade.strip().upper())
+
+                        c4.write(f"{len(roster)} added · {len(tiered_grades)} graded")
+                        if tiered_grades:
+                            avg = sum(GRADE_VALUES[g] for g in tiered_grades) / len(tiered_grades)
+                            c5.write(f"**{avg:.1f}**/{max(GRADE_VALUES.values())}")
+                            c6.write(", ".join(
+                                f"{tier}: {tiered_grades.count(tier)}" for tier in GRADE_TIERS if tier in tiered_grades
+                            ))
+                        else:
+                            c5.write("—")
+                            c6.write("—")
+
+# ---------------------------------------------------------------------------
+# Tab 8: players (global profiles, persisting across every division/season)
 # ---------------------------------------------------------------------------
 
 with tab_players:
@@ -2804,7 +2912,7 @@ with tab_players:
                             st.rerun()
 
 # ---------------------------------------------------------------------------
-# Tab 8: coaches
+# Tab 9: coaches
 # ---------------------------------------------------------------------------
 
 with tab_coaches:
@@ -2902,7 +3010,7 @@ with tab_coaches:
                             st.rerun()
 
 # ---------------------------------------------------------------------------
-# Tab 9: divisions
+# Tab 10: divisions
 # ---------------------------------------------------------------------------
 
 with tab_divisions:
@@ -3081,7 +3189,7 @@ with tab_divisions:
             render_add_division_form(conn)
 
 # ---------------------------------------------------------------------------
-# Tab 10: draft
+# Tab 11: draft
 # ---------------------------------------------------------------------------
 
 with tab_draft:
@@ -3116,7 +3224,7 @@ with tab_draft:
             render_draft_live(conn, draft_division_id)
 
 # ---------------------------------------------------------------------------
-# Tab 11: user management (admin only)
+# Tab 12: user management (admin only)
 # ---------------------------------------------------------------------------
 
 if user["is_admin"]:

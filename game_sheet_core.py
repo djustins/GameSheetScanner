@@ -595,6 +595,7 @@ PAGES = {
     "standings": "Standings",
     "stats": "Player Stats",
     "rosters": "Team Rosters",
+    "teams": "Teams",
     "players": "Players",
     "coaches": "Coaches",
     "divisions": "Divisions",
@@ -1969,6 +1970,32 @@ def list_team_coaches(conn: PGConnection, team_id: int) -> list[dict]:
         {"id": r[0], "first_name": r[1], "last_name": r[2], "nickname": r[3], "name": full_name(r[1], r[2])}
         for r in rows
     ]
+
+
+def list_team_coaches_for_division(conn: PGConnection, division_id: int) -> dict[int, list[dict]]:
+    """Every team's assigned coach(es) in this division, team_id -> [coach
+    dicts] (empty list if none), in one query — used to label team pickers
+    with who coaches each one without a list_team_coaches() round trip per
+    team. Teams with no coach still get a (empty-list) entry, via the LEFT
+    JOIN, so callers don't need a fallback for a missing key."""
+    rows = conn.execute(
+        """SELECT t.id, c.id, c.first_name, c.last_name, c.nickname
+           FROM teams t
+           LEFT JOIN team_coaches tc ON tc.team_id = t.id
+           LEFT JOIN coaches c ON c.id = tc.coach_id AND c.deleted_at IS NULL
+           WHERE t.division_id = %s
+           ORDER BY t.id, c.last_name, c.first_name""",
+        (division_id,),
+    ).fetchall()
+    result: dict[int, list[dict]] = {}
+    for team_id, coach_id, first_name, last_name, nickname in rows:
+        result.setdefault(team_id, [])
+        if coach_id is not None:
+            result[team_id].append({
+                "id": coach_id, "first_name": first_name, "last_name": last_name, "nickname": nickname,
+                "name": full_name(first_name, last_name),
+            })
+    return result
 
 
 def list_coach_teams(conn: PGConnection, coach_id: int) -> list[dict]:

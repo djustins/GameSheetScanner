@@ -17,6 +17,9 @@ source/
 # League admin spreadsheets (player/parent PII — names, birthdates, contact
 # info) used as one-off data imports; never publish these
 *.xlsx
+*.xls
+*.ods
+*.csv
 
 # Streamlit secrets (API keys etc.) — config.toml itself is fine to commit
 .streamlit/secrets.toml

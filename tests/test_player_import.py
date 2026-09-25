@@ -35,6 +35,65 @@ def test_detect_player_import_columns_supports_separate_first_last_columns():
     assert "name" not in detected
 
 
+def test_detect_player_import_columns_handles_a_real_messy_registration_export():
+    """Modeled on an actual export (U10_Fall_2026.ods) that broke the
+    original exact-alias-only matcher: "Player First/Last Name" (not just
+    "First Name"), "Account First/Last Name" for the parent (not "Parent
+    ..."), "User Email", "Telephone"/"Cellphone", and a verbatim
+    registration-form question standing in for "Position"."""
+    headers = [
+        "Division Name", "Player First Name", "Player Last Name", "Player Gender",
+        "Player Birth Date", "Account First Name", "Account Last Name", "Street Address",
+        "User Email", "Telephone", "Cellphone", "What position does your child prefer?",
+        "Is your child new to Team Pittsburgh?", "Teammate Request",
+    ]
+    detected = core.detect_player_import_columns(headers)
+    assert detected["first_name"] == "Player First Name"
+    assert detected["last_name"] == "Player Last Name"
+    assert detected["contact_first_name"] == "Account First Name"
+    assert detected["contact_last_name"] == "Account Last Name"
+    assert detected["birth_date"] == "Player Birth Date"
+    assert detected["contact_email"] == "User Email"
+    assert detected["contact_phone"] == "Telephone"
+    assert detected["position"] == "What position does your child prefer?"
+    # No team-assignment column actually exists in this file (it's a
+    # signup list, not a roster) -- must NOT be fooled into matching one of
+    # these, both of which genuinely contain the whole word "team".
+    assert "team" not in detected
+    assert detected.get("team") != "Is your child new to Team Pittsburgh?"
+
+
+def test_detect_player_import_columns_does_not_confuse_player_and_parent_names():
+    detected = core.detect_player_import_columns(
+        ["Player First Name", "Player Last Name", "Guardian First Name", "Guardian Last Name"]
+    )
+    assert detected["first_name"] == "Player First Name"
+    assert detected["last_name"] == "Player Last Name"
+    assert detected["contact_first_name"] == "Guardian First Name"
+    assert detected["contact_last_name"] == "Guardian Last Name"
+
+
+def test_detect_player_import_columns_word_boundary_avoids_teammate_and_coaching():
+    detected = core.detect_player_import_columns(["Teammate Request", "Coaching Notes", "Player Name"])
+    assert "team" not in detected
+    assert "coach" not in detected
+    assert detected["name"] == "Player Name"
+
+
+def test_detect_player_import_columns_matches_cellphone_as_one_word():
+    detected = core.detect_player_import_columns(["Player Name", "Cellphone"])
+    assert detected["contact_phone"] == "Cellphone"
+
+
+def test_detect_player_import_columns_does_not_double_claim_a_header():
+    # "Phone Number" could plausibly match both contact_phone ("phone") and
+    # the jersey-number fallback ("number") -- whichever field claims it
+    # first must make it unavailable to the other.
+    detected = core.detect_player_import_columns(["Player Name", "Phone Number"])
+    assert detected["contact_phone"] == "Phone Number"
+    assert detected.get("number") != "Phone Number"
+
+
 def test_missing_name_column_row_is_invalid(conn, division_id):
     columns = core.detect_player_import_columns(["Comments"])
     plan = core.build_player_import_plan(conn, division_id, [{"Comments": "no name here"}], columns)

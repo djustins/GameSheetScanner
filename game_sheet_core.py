@@ -149,15 +149,29 @@ _DATE_INPUT_FORMATS = [
 def normalize_date(s: str | None) -> str | None:
     """Storage form for game_date: ISO 'YYYY-MM-DD'. Falls back to the
     trimmed original string if it doesn't match a recognized format, rather
-    than losing/corrupting unusual handwriting-extraction results."""
+    than losing/corrupting unusual handwriting-extraction results.
+
+    A spreadsheet date cell (birth date, an imported schedule's date
+    column) often round-trips through pandas/openpyxl as a full timestamp
+    string ("2015-08-11 00:00:00" or "2015-08-11T00:00:00") even when only
+    the date matters — the time-of-day component, always midnight for a
+    plain date cell, is dropped before matching against the formats above
+    rather than making the whole value fail to parse and fall through
+    unchanged."""
     if not s:
         return s
     s = s.strip()
-    for fmt in _DATE_INPUT_FORMATS:
-        try:
-            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
+    date_part = re.split(r"[ T]", s, maxsplit=1)[0]
+    # Tries the date-only portion first (the common case for a spreadsheet
+    # timestamp), then the untouched original -- redundant work when there
+    # was nothing to split off, but harmless, and simpler than special-
+    # casing "nothing to split" separately.
+    for candidate in (date_part, s):
+        for fmt in _DATE_INPUT_FORMATS:
+            try:
+                return datetime.strptime(candidate, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
     return s
 
 
@@ -2177,20 +2191,108 @@ PLAYER_IMPORT_FIELDS: dict[str, list[str]] = {
     "coach": ["coach", "coach name"],
 }
 
+# A header that doesn't exactly match any alias above falls back to a
+# word-boundary match instead — real source files are inconsistent,
+# ranging from a tidy "Position" column to a verbatim registration-form
+# question ("What position does your child prefer?"), or "First Name" vs.
+# "Player First Name" vs. "Participant First Name". Word-boundary (not a
+# bare substring) matters here — a naive "team" in "teammate request", or
+# "coach" in "coaching notes", would wrongly claim a header that isn't
+# actually about a coach at all; \b keeps "coach" as a whole word without
+# giving up on the fallback for it entirely.
+#
+# No "team" entry here, deliberately: a whole-word "team" still isn't safe
+# enough to guess from, since an org can have "Team" as part of its own
+# name — a real file this was tested against had "Is your child new to
+# Team Pittsburgh?", which \bteam\b matches just as validly as an actual
+# team-assignment column would. Team assignment relies on the exact
+# aliases ("team"/"team name"/"recent team") only; anything else is left
+# unmatched rather than risking that kind of false positive.
+PLAYER_IMPORT_CONTAINS_FALLBACK: dict[str, list[str]] = {
+    "birth_date": ["birth date", "birthdate", "date of birth", "dob"],
+    "contact_phone": ["phone", "telephone", "cell", "cellphone", "cell phone"],
+    "contact_email": ["email"],
+    "number": ["jersey number", "jersey"],
+    "position": ["position"],
+    "coach": ["coach"],
+}
+
+# A header naming a first/last name field is ambiguous on its own --
+# "First Name" could be the player's or a parent's ("Account First Name",
+# "Guardian First Name"). Resolved by whether one of these appears in the
+# header: present means it's about the contact, not the player.
+_OTHER_PERSON_WORDS = ("parent", "guardian", "account", "contact", "emergency")
+
+
+def _normalize_header(header: str) -> str:
+    """Loose-match form of a column header for the substring fallback
+    below: lowercased, internal whitespace collapsed, trailing "?"
+    dropped — tolerates a verbatim survey-style question, not just a tidy
+    label."""
+    return re.sub(r"\s+", " ", header.strip().lower()).rstrip("?").strip()
+
+
+def _contains_word(text: str, phrase: str) -> bool:
+    """Whether `phrase` appears in `text` as a whole word (or phrase), not
+    as part of a longer word — e.g. "team" matches "assigned team" but not
+    "teammate request", and "coach" matches "co-coach" but not "coaching
+    notes"."""
+    return re.search(rf"\b{re.escape(phrase)}\b", text) is not None
+
 
 def detect_player_import_columns(headers: list[str]) -> dict[str, str]:
     """Best-effort match of a file's actual column headers to
-    PLAYER_IMPORT_FIELDS's canonical names, case/whitespace-insensitive.
-    Returns {field: actual_header_as_given} for whatever it recognized —
-    absence of "name" (or both "first_name" and "last_name") means the file
-    can't be used, since there's no name to match or create a player by."""
-    by_normalized = {h.strip().lower(): h for h in headers if h and h.strip()}
-    detected = {}
+    PLAYER_IMPORT_FIELDS's canonical names. Returns {field:
+    actual_header_as_given} for whatever it recognized — absence of "name"
+    (or both "first_name" and "last_name") means the file can't be used,
+    since there's no name to match or create a player by.
+
+    Three passes, each only considering headers no earlier pass already
+    claimed (so, e.g., a "Phone Number" header claimed by contact_phone
+    can't also be claimed by "number" for jersey number):
+      1. Exact match against PLAYER_IMPORT_FIELDS (case/whitespace-
+         insensitive) — unambiguous, so tried first.
+      2. first_name/last_name vs. contact_first_name/contact_last_name,
+         told apart by an _OTHER_PERSON_WORDS qualifier (see above).
+      3. A substring fallback for the remaining fields in
+         PLAYER_IMPORT_CONTAINS_FALLBACK."""
+    by_exact = {h.strip().lower(): h for h in headers if h and h.strip()}
+    by_loose = {_normalize_header(h): h for h in headers if h and h.strip()}
+
+    detected: dict[str, str] = {}
+    used: set[str] = set()
+
     for field, aliases in PLAYER_IMPORT_FIELDS.items():
         for alias in aliases:
-            if alias in by_normalized:
-                detected[field] = by_normalized[alias]
+            header = by_exact.get(alias) or by_loose.get(alias)
+            if header and header not in used:
+                detected[field] = header
+                used.add(header)
                 break
+
+    for normalized_header, header in by_loose.items():
+        if header in used:
+            continue
+        is_other_person = any(_contains_word(normalized_header, word) for word in _OTHER_PERSON_WORDS)
+        if _contains_word(normalized_header, "first name"):
+            field = "contact_first_name" if is_other_person else "first_name"
+        elif _contains_word(normalized_header, "last name"):
+            field = "contact_last_name" if is_other_person else "last_name"
+        else:
+            continue
+        if field not in detected:
+            detected[field] = header
+            used.add(header)
+
+    for field, substrings in PLAYER_IMPORT_CONTAINS_FALLBACK.items():
+        if field in detected:
+            continue
+        for normalized_header, header in by_loose.items():
+            if header not in used and any(_contains_word(normalized_header, sub) for sub in substrings):
+                detected[field] = header
+                used.add(header)
+                break
+
     return detected
 
 

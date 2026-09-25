@@ -17,6 +17,7 @@ import difflib
 import functools
 import json
 import mimetypes
+import re
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -116,9 +117,26 @@ def normalize_text(s: str | None) -> str | None:
     return s.lower() if s else s
 
 
+_MC_PREFIX_RE = re.compile(r"\bMc([a-z])")
+
+
 def display_text(s: str | None) -> str | None:
-    """Presentation form for an identity field: title-cased for display."""
-    return s.title() if s else s
+    """Presentation form for an identity field: title-cased for display,
+    with one correction str.title() alone gets wrong: a "Mc" surname
+    prefix (McDavid, McDonald, McGregor) only gets its own first letter
+    capitalized by title() — it treats a contiguous run of letters as one
+    word, so "mcdavid" comes out "Mcdavid", not "McDavid". This
+    re-capitalizes the letter right after "Mc" to fix that specific,
+    reliably-a-name-prefix pattern.
+
+    Deliberately doesn't attempt the same for "Mac": unlike "Mc", "Mac" is
+    also the start of plenty of ordinary words/names (Macy, Mack, Macomb,
+    machine), so guessing there would trade this one predictable wrong
+    capitalization for a different, less predictable one — no fix, rather
+    than a worse one."""
+    if not s:
+        return s
+    return _MC_PREFIX_RE.sub(lambda m: "Mc" + m.group(1).upper(), s.title())
 
 
 # Game dates are stored as ISO 'YYYY-MM-DD' so they sort/compare correctly

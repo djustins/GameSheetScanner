@@ -1153,7 +1153,7 @@ def list_schedule(conn: PGConnection, division_id: int) -> list[dict]:
     # scheduled dates is an "orphan" — a candidate for being an unaccounted
     # row's actual game, just filed under the wrong date.
     orphans_by_teams: dict[frozenset, list[dict]] = {}
-    for game_id, date, home, away in stored:
+    for game_id, date, home, away, _hs, _as in stored:
         teams = frozenset((home, away))
         if date not in scheduled_dates_by_teams.get(teams, set()):
             orphans_by_teams.setdefault(teams, []).append({"id": game_id, "game_date": display_date(date)})

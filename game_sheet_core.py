@@ -1572,6 +1572,51 @@ def get_player(conn: PGConnection, player_id: int) -> dict | None:
     return players.get(player_id)
 
 
+def list_players_in_division(conn: PGConnection, division_id: int) -> list[dict]:
+    """Every player "in" a division — the union of two groups that don't
+    always overlap: players whose profile's current_division_id points
+    here (signed up, possibly not yet on a team) and players on any of
+    this division's team rosters (which can happen without
+    current_division_id being updated, e.g. drafted straight onto a team
+    without the profile being touched). Each row also carries "teams": the
+    names of any of this division's teams they're rostered on (empty if
+    signed-up-only)."""
+    id_rows = conn.execute(
+        """SELECT DISTINCT p.id FROM players p
+           WHERE p.deleted_at IS NULL AND (
+               p.current_division_id = %s
+               OR p.id IN (
+                   SELECT re.player_id FROM roster_entries re
+                   JOIN teams t ON t.id = re.team_id
+                   WHERE t.division_id = %s AND re.player_id IS NOT NULL
+               )
+           )""",
+        (division_id, division_id),
+    ).fetchall()
+    player_ids = [r[0] for r in id_rows]
+    if not player_ids:
+        return []
+
+    by_id = {p["id"]: p for p in list_players(conn)}
+    team_rows = conn.execute(
+        """SELECT re.player_id, t.name FROM roster_entries re
+           JOIN teams t ON t.id = re.team_id
+           WHERE t.division_id = %s AND re.player_id = ANY(%s)""",
+        (division_id, player_ids),
+    ).fetchall()
+    teams_by_player: dict[int, list[str]] = {}
+    for player_id, team_name in team_rows:
+        teams_by_player.setdefault(player_id, []).append(display_text(team_name))
+
+    result = []
+    for player_id in player_ids:
+        p = dict(by_id[player_id])
+        p["teams"] = sorted(teams_by_player.get(player_id, []))
+        result.append(p)
+    result.sort(key=lambda p: (p["last_name"] or "", p["first_name"] or ""))
+    return result
+
+
 def add_player(
     conn: PGConnection, first_name: str, last_name: str | None = None, nickname: str | None = None,
     birth_date: str | None = None, current_division_id: int | None = None,
@@ -2081,6 +2126,271 @@ def coach_ids_with_children(conn: PGConnection) -> set[int]:
     "has children registered" without an N+1 query per coach."""
     rows = conn.execute("SELECT DISTINCT coach_id FROM coach_children").fetchall()
     return {r[0] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Player list import (CSV/Excel/ODS) — always into a specific, already-
+# selected division; this never creates or infers a division from the
+# file. A two-step flow: build_player_import_plan() figures out, per row,
+# whether it's a new player or matches an existing one (flagging anything
+# it can't decide confidently on its own), a caller (the UI) resolves
+# whatever needs a human's judgment, then apply_player_import_plan() writes
+# it. Column names are matched flexibly (case/whitespace-insensitive,
+# several accepted spellings per field) since different leagues' exports
+# don't all use the same headers — see the real one this was modeled on,
+# scripts/import_summer_player_list.py, whose spreadsheet is the source of
+# these exact header spellings.
+# ---------------------------------------------------------------------------
+
+PLAYER_IMPORT_FIELDS: dict[str, list[str]] = {
+    "name": ["player name", "name", "full name", "player"],
+    "first_name": ["first name", "first"],
+    "last_name": ["last name", "last"],
+    "birth_date": ["date of birth", "dob", "birth date", "birthdate"],
+    "contact_first_name": ["parent firstname", "parent first name", "contact first name", "guardian first name"],
+    "contact_last_name": ["parent lastname", "parent last name", "contact last name", "guardian last name"],
+    "contact_phone": [
+        "primary contact telephone", "phone", "phone number", "contact phone", "telephone", "parent phone",
+    ],
+    "contact_email": ["primary contact email", "email", "contact email", "parent email"],
+    "team": ["team", "team name", "recent team"],
+    "number": ["number", "jersey", "jersey #", "jersey number", "#"],
+    "position": ["position"],
+    "coach": ["coach", "coach name"],
+}
+
+
+def detect_player_import_columns(headers: list[str]) -> dict[str, str]:
+    """Best-effort match of a file's actual column headers to
+    PLAYER_IMPORT_FIELDS's canonical names, case/whitespace-insensitive.
+    Returns {field: actual_header_as_given} for whatever it recognized —
+    absence of "name" (or both "first_name" and "last_name") means the file
+    can't be used, since there's no name to match or create a player by."""
+    by_normalized = {h.strip().lower(): h for h in headers if h and h.strip()}
+    detected = {}
+    for field, aliases in PLAYER_IMPORT_FIELDS.items():
+        for alias in aliases:
+            if alias in by_normalized:
+                detected[field] = by_normalized[alias]
+                break
+    return detected
+
+
+def _is_missing_import_value(value) -> bool:
+    """True for a genuinely empty cell — None, or a pandas/numpy NaN float
+    (an empty cell read with dtype=str still comes back as float NaN, not
+    a string, so this can't just check `value is None`). NaN is the only
+    Python value that isn't equal to itself, which is what `value != value`
+    actually tests here — safe for every other type (str, int, etc.)."""
+    return value is None or value != value
+
+
+def _import_cell(row: dict, columns: dict[str, str], field: str) -> str | None:
+    header = columns.get(field)
+    if header is None:
+        return None
+    value = row.get(header)
+    if _is_missing_import_value(value):
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _normalize_import_date(row: dict, columns: dict[str, str]) -> str | None:
+    header = columns.get("birth_date")
+    if header is None:
+        return None
+    value = row.get(header)
+    if _is_missing_import_value(value) or (isinstance(value, str) and not value.strip()):
+        return None
+    if hasattr(value, "strftime"):  # a real date/datetime cell (openpyxl/pandas), not text
+        return value.strftime("%Y-%m-%d")
+    return normalize_date(str(value).strip())
+
+
+def build_player_import_plan(conn: PGConnection, division_id: int, rows: list[dict], columns: dict[str, str]) -> list[dict]:
+    """For each row (a dict keyed by the file's own headers), work out what
+    importing it would do. Returns a list of plan rows, in file order, each
+    with:
+      "row_number": 1-based position in the file (for display/error messages)
+      "name", "first_name", "last_name", "birth_date", "contact_first_name",
+        "contact_last_name", "contact_phone", "contact_email": parsed fields
+      "team_name", "number", "position", "coach_name": also parsed, used by
+        apply_player_import_plan() for roster/coach assignment — None if
+        the file has no such column, or this row left it blank
+      "status": "invalid" (no name — skipped, never applied), "create" (no
+        matching existing player), "update" (a single confident match),
+        "ambiguous" (2+ same-name candidates that birth_date couldn't tell
+        apart — see "candidates"), or "conflict" (a single same-name match,
+        but its stored birth_date disagrees with the file's — see
+        "conflict_detail")
+      "matched_player_id": set for "update" (auto-resolved) only
+      "candidates": the competing existing players, for "ambiguous"
+      "conflict_detail": {"existing": ..., "incoming": ...} birth dates, for "conflict"
+      "resolved_action": None for "ambiguous"/"conflict" until a caller
+        (the UI) sets it to "use_existing" (with "resolved_player_id" set)
+        or "create_new"; pre-set to "create"/"update" for the other two
+        statuses, matching "status", so apply_player_import_plan() only
+        ever looks at "resolved_action"/"resolved_player_id" — never
+        "status" itself — and a row nobody has reviewed can't slip through.
+    """
+    existing_by_name: dict[str, list[dict]] = {}
+    for p in list_players(conn):
+        existing_by_name.setdefault(p["name"].strip().lower(), []).append(p)
+
+    plan = []
+    for i, row in enumerate(rows, start=1):
+        name = _import_cell(row, columns, "name")
+        first_name = _import_cell(row, columns, "first_name")
+        last_name = _import_cell(row, columns, "last_name")
+        if not name and (first_name or last_name):
+            name = full_name(first_name, last_name)
+        if name and not (first_name or last_name):
+            first_name, last_name = split_full_name(name)
+
+        entry = {
+            "row_number": i,
+            "name": name,
+            "first_name": first_name,
+            "last_name": last_name,
+            "birth_date": _normalize_import_date(row, columns),
+            "contact_first_name": _import_cell(row, columns, "contact_first_name"),
+            "contact_last_name": _import_cell(row, columns, "contact_last_name"),
+            "contact_phone": _import_cell(row, columns, "contact_phone"),
+            "contact_email": _import_cell(row, columns, "contact_email"),
+            "team_name": _import_cell(row, columns, "team"),
+            "number": _import_cell(row, columns, "number"),
+            "position": _import_cell(row, columns, "position"),
+            "coach_name": _import_cell(row, columns, "coach"),
+        }
+
+        if not name:
+            entry.update(status="invalid", matched_player_id=None, candidates=[], conflict_detail=None,
+                         resolved_action="invalid", resolved_player_id=None)
+            plan.append(entry)
+            continue
+
+        candidates = existing_by_name.get(name.strip().lower(), [])
+        if len(candidates) == 0:
+            entry.update(status="create", matched_player_id=None, candidates=[], conflict_detail=None,
+                         resolved_action="create", resolved_player_id=None)
+        elif len(candidates) == 1:
+            match = candidates[0]
+            if entry["birth_date"] and match["birth_date"] and entry["birth_date"] != match["birth_date"]:
+                entry.update(
+                    status="conflict", matched_player_id=match["id"], candidates=[match],
+                    conflict_detail={"existing": match["birth_date"], "incoming": entry["birth_date"]},
+                    resolved_action=None, resolved_player_id=None,
+                )
+            else:
+                entry.update(status="update", matched_player_id=match["id"], candidates=[match], conflict_detail=None,
+                             resolved_action="update", resolved_player_id=match["id"])
+        else:
+            # Multiple same-name candidates -- use birth_date (if the file
+            # has one) to try to tell them apart before giving up and
+            # asking a human. This is the "use all available data to
+            # validate" step, not just a name lookup.
+            by_dob = [c for c in candidates if entry["birth_date"] and c["birth_date"] == entry["birth_date"]]
+            if len(by_dob) == 1:
+                match = by_dob[0]
+                entry.update(status="update", matched_player_id=match["id"], candidates=[match], conflict_detail=None,
+                             resolved_action="update", resolved_player_id=match["id"])
+            else:
+                entry.update(status="ambiguous", matched_player_id=None, candidates=candidates, conflict_detail=None,
+                             resolved_action=None, resolved_player_id=None)
+        plan.append(entry)
+    return plan
+
+
+def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[dict]) -> dict:
+    """Write a plan built by build_player_import_plan() (with every
+    "ambiguous"/"conflict" row's "resolved_action" filled in by the UI) to
+    the database. A row whose "resolved_action" is still None (an
+    ambiguous/conflict row nobody resolved) is skipped, not guessed at.
+
+    Team/coach are only ever touched when the row actually has one (per
+    the row's own "team_name"/"coach_name") -- a name-only row just
+    creates/updates the player profile and nothing else. A team is
+    found-or-created in this division by name; a coach is found-or-created
+    globally by name and assigned to that team (a team can have more than
+    one coach — e.g. an assistant — so this never conflicts with whoever
+    else is already on it). It's skipped with a warning (not an error that
+    aborts the rest of the import) only if that same coach is already
+    coaching a *different* team in this division, per
+    assign_coach_to_team's one-team-per-coach-per-division rule."""
+    created = updated = skipped = rostered = coached = 0
+    warnings: list[str] = []
+
+    for entry in plan:
+        action = entry["resolved_action"]
+        if action in (None, "invalid"):
+            skipped += 1
+            continue
+
+        if action == "create":
+            player_id = add_player(
+                conn, entry["first_name"] or entry["name"], entry["last_name"],
+                birth_date=entry["birth_date"], current_division_id=division_id,
+                contact_first_name=entry["contact_first_name"], contact_last_name=entry["contact_last_name"],
+                contact_phone=entry["contact_phone"], contact_email=entry["contact_email"],
+            )
+            created += 1
+        elif action == "use_existing" or action == "update":
+            player_id = entry.get("resolved_player_id") or entry["matched_player_id"]
+            update_player(
+                conn, player_id, first_name=entry["first_name"] or entry["name"], last_name=entry["last_name"],
+                birth_date=entry["birth_date"], current_division_id=division_id,
+                contact_first_name=entry["contact_first_name"], contact_last_name=entry["contact_last_name"],
+                contact_phone=entry["contact_phone"], contact_email=entry["contact_email"],
+            )
+            updated += 1
+        else:
+            skipped += 1
+            continue
+
+        team_name = entry["team_name"]
+        if not team_name:
+            continue
+        team_id = add_team(conn, division_id, team_name)
+
+        if entry["number"]:
+            existing_entry = next(
+                (r for r in list_roster(conn, team_id) if r["number"] == entry["number"]), None
+            )
+            if existing_entry:
+                conn.execute(
+                    "UPDATE roster_entries SET name = %s, player_id = %s WHERE id = %s",
+                    (entry["name"], player_id, existing_entry["id"]),
+                )
+                conn.commit()
+            else:
+                add_roster_entry(conn, team_id, entry["number"], entry["name"], player_id=player_id)
+            rostered += 1
+
+        if entry["position"]:
+            row = conn.execute(
+                "SELECT id FROM roster_entries WHERE team_id = %s AND player_id = %s", (team_id, player_id)
+            ).fetchone()
+            if row:
+                set_position(conn, player_id, division_id, team_id, entry["position"])
+
+        coach_name = entry["coach_name"]
+        if coach_name:
+            existing_coaches = {c["name"].strip().lower(): c["id"] for c in list_coaches(conn)}
+            coach_id = existing_coaches.get(coach_name.strip().lower())
+            if coach_id is None:
+                coach_first, coach_last = split_full_name(coach_name)
+                coach_id = add_coach(conn, coach_first, coach_last)
+            try:
+                assign_coach_to_team(conn, team_id, coach_id)
+                coached += 1
+            except ValueError as e:
+                warnings.append(f"Row {entry['row_number']} ({entry['name']}): {e}")
+
+    return {
+        "created": created, "updated": updated, "skipped": skipped,
+        "rostered": rostered, "coached": coached, "warnings": warnings,
+    }
 
 
 # ---------------------------------------------------------------------------

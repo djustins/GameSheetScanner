@@ -20,6 +20,15 @@ standalone Python script — running `app.py` directly with `python` will not wo
    CSV once and it's saved to the database, then compared against stored games (by
    date and matchup) every time you view it — so which games still need a sheet stays
    current as games are added, edited, or removed, with no need to re-upload.
+5. Each division (Teams → Divisions) has its own Teams/Coaches/Players sections and an
+   **Import Players** uploader (CSV/Excel/ODS). Column headers are matched flexibly
+   (e.g. "Player Name"/"Name"/"Full Name" all work), and players are matched to
+   existing profiles by name — using birth date too, when given, to tell same-named
+   players apart or flag a possible mismatch — rather than creating duplicates.
+   Anything the importer can't resolve on its own (an ambiguous name match, or a name
+   match with a conflicting birth date) is shown for you to resolve before anything is
+   written. A Team column also adds the player to that team's roster; a Coach column
+   assigns that coach to the team too.
 
 ## Setup
 
@@ -181,9 +190,11 @@ Coverage so far: games (insert/update/delete, shootout/OT resolution, duplicate
 detection), schedule import and the schedule+results view (including a direct
 regression test for a `list_schedule()` crash that reached production once — see
 "Fix crash in list_schedule()" in git log), standings, player stats, divisions/teams/
-roster CRUD, players/coaches, and users/roles/permissions. Not yet covered: the
-draft flow, Excel export, and anything Streamlit-UI-specific (widget layout, the
-Home page's card navigation) — those need driving an actual browser, not `pytest`.
+roster CRUD, players/coaches, users/roles/permissions, and the player-list importer
+(column detection, name/birth-date matching, ambiguous/conflict resolution, team/
+roster/coach assignment). Not yet covered: the draft flow, Excel export, and anything
+Streamlit-UI-specific (widget layout, the Home page's card navigation) — those need
+driving an actual browser, not `pytest`.
 
 ## Database layout (`schema_postgres.sql`)
 

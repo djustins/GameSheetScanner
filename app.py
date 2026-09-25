@@ -253,6 +253,25 @@ def display_width_for_height(png_bytes: bytes, target_height: int) -> int:
     return max(1, round(img_w * (target_height / img_h)))
 
 
+def read_uploaded_table(uploaded_file) -> pd.DataFrame:
+    """A CSV/XLSX/XLS/ODS upload as a DataFrame of strings/native values,
+    dispatched by file extension — the three spreadsheet formats a league
+    admin plausibly exports a player list from. Raises ValueError for an
+    unrecognized extension or a file pandas can't parse, with a message
+    naming the actual problem rather than a raw pandas traceback."""
+    name = (uploaded_file.name or "").lower()
+    try:
+        if name.endswith(".csv"):
+            return pd.read_csv(uploaded_file, dtype=str)
+        if name.endswith((".xlsx", ".xls")):
+            return pd.read_excel(uploaded_file, dtype=str)
+        if name.endswith(".ods"):
+            return pd.read_excel(uploaded_file, engine="odf", dtype=str)
+    except Exception as e:
+        raise ValueError(f"Couldn't read {uploaded_file.name!r}: {e}") from e
+    raise ValueError(f"Unrecognized file type for {uploaded_file.name!r} — use a .csv, .xlsx, .xls, or .ods file.")
+
+
 # ---------------------------------------------------------------------------
 # Editable row lists (goals / penalties / shootout attempts)
 # ---------------------------------------------------------------------------
@@ -3116,6 +3135,176 @@ with tab_teams_group:
                                                     if st.button("Cancel", key=f"confirm_no_team_{t['id']}"):
                                                         st.session_state.pop(team_confirm_key, None)
                                                         st.rerun()
+
+                        st.divider()
+                        st.subheader("Coaches")
+                        division_coaches_by_team = core.list_team_coaches_for_division(conn, d["id"])
+                        coach_rows = [
+                            {"Coach": coach_label(c), "Team": t["name"]}
+                            for t in teams for c in division_coaches_by_team.get(t["id"], [])
+                        ]
+                        if not coach_rows:
+                            st.caption("No coaches assigned to any team in this division yet.")
+                        else:
+                            st.dataframe(zebra_style(pd.DataFrame(coach_rows)), width="stretch", hide_index=True)
+                        st.caption("Assign or change a team's coach(es) above, or from Team Rosters.")
+
+                        st.divider()
+                        st.subheader("Players")
+                        division_players = core.list_players_in_division(conn, d["id"])
+                        if not division_players:
+                            st.caption("No players signed up or rostered in this division yet.")
+                        else:
+                            st.dataframe(
+                                zebra_style(pd.DataFrame([
+                                    {
+                                        "Name": p["name"], "Birth Date": p["birth_date"] or "—",
+                                        "Team(s)": ", ".join(p["teams"]) if p["teams"] else "—",
+                                        "Parent": core.full_name(p["contact_first_name"], p["contact_last_name"]) or "—",
+                                    }
+                                    for p in division_players
+                                ])),
+                                width="stretch", hide_index=True,
+                            )
+
+                        plan_key = f"player_import_plan_{d['id']}"
+                        filename_key = f"player_import_filename_{d['id']}"
+                        result_msg_key = f"player_import_result_{d['id']}"
+                        with st.expander(
+                            "📥 Import Players",
+                            expanded=bool(st.session_state.get(plan_key) or st.session_state.get(result_msg_key)),
+                        ):
+                            if result_msg_key in st.session_state:
+                                st.success(st.session_state.pop(result_msg_key))
+
+                            st.caption(
+                                "Upload a player list (CSV, Excel, or ODS) for this division. Matches "
+                                "existing player profiles by name — using birth date too, when given, to "
+                                "tell same-named players apart or flag a possible mismatch — and creates "
+                                "new profiles otherwise. A Team column also assigns each player to that "
+                                "team's roster (with a jersey number, if given); a Coach column assigns "
+                                "that coach to the team too."
+                            )
+                            import_file = st.file_uploader(
+                                "Upload player list", type=["csv", "xlsx", "xls", "ods"],
+                                key=f"player_import_uploader_{d['id']}", disabled=is_read_only,
+                            )
+
+                            if (
+                                import_file is not None and not is_read_only
+                                and st.session_state.get(filename_key) != import_file.name
+                            ):
+                                try:
+                                    import_df = read_uploaded_table(import_file)
+                                    import_columns = core.detect_player_import_columns(list(import_df.columns))
+                                    has_name = "name" in import_columns or (
+                                        "first_name" in import_columns and "last_name" in import_columns
+                                    )
+                                    if not has_name:
+                                        st.error(
+                                            "Couldn't find a name column (e.g. \"Player Name\", \"Name\", or "
+                                            "separate \"First Name\"/\"Last Name\" columns) — can't match or "
+                                            "create players without one."
+                                        )
+                                    else:
+                                        import_rows = import_df.to_dict("records")
+                                        st.session_state[plan_key] = core.build_player_import_plan(
+                                            conn, d["id"], import_rows, import_columns
+                                        )
+                                        st.session_state[filename_key] = import_file.name
+                                except ValueError as e:
+                                    st.error(str(e))
+
+                            plan = st.session_state.get(plan_key)
+                            if plan:
+                                counts: dict[str, int] = {}
+                                for entry in plan:
+                                    counts[entry["status"]] = counts.get(entry["status"], 0) + 1
+                                summary_bits = []
+                                if counts.get("create"):
+                                    summary_bits.append(f"{counts['create']} new")
+                                if counts.get("update"):
+                                    summary_bits.append(f"{counts['update']} matched to an existing profile")
+                                if counts.get("ambiguous"):
+                                    summary_bits.append(f"{counts['ambiguous']} ambiguous")
+                                if counts.get("conflict"):
+                                    summary_bits.append(f"{counts['conflict']} need review (birth date mismatch)")
+                                if counts.get("invalid"):
+                                    summary_bits.append(f"{counts['invalid']} skipped (no name)")
+                                st.info(f"{len(plan)} row(s) in file: {', '.join(summary_bits)}.")
+
+                                needs_review = [e for e in plan if e["status"] in ("ambiguous", "conflict")]
+                                if needs_review:
+                                    st.warning(f"{len(needs_review)} row(s) need your input before they'll be imported:")
+                                    for entry in needs_review:
+                                        st.markdown(f"**Row {entry['row_number']}: {entry['name']}**")
+                                        options = {"__unresolved__": "— Choose one —"}
+                                        if entry["status"] == "conflict":
+                                            detail = entry["conflict_detail"]
+                                            options["use_existing"] = (
+                                                f"Same person — update the existing profile (birth date "
+                                                f"{detail['existing']} → {detail['incoming']})"
+                                            )
+                                            options["create"] = "Different person — create a new profile"
+                                        else:
+                                            for c in entry["candidates"]:
+                                                options[f"use:{c['id']}"] = (
+                                                    f"{c['name']} (born {c['birth_date'] or 'unknown'})"
+                                                )
+                                            options["create"] = "None of these — create a new profile"
+
+                                        choice = st.radio(
+                                            "Resolution", list(options), format_func=lambda k: options[k],
+                                            key=f"player_import_choice_{d['id']}_{entry['row_number']}",
+                                            label_visibility="collapsed",
+                                        )
+                                        if choice == "__unresolved__":
+                                            entry["resolved_action"], entry["resolved_player_id"] = None, None
+                                        elif choice == "create":
+                                            entry["resolved_action"], entry["resolved_player_id"] = "create", None
+                                        elif choice == "use_existing":
+                                            entry["resolved_action"] = "use_existing"
+                                            entry["resolved_player_id"] = entry["matched_player_id"]
+                                        elif choice.startswith("use:"):
+                                            entry["resolved_action"] = "use_existing"
+                                            entry["resolved_player_id"] = int(choice.split(":", 1)[1])
+                                        st.divider()
+
+                                still_unresolved = sum(1 for e in needs_review if e["resolved_action"] is None)
+                                if still_unresolved:
+                                    st.caption(
+                                        f"{still_unresolved} row(s) above still need a choice — they'll be "
+                                        "skipped (not guessed at) if you import now."
+                                    )
+
+                                import_apply_col, import_cancel_col = st.columns(2)
+                                with import_apply_col:
+                                    if st.button(
+                                        "Apply Import", key=f"apply_import_{d['id']}", type="primary",
+                                        disabled=is_read_only,
+                                    ):
+                                        result = core.apply_player_import_plan(conn, d["id"], plan)
+                                        st.session_state.pop(plan_key, None)
+                                        st.session_state.pop(filename_key, None)
+                                        msg = (
+                                            f"Created {result['created']}, updated {result['updated']}, "
+                                            f"added to a roster {result['rostered']}, assigned "
+                                            f"{result['coached']} coach(es), skipped {result['skipped']}."
+                                        )
+                                        for w in result["warnings"]:
+                                            msg += f"\n- ⚠️ {w}"
+                                        # Stashed for the *next* render rather than shown directly here —
+                                        # st.rerun() immediately below would otherwise wipe out a message
+                                        # shown via st.success() in this run before anyone sees it, and
+                                        # the sections above (Teams/Coaches/Players) need that rerun to
+                                        # stop showing stale pre-import data.
+                                        st.session_state[result_msg_key] = msg
+                                        st.rerun()
+                                with import_cancel_col:
+                                    if st.button("Cancel", key=f"cancel_import_{d['id']}"):
+                                        st.session_state.pop(plan_key, None)
+                                        st.session_state.pop(filename_key, None)
+                                        st.rerun()
 
                         st.divider()
                         st.subheader("Schedule")

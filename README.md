@@ -147,6 +147,44 @@ python edit_game.py --list
 python edit_game.py --game-id 5
 ```
 
+## Running tests
+
+Tests run against `TEST_DATABASE_URL` — a separate *database* on the same Aiven
+Postgres node as the real one (same server/plan, no extra cost, but a fully
+separate namespace: own tables, own everything). Never the production database;
+`tests/conftest.py` truncates every table before and after each test, and refuses
+to run at all unless the configured database's name contains "test", as a guard
+against a misconfigured `TEST_DATABASE_URL` pointing at real league data.
+
+One-time setup:
+
+```bash
+pip install -r requirements-dev.txt
+python -c "
+import os
+from dotenv import load_dotenv; load_dotenv()
+import aiven_service as av
+token, project, service = os.environ['AIVEN_API_TOKEN'], os.environ['AIVEN_PROJECT_NAME'], os.environ['AIVEN_SERVICE_NAME']
+av.create_service_database(token, project, service, 'gamesheetscanner_test')
+"
+# Then add TEST_DATABASE_URL to .env: same as DATABASE_URL, with the dbname
+# in the path swapped to gamesheetscanner_test.
+```
+
+Then, any time:
+
+```bash
+pytest
+```
+
+Coverage so far: games (insert/update/delete, shootout/OT resolution, duplicate
+detection), schedule import and the schedule+results view (including a direct
+regression test for a `list_schedule()` crash that reached production once — see
+"Fix crash in list_schedule()" in git log), standings, player stats, divisions/teams/
+roster CRUD, players/coaches, and users/roles/permissions. Not yet covered: the
+draft flow, Excel export, and anything Streamlit-UI-specific (widget layout, the
+Home page's card navigation) — those need driving an actual browser, not `pytest`.
+
 ## Database layout (`schema_postgres.sql`)
 
 - **games** — one row per sheet: date, division, home/away team & color, final scores,

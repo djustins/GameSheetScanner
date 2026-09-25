@@ -216,12 +216,6 @@ CREATE TABLE IF NOT EXISTS player_positions (
 -- (UNIQUE(division_id) below) — delete it to start over.
 -- ---------------------------------------------------------------------------
 
--- Links a login to the coach identity it represents, so the app can tell
--- "is this signed-in user this team's coach" (the Draft page uses it to
--- gate who may submit a pick for a team). Optional — a user need not be
--- tied to a coach profile at all (e.g. an admin who never coaches).
-ALTER TABLE users ADD COLUMN IF NOT EXISTS coach_id INTEGER REFERENCES coaches(id) ON DELETE SET NULL;
-
 CREATE TABLE IF NOT EXISTS drafts (
     id                   SERIAL PRIMARY KEY,
     division_id          INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
@@ -300,6 +294,14 @@ CREATE TABLE IF NOT EXISTS users (
     deleted_at     TEXT,                          -- deactivated; can no longer log in
     created_at     TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Links a login to the coach identity it represents, so the app can tell
+-- "is this signed-in user this team's coach" (the Draft page uses it to
+-- gate who may submit a pick for a team). Optional — a user need not be
+-- tied to a coach profile at all (e.g. an admin who never coaches). Added
+-- via ALTER, once both users and coaches exist, the same way it reaches an
+-- already-existing users table.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS coach_id INTEGER REFERENCES coaches(id) ON DELETE SET NULL;
 
 -- A named bundle of page access (e.g. "Coach", "Scorer") — assigned to
 -- users so an admin configures pages once per role instead of once per

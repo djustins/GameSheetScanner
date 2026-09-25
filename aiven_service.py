@@ -330,3 +330,36 @@ def diff_ip_filter_against_streamlit(
     missing = sorted(wanted - current)
     extra = sorted(current - wanted)
     return {"missing": missing, "extra": extra, "in_sync": not missing and not extra}
+
+
+# ---------------------------------------------------------------------------
+# Databases on a service — used to carve out an isolated database (e.g. for
+# tests) on the *same* Postgres node/plan as the main one, instead of
+# provisioning a whole separate paid service just for test isolation.
+# ---------------------------------------------------------------------------
+
+def list_service_databases(api_token: str, project: str, service_name: str, timeout: float = 10) -> list[str]:
+    """Every database name that exists on this service (e.g. ["defaultdb",
+    "game-sheet-scanner-prod"])."""
+    path = f"/project/{project}/service/{service_name}/db"
+    return [d["database_name"] for d in _call("GET", path, api_token, timeout).get("databases", [])]
+
+
+def create_service_database(api_token: str, project: str, service_name: str, database_name: str, timeout: float = 10):
+    """Create a new, empty database on this service — same node/plan as
+    every other database on it, so no extra cost, but a fully separate
+    namespace (own tables, own everything) from any other database there.
+    A no-op (not an error) if it already exists."""
+    path = f"/project/{project}/service/{service_name}/db"
+    try:
+        _call("POST", path, api_token, timeout, json={"database": database_name})
+    except AivenServiceError as e:
+        if "already exists" not in str(e).lower():
+            raise
+
+
+def delete_service_database(api_token: str, project: str, service_name: str, database_name: str, timeout: float = 10):
+    """Permanently delete a database (and everything in it) from this
+    service. Irreversible."""
+    path = f"/project/{project}/service/{service_name}/db/{database_name}"
+    _call("DELETE", path, api_token, timeout)

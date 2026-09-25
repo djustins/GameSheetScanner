@@ -34,6 +34,15 @@ never overrides a variable already set in the real environment):
 ANTHROPIC_API_KEY=sk-ant-...    # your own API key
 DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
 # or individually: PGHOST / PGDATABASE / PGUSER / PGPASSWORD / PGPORT / PGSSLMODE
+
+# Optional — only needed if your Postgres is a manageable service (e.g. an
+# Aiven service) you sometimes power off to save cost. If all three are
+# set, the app checks the service's status on startup and powers it back
+# on (waiting for it to come up) before connecting. Get a token from the
+# Aiven console under Profile -> API Tokens.
+AIVEN_API_TOKEN=...
+AIVEN_PROJECT_NAME=your-project
+AIVEN_SERVICE_NAME=your-pg-service
 ```
 
 The schema (`schema_postgres.sql`) is created automatically on first connect.
@@ -42,6 +51,49 @@ Migrating an existing `hockey.db` (SQLite) into a fresh Postgres database:
 ```bash
 python scripts/migrate_sqlite_to_postgres.py path/to/hockey.db
 ```
+
+### Managing the Aiven API token
+
+If you've set `AIVEN_API_TOKEN` (see above), `scripts/aiven_token.py` checks and
+rotates it from the command line — deliberately a script, not a button in the app,
+since creating or revoking an account-wide API token is a real, hard-to-reverse
+action against your Aiven account:
+
+```bash
+python scripts/aiven_token.py validate          # confirm it still works, show expiry/last-used
+python scripts/aiven_token.py list              # list every token on the account
+python scripts/aiven_token.py rotate --description "GameSheetScanner app"
+python scripts/aiven_token.py revoke <token_prefix> --yes
+```
+
+`rotate` creates a new token and prints it once (Aiven never shows it again) without
+touching the old one — copy it into `.env`, restart the app, confirm it still
+connects, *then* `revoke` the old token's prefix. Passing `--revoke-old --yes` to
+`rotate` does both steps at once, if you're confident you won't need to roll back.
+
+### Restricting database access to Streamlit Community Cloud
+
+By default an Aiven service accepts connections from any IP. `scripts/aiven_ip_filter.py`
+restricts this app's Postgres service to just [Streamlit Community Cloud's published
+outbound IPs](https://docs.streamlit.io/deploy/streamlit-community-cloud/status), plus
+any extra CIDRs you name (e.g. your own machine, for direct/admin access):
+
+```bash
+python scripts/aiven_ip_filter.py show                                    # what's currently allowed
+python scripts/aiven_ip_filter.py check --extra-cidr <your-ip>/32         # exit 1 if out of sync (cron-friendly)
+python scripts/aiven_ip_filter.py sync --extra-cidr <your-ip>/32 --yes    # apply
+```
+
+Streamlit's docs explicitly warn that IP list "may change at any time without notice",
+and there's no API for it — only that same page to re-check, which is what `check`/`sync`
+scrape. The app itself also does a lightweight version of this check on startup (sidebar
+warning if the configured filter is missing a current Streamlit IP) and again if the
+database connection fails outright, to help tell "Streamlit rotated its IPs" apart from
+other causes.
+
+`sync` always prints the exact before/after diff and needs `--yes` to apply — get the diff
+right before running with `--yes`, since anything not in the resulting list (including,
+potentially, this app's own access) loses its database connection immediately.
 
 ### Sign-in
 

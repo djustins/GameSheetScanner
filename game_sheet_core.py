@@ -589,17 +589,17 @@ def set_setting(conn: PGConnection, key: str, value: str):
 # (scripts/manage_users.py) validates against the same set without
 # duplicating it, and so it can't silently drift out of sync with app.py.
 PAGES = {
-    "process": "Process New Scoresheet",
-    "edit": "Games",
-    "schedule": "Schedule",
-    "standings": "Standings",
-    "stats": "Player Stats",
-    "rosters": "Team Rosters",
-    "teams": "Teams",
-    "players": "Players",
-    "coaches": "Coaches",
-    "divisions": "Divisions",
-    "draft": "Draft",
+    "process": "Games → Import Scoresheets",
+    "edit": "Games → Manage Games",
+    "schedule": "Games → Schedule & Results",
+    "standings": "Stats & Standings → Standings",
+    "stats": "Stats & Standings → Player Stats",
+    "rosters": "Teams → Team Rosters",
+    "teams": "Teams → Teams",
+    "players": "Teams → Players",
+    "coaches": "Teams → Coaches",
+    "divisions": "Teams → Divisions",
+    "draft": "Teams → Draft",
 }
 
 
@@ -1098,11 +1098,25 @@ def list_schedule(conn: PGConnection, division_id: int) -> list[dict]:
     same-teams rematch that's simply scheduled for later. Surfaced so a
     date-entry typo can be found and fixed rather than guessed at
     automatically — silently declaring two different-year games "the same"
-    would risk masking an actual gap."""
+    would risk masking an actual gap.
+
+    An accounted-for row also gets "result": the matching stored game's id,
+    home/away teams (as actually recorded, which may be swapped relative to
+    the schedule's designation), and final scores — so the schedule view can
+    show results inline instead of just a yes/no "accounted for"."""
     stored = conn.execute(
-        "SELECT id, game_date, home_team, away_team FROM games WHERE division_id = %s", (division_id,)
+        """SELECT id, game_date, home_team, away_team, home_final_score, away_final_score
+           FROM games WHERE division_id = %s""",
+        (division_id,),
     ).fetchall()
-    played = {(date, frozenset((home, away))) for _id, date, home, away in stored}
+    played = {(date, frozenset((home, away))) for _id, date, home, away, _hs, _as in stored}
+    results_by_key = {
+        (date, frozenset((home, away))): {
+            "game_id": game_id, "home_team": display_text(home), "away_team": display_text(away),
+            "home_score": home_score, "away_score": away_score,
+        }
+        for game_id, date, home, away, home_score, away_score in stored
+    }
 
     rows = conn.execute(
         """SELECT id, order_num, round, game_date, home_team, away_team,
@@ -1146,8 +1160,10 @@ def list_schedule(conn: PGConnection, division_id: int) -> list[dict]:
 
     result = []
     for r in parsed:
-        r["accounted_for"] = (r["game_date"], r["_teams"]) in played
+        key = (r["game_date"], r["_teams"])
+        r["accounted_for"] = key in played
         r["possible_matches"] = [] if r["accounted_for"] else orphans_by_teams.get(r["_teams"], [])
+        r["result"] = results_by_key.get(key) if r["accounted_for"] else None
         del r["_teams"]
         r["game_date"] = display_date(r["game_date"])
         r["home_team"] = display_text(r["home_team"])

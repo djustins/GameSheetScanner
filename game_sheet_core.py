@@ -17,7 +17,7 @@ import difflib
 import functools
 import json
 import mimetypes
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -44,6 +44,16 @@ PGConnection = "psycopg2.extensions.connection"
 SCHEMA_PATH = Path(__file__).parent / "schema_postgres.sql"
 MODEL = "claude-sonnet-4-6"
 SUPPORTED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def _utcnow() -> datetime:
+    """The current UTC time, as a naive datetime — every deleted_at/
+    created_at timestamp in this file is stored (as TEXT) and compared
+    without a timezone suffix, so this stays consistent with every existing
+    stored value rather than switching format for new ones only.
+    datetime.utcnow() itself is deprecated; this is the replacement its own
+    deprecation warning points to, minus the tzinfo this file doesn't use."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # Canonical age groups and their category, independent of season/year.
 AGE_GROUPS = {
@@ -799,7 +809,7 @@ def set_user_password(conn: PGConnection, user_id: int, new_password: str):
 def soft_delete_user(conn: PGConnection, user_id: int):
     conn.execute(
         "UPDATE users SET deleted_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(timespec="seconds"), user_id),
+        (_utcnow().isoformat(timespec="seconds"), user_id),
     )
     conn.commit()
 
@@ -1344,7 +1354,7 @@ def soft_delete_division(conn: PGConnection, division_id: int):
     later (see purge_expired_divisions), or can be restored before then."""
     conn.execute(
         "UPDATE divisions SET deleted_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(timespec="seconds"), division_id),
+        (_utcnow().isoformat(timespec="seconds"), division_id),
     )
     conn.commit()
 
@@ -1365,7 +1375,7 @@ def list_deleted_divisions(conn: PGConnection) -> list[dict]:
     result = []
     for r in rows:
         deleted_at = datetime.fromisoformat(r[5])
-        days_left = max(0, 30 - (datetime.utcnow() - deleted_at).days)
+        days_left = max(0, 30 - (_utcnow() - deleted_at).days)
         result.append({
             "id": r[0], "year": r[1], "season": display_text(r[2]), "age_group": r[3],
             "category": r[4], "deleted_at": r[5], "days_left": days_left,
@@ -1376,7 +1386,7 @@ def list_deleted_divisions(conn: PGConnection) -> list[dict]:
 def purge_expired_divisions(conn: PGConnection, days: int = 30):
     """Permanently delete divisions that have been in the recycle bin more
     than `days` days. Called automatically on every init_db()."""
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat(timespec="seconds")
+    cutoff = (_utcnow() - timedelta(days=days)).isoformat(timespec="seconds")
     conn.execute("DELETE FROM divisions WHERE deleted_at IS NOT NULL AND deleted_at <= %s", (cutoff,))
     conn.commit()
 
@@ -1433,7 +1443,7 @@ def update_team(conn: PGConnection, team_id: int, **fields):
 def soft_delete_team(conn: PGConnection, team_id: int):
     conn.execute(
         "UPDATE teams SET deleted_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(timespec="seconds"), team_id),
+        (_utcnow().isoformat(timespec="seconds"), team_id),
     )
     conn.commit()
 
@@ -1602,7 +1612,7 @@ def update_player(conn: PGConnection, player_id: int, **fields):
 def soft_delete_player(conn: PGConnection, player_id: int):
     conn.execute(
         "UPDATE players SET deleted_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(timespec="seconds"), player_id),
+        (_utcnow().isoformat(timespec="seconds"), player_id),
     )
     conn.commit()
 
@@ -1932,7 +1942,7 @@ def update_coach(conn: PGConnection, coach_id: int, **fields):
 def soft_delete_coach(conn: PGConnection, coach_id: int):
     conn.execute(
         "UPDATE coaches SET deleted_at = %s WHERE id = %s",
-        (datetime.utcnow().isoformat(timespec="seconds"), coach_id),
+        (_utcnow().isoformat(timespec="seconds"), coach_id),
     )
     conn.commit()
 

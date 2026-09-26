@@ -343,6 +343,19 @@ def api_update_roster_entry(
     return next(r for r in core.list_roster(conn, team_id) if r["id"] == entry_id)
 
 
+@app.delete("/teams/{team_id}/roster/{entry_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["teams"])
+def api_remove_roster_entry(
+    team_id: int, entry_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+):
+    """Removes a single roster row — e.g. a mis-scanned or duplicate entry.
+    If it's linked to a player profile, only this roster spot goes away;
+    the player record itself is untouched."""
+    existing = next((r for r in core.list_roster(conn, team_id) if r["id"] == entry_id), None)
+    if existing is None:
+        not_found("Roster entry not found on this team.")
+    core.remove_roster_entry(conn, entry_id)
+
+
 @app.get("/teams/{team_id}/coaches", tags=["teams"])
 def api_team_coaches(team_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
     return core.list_team_coaches(conn, team_id)

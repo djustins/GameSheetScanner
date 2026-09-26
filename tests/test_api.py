@@ -99,6 +99,21 @@ def test_roster_entry_renumber_lifecycle(conn, admin_auth, division_id):
     assert missing.status_code == 404
 
 
+def test_roster_entry_delete(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    create = client.post(
+        f"/teams/{team_id}/roster", json={"number": "9", "name": "Sidney Crosby"}, auth=admin_auth
+    )
+    entry_id = create.json()["id"]
+
+    deleted = client.delete(f"/teams/{team_id}/roster/{entry_id}", auth=admin_auth)
+    assert deleted.status_code == 204
+    assert client.get(f"/teams/{team_id}/roster", auth=admin_auth).json() == []
+
+    missing = client.delete(f"/teams/{team_id}/roster/{entry_id}", auth=admin_auth)
+    assert missing.status_code == 404
+
+
 def test_read_only_role_can_read_but_not_write(conn, readonly_auth, division_id):
     listed = client.get(f"/divisions/{division_id}/teams", auth=readonly_auth)
     assert listed.status_code == 200

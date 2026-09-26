@@ -1842,6 +1842,15 @@ def update_roster_entry(conn: PGConnection, roster_entry_id: int, **fields) -> N
     conn.commit()
 
 
+def remove_roster_entry(conn: PGConnection, roster_entry_id: int) -> None:
+    """Removes a single roster row — e.g. a mis-scanned or duplicate entry
+    that shouldn't be on the roster at all. If it's linked to a global
+    player profile, only this roster spot goes away; the player record
+    itself is untouched. A no-op if the id doesn't exist."""
+    conn.execute("DELETE FROM roster_entries WHERE id = %s", (roster_entry_id,))
+    conn.commit()
+
+
 def move_player_to_team(
     conn: PGConnection, player_id: int, division_id: int, new_team_id: int, note: str | None = None
 ) -> None:

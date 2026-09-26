@@ -111,6 +111,26 @@ def test_update_roster_entry_raises_when_not_found(conn):
         assert "not found" in str(e)
 
 
+def test_remove_roster_entry(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    entry_id = core.add_roster_entry(conn, team_id, "9", "Sidney Crosby")
+    core.remove_roster_entry(conn, entry_id)
+    assert core.list_roster(conn, team_id) == []
+
+
+def test_remove_roster_entry_does_not_delete_the_linked_player(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    entry_id = core.add_roster_entry(conn, team_id, "9", "Sidney Crosby", player_id=player_id)
+    core.remove_roster_entry(conn, entry_id)
+    assert core.list_roster(conn, team_id) == []
+    assert core.get_player(conn, player_id) is not None
+
+
+def test_remove_roster_entry_is_a_noop_for_an_unknown_id(conn):
+    core.remove_roster_entry(conn, 999999)  # doesn't raise
+
+
 def test_move_player_to_team_updates_roster_entry(conn, division_id):
     team1 = core.add_team(conn, division_id, "Avalanche")
     team2 = core.add_team(conn, division_id, "Wild")

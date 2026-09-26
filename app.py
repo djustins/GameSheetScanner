@@ -2162,7 +2162,7 @@ def render_divisions_dialog():
             st.write("No divisions yet.")
         else:
             for d in divisions:
-                division_title = f"{d['year']} {d['season']} — {division_label(d['age_group'])}"
+                division_title = f"{d['year']} {d['season']} — {division_label(d['age_group'])} (id: {d['id']})"
                 with st.expander(division_title):
                     # Fetched once per division and reused by the Teams section's
                     # per-team grade breakdown, the Players section's Grade column

@@ -72,6 +72,61 @@ def test_find_previous_division_ignores_deleted_divisions(conn):
     assert core.find_previous_division(conn, summer) is None
 
 
+def _roster_player(conn, division_id, team_name, player_id):
+    team_id = core.add_team(conn, division_id, team_name)
+    core.add_roster_entry(conn, team_id, "1", "Test Player", player_id=player_id)
+
+
+def test_player_experience_notes_none_for_first_division(conn):
+    current = core.add_division(conn, 2026, "Summer", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    _roster_player(conn, current, "Avalanche", player_id)
+    assert core.player_experience_notes(conn, current, [player_id]) == {}
+
+
+def test_player_experience_notes_none_when_played_same_age_group_last_season(conn):
+    last_season = core.add_division(conn, 2026, "Spring", "Penguin")
+    current = core.add_division(conn, 2026, "Summer", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    _roster_player(conn, last_season, "Avalanche", player_id)
+    _roster_player(conn, current, "Wild", player_id)
+    assert core.player_experience_notes(conn, current, [player_id]) == {}
+
+
+def test_player_experience_notes_moved_up_from_lower_age_group(conn):
+    lower_last_season = core.add_division(conn, 2026, "Spring", "Chipmunk")
+    current = core.add_division(conn, 2026, "Summer", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    _roster_player(conn, lower_last_season, "Avalanche", player_id)
+    _roster_player(conn, current, "Wild", player_id)
+    assert core.player_experience_notes(conn, current, [player_id]) == {player_id: "Moved Up"}
+
+
+def test_player_experience_notes_played_before_for_a_single_other_division(conn):
+    unrelated = core.add_division(conn, 2024, "Fall", "Beaver")
+    current = core.add_division(conn, 2026, "Summer", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    _roster_player(conn, unrelated, "Avalanche", player_id)
+    _roster_player(conn, current, "Wild", player_id)
+    assert core.player_experience_notes(conn, current, [player_id]) == {player_id: "Played Before"}
+
+
+def test_player_experience_notes_has_experience_for_multiple_other_divisions(conn):
+    older1 = core.add_division(conn, 2023, "Fall", "Chipmunk")
+    older2 = core.add_division(conn, 2024, "Fall", "Beaver")
+    current = core.add_division(conn, 2026, "Summer", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    _roster_player(conn, older1, "Avalanche", player_id)
+    _roster_player(conn, older2, "Wild", player_id)
+    _roster_player(conn, current, "Blackhawks", player_id)
+    assert core.player_experience_notes(conn, current, [player_id]) == {player_id: "Has Experience"}
+
+
+def test_player_experience_notes_omits_players_with_no_history(conn, division_id):
+    player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    assert core.player_experience_notes(conn, division_id, [player_id]) == {}
+
+
 def test_update_team_rejects_duplicate_name_in_same_division(conn, division_id):
     core.add_team(conn, division_id, "Avalanche")
     wild_id = core.add_team(conn, division_id, "Wild")

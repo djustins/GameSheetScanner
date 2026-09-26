@@ -694,6 +694,22 @@ def zebra_style(df: pd.DataFrame):
     return df.style.apply(lambda row: [f"background-color: {colors[row.name % 2]}"] * len(row), axis=1)
 
 
+PLAYER_EXPERIENCE_NOTE_COLORS = {
+    "Moved Up": "#2e7d32", "Has Experience": "#1565c0", "Played Before": "#8d6e63",
+}
+
+
+def style_player_notes(df: pd.DataFrame, note_column: str = "Note"):
+    """zebra_style plus a colored, bolded background for the Note column's
+    cell (see core.player_experience_notes for what populates it) so a
+    player's playing history stands out at a glance instead of blending
+    into an otherwise plain row. A blank note gets no extra styling."""
+    def _note_style(value):
+        color = PLAYER_EXPERIENCE_NOTE_COLORS.get(value)
+        return f"background-color: {color}; color: white; font-weight: 600;" if color else ""
+    return zebra_style(df).map(_note_style, subset=[note_column])
+
+
 def highlighted_row(player_id: int | None, row_key: str, index: int):
     """A row container for a "table" that's actually built from repeated
     st.columns() calls (Player Stats, Team Rosters Player Details) rather
@@ -3419,6 +3435,14 @@ with tab_teams_group:
                                         c["id"]: tid for tid, cs in current_coaches_by_team.items() for c in cs
                                     }
                                     current_team_options = {t["id"]: t["name"] for t in teams}
+                                    # Seeded with each coach's *current* team (if any) so a
+                                    # team already coached isn't offered to anyone else, then
+                                    # claimed further as each row below picks one, so two
+                                    # coaches can't be pointed at the same team in one batch.
+                                    claimed_team_by_team_id: dict[int, int] = {
+                                        team_id: coach_id for coach_id, team_id in current_team_by_coach_id.items()
+                                    }
+                                    pending_picks: dict[int, int] = {}
                                     for previous_team, coach in carry_rows:
                                         # A coach almost always has a kid playing here -- that's
                                         # usually why they were coaching. find_coach_children_in_division
@@ -3470,7 +3494,18 @@ with tab_teams_group:
                                                         core.link_coach_child(conn, coach["id"], child_pick_id)
                                                         st.rerun()
                                         current_team_id_for_coach = current_team_by_coach_id.get(coach["id"])
-                                        team_pick_options = {None: "— Select a team —"} | current_team_options
+                                        # A team already claimed by *another* coach (currently,
+                                        # or by an earlier row's pick in this same pass) is left
+                                        # out of the options entirely, so two coaches can't be
+                                        # pointed at the same team in one batch -- except this
+                                        # coach's own current team, which stays offered to them.
+                                        selectable_team_ids = [
+                                            t_id for t_id in current_team_options
+                                            if claimed_team_by_team_id.get(t_id, coach["id"]) == coach["id"]
+                                        ]
+                                        team_pick_options = {None: "— Select a team —"} | {
+                                            t_id: current_team_options[t_id] for t_id in selectable_team_ids
+                                        }
                                         default_idx = (
                                             list(team_pick_options).index(current_team_id_for_coach)
                                             if current_team_id_for_coach in team_pick_options else 0
@@ -3483,38 +3518,42 @@ with tab_teams_group:
                                                 label_visibility="collapsed",
                                                 disabled=is_read_only or not is_relevant,
                                             )
+                                        if pick_team_id is not None:
+                                            claimed_team_by_team_id[pick_team_id] = coach["id"]
+                                            if pick_team_id != current_team_id_for_coach:
+                                                pending_picks[coach["id"]] = pick_team_id
                                         with crow3:
-                                            acol, rcol = st.columns(2)
-                                            with acol:
-                                                if st.button(
-                                                    "Assign", key=f"carry_coach_assign_{d['id']}_{coach['id']}",
-                                                    type="primary",
-                                                    disabled=(
-                                                        is_read_only or not is_relevant or pick_team_id is None
-                                                        or pick_team_id == current_team_id_for_coach
-                                                    ),
-                                                ):
-                                                    try:
-                                                        if (
-                                                            current_team_id_for_coach is not None
-                                                            and current_team_id_for_coach != pick_team_id
-                                                        ):
-                                                            core.remove_coach_from_team(
-                                                                conn, current_team_id_for_coach, coach["id"]
-                                                            )
-                                                        core.assign_coach_to_team(conn, pick_team_id, coach["id"])
-                                                        st.rerun()
-                                                    except ValueError as e:
-                                                        st.error(str(e))
-                                            with rcol:
-                                                if current_team_id_for_coach is not None and st.button(
-                                                    "Remove", key=f"carry_coach_remove_{d['id']}_{coach['id']}",
-                                                    disabled=is_read_only,
-                                                ):
-                                                    core.remove_coach_from_team(
-                                                        conn, current_team_id_for_coach, coach["id"]
-                                                    )
-                                                    st.rerun()
+                                            if current_team_id_for_coach is not None and st.button(
+                                                "Remove", key=f"carry_coach_remove_{d['id']}_{coach['id']}",
+                                                disabled=is_read_only,
+                                            ):
+                                                core.remove_coach_from_team(
+                                                    conn, current_team_id_for_coach, coach["id"]
+                                                )
+                                                st.rerun()
+
+                                    st.divider()
+                                    if not pending_picks:
+                                        st.caption("Pick a team above for at least one coach to assign them.")
+                                    else:
+                                        st.caption(f"{len(pending_picks)} coach(es) ready to assign.")
+                                        if st.button(
+                                            "💾 Assign All", key=f"carry_assign_all_{d['id']}",
+                                            type="primary", disabled=is_read_only,
+                                        ):
+                                            assign_errors = []
+                                            for coach_id, team_id in pending_picks.items():
+                                                prior_team_id = current_team_by_coach_id.get(coach_id)
+                                                try:
+                                                    if prior_team_id is not None and prior_team_id != team_id:
+                                                        core.remove_coach_from_team(conn, prior_team_id, coach_id)
+                                                    core.assign_coach_to_team(conn, team_id, coach_id)
+                                                except ValueError as e:
+                                                    assign_errors.append(str(e))
+                                            if assign_errors:
+                                                st.error(" / ".join(assign_errors))
+                                            else:
+                                                st.rerun()
 
                         st.divider()
                         st.subheader("Players")
@@ -3533,14 +3572,18 @@ with tab_teams_group:
                                     for tier in GRADE_TIERS if tier in players_tiered_grades
                                 ))
                             st.caption(" · ".join(summary_bits))
+                            experience_notes = core.player_experience_notes(
+                                conn, d["id"], [p["id"] for p in division_players]
+                            )
                             st.dataframe(
-                                zebra_style(pd.DataFrame([
+                                style_player_notes(pd.DataFrame([
                                     {
                                         "Name": p["name"],
                                         "Grade": division_grades_by_player.get(p["id"]) or "—",
                                         "Birth Date": p["birth_date"] or "—",
                                         "Team(s)": ", ".join(p["teams"]) if p["teams"] else "—",
                                         "Parent": core.full_name(p["contact_first_name"], p["contact_last_name"]) or "—",
+                                        "Note": experience_notes.get(p["id"], ""),
                                     }
                                     for p in division_players
                                 ])),

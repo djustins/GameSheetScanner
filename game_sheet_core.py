@@ -1400,6 +1400,86 @@ def find_previous_division(conn: PGConnection, division_id: int) -> dict | None:
     return {"id": best[0], "year": best[1], "season": display_text(best[2]), "age_group": best[3], "category": best[4]}
 
 
+_SEASON_CYCLE = sorted(_SEASON_ORDER, key=_SEASON_ORDER.get)  # ["spring", "summer", "fall", "winter"]
+
+
+def _previous_season(year: int, season: str) -> tuple[int, str]:
+    """(year, season) immediately before the given one, cycling backwards
+    through Spring -> Summer -> Fall -> Winter (wrapping to the prior
+    year's Winter before Spring)."""
+    idx = _SEASON_ORDER.get((season or "").lower(), 0)
+    return (year - 1, _SEASON_CYCLE[-1]) if idx == 0 else (year, _SEASON_CYCLE[idx - 1])
+
+
+def _one_age_group_down(age_group: str) -> str | None:
+    """The next younger age group in AGE_GROUPS's fixed order, or None for
+    the youngest one (nothing below it) or an unrecognized name."""
+    names = list(AGE_GROUPS)
+    if age_group not in names:
+        return None
+    idx = names.index(age_group)
+    return names[idx - 1] if idx > 0 else None
+
+
+def _find_division_id(conn: PGConnection, year: int, season: str, age_group: str) -> int | None:
+    row = conn.execute(
+        "SELECT id FROM divisions WHERE year = %s AND season = %s AND age_group = %s AND deleted_at IS NULL",
+        (year, season, age_group),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def player_experience_notes(conn: PGConnection, division_id: int, player_ids: list[int]) -> dict[int, str]:
+    """A short highlighted note about each player's playing history
+    relative to this division, based on player_division_histories (i.e.
+    actually rostered on a team, not just registered) — player_id -> note,
+    omitting anyone with nothing to call out (no history, or they played
+    the expected prior season already).
+
+    - "Moved Up": didn't play this same age group last season, but did
+      play the division one age group down last season — the normal
+      graduation pattern (e.g. last season's Chipmunk player showing up
+      in Penguin this season).
+    - "Has Experience": two or more *other* divisions of history, when
+      "Moved Up" doesn't apply.
+    - "Played Before": exactly one other division of history, when
+      neither of the above applies.
+
+    Nothing is returned for a player who played this same age group last
+    season (the ordinary, unremarkable case) or has no history at all."""
+    if not player_ids:
+        return {}
+    current = conn.execute(
+        "SELECT year, season, age_group FROM divisions WHERE id = %s", (division_id,)
+    ).fetchone()
+    if current is None:
+        return {}
+    year, season, age_group = current
+    prev_year, prev_season = _previous_season(year, season)
+
+    same_age_last_season_id = _find_division_id(conn, prev_year, prev_season, age_group)
+    lower_age_group = _one_age_group_down(age_group)
+    lower_division_id = (
+        _find_division_id(conn, prev_year, prev_season, lower_age_group) if lower_age_group else None
+    )
+
+    histories = player_division_histories(conn, player_ids)
+    notes: dict[int, str] = {}
+    for player_id in player_ids:
+        other_ids = {h["division_id"] for h in histories.get(player_id, []) if h["division_id"] != division_id}
+        if not other_ids:
+            continue
+        if same_age_last_season_id is not None and same_age_last_season_id in other_ids:
+            continue
+        if lower_division_id is not None and lower_division_id in other_ids:
+            notes[player_id] = "Moved Up"
+        elif len(other_ids) >= 2:
+            notes[player_id] = "Has Experience"
+        else:
+            notes[player_id] = "Played Before"
+    return notes
+
+
 def resolve_division_id(conn: PGConnection, working_division_id: int, age_group: str | None) -> int:
     """Find-or-create the division that a game actually belongs to: the same
     year/season as the working division, but this game's own age group

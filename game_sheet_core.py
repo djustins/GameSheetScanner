@@ -1691,6 +1691,70 @@ def add_roster_entry(conn: PGConnection, team_id: int, number: str, name: str, p
     return entry_id
 
 
+def move_player_to_team(
+    conn: PGConnection, player_id: int, division_id: int, new_team_id: int, note: str | None = None
+) -> None:
+    """Moves a rostered player to a different team within the same
+    division — e.g. rebalancing after the draft. Their jersey number stays
+    as-is on the new team (editable afterward like any other roster row).
+    A no-op if they're already on new_team_id.
+
+    A given `note` is recorded in player_move_notes as this move's reason
+    (see list_player_move_notes) — admin-only in the UI, since a coach can
+    move a player but isn't shown why past moves happened. Raises
+    ValueError if the player has no roster row in this division, or if
+    new_team_id isn't a team in it."""
+    entry = conn.execute(
+        """SELECT re.id, re.team_id FROM roster_entries re
+           JOIN teams t ON t.id = re.team_id
+           WHERE re.player_id = %s AND t.division_id = %s""",
+        (player_id, division_id),
+    ).fetchone()
+    if entry is None:
+        raise ValueError("This player isn't on a roster in this division yet.")
+    new_team_division = conn.execute(
+        "SELECT division_id FROM teams WHERE id = %s", (new_team_id,)
+    ).fetchone()
+    if new_team_division is None or new_team_division[0] != division_id:
+        raise ValueError("That team isn't in this division.")
+
+    roster_entry_id, from_team_id = entry
+    if from_team_id == new_team_id:
+        return
+    conn.execute("UPDATE roster_entries SET team_id = %s WHERE id = %s", (new_team_id, roster_entry_id))
+    if note and note.strip():
+        conn.execute(
+            "INSERT INTO player_move_notes (player_id, division_id, from_team_id, to_team_id, note) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (player_id, division_id, from_team_id, new_team_id, note.strip()),
+        )
+    conn.commit()
+
+
+def list_player_move_notes(conn: PGConnection, player_id: int, division_id: int | None = None) -> list[dict]:
+    """This player's recorded move reasons, newest first — admin-only in
+    the UI (see move_player_to_team). Optionally scoped to one division."""
+    where = "WHERE mn.player_id = %s" + (" AND mn.division_id = %s" if division_id is not None else "")
+    params = (player_id, division_id) if division_id is not None else (player_id,)
+    rows = conn.execute(
+        f"""SELECT mn.id, mn.division_id, ft.name, tt.name, mn.note, mn.created_at
+            FROM player_move_notes mn
+            LEFT JOIN teams ft ON ft.id = mn.from_team_id
+            LEFT JOIN teams tt ON tt.id = mn.to_team_id
+            {where}
+            ORDER BY mn.created_at DESC, mn.id DESC""",
+        params,
+    ).fetchall()
+    return [
+        {
+            "id": r[0], "division_id": r[1],
+            "from_team": display_text(r[2]) if r[2] else None, "to_team": display_text(r[3]) if r[3] else None,
+            "note": r[4], "created_at": r[5],
+        }
+        for r in rows
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Global players (identity persists across every division/season)
 # ---------------------------------------------------------------------------

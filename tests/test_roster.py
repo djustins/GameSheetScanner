@@ -61,3 +61,81 @@ def test_roster_reverts_to_unlinked_when_player_is_soft_deleted(conn, division_i
 
     core.restore_player(conn, player_id)
     assert core.list_roster(conn, team_id)[0]["player_id"] == player_id
+
+
+def test_move_player_to_team_updates_roster_entry(conn, division_id):
+    team1 = core.add_team(conn, division_id, "Avalanche")
+    team2 = core.add_team(conn, division_id, "Wild")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_roster_entry(conn, team1, "9", "Sidney Crosby", player_id=player_id)
+
+    core.move_player_to_team(conn, player_id, division_id, team2)
+    assert core.list_roster(conn, team1) == []
+    assert [r["player_id"] for r in core.list_roster(conn, team2)] == [player_id]
+
+
+def test_move_player_to_team_records_a_note_only_when_given(conn, division_id):
+    team1 = core.add_team(conn, division_id, "Avalanche")
+    team2 = core.add_team(conn, division_id, "Wild")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_roster_entry(conn, team1, "9", "Sidney Crosby", player_id=player_id)
+
+    core.move_player_to_team(conn, player_id, division_id, team2)
+    assert core.list_player_move_notes(conn, player_id) == []
+
+    core.move_player_to_team(conn, player_id, division_id, team1, note="Balancing rosters")
+    notes = core.list_player_move_notes(conn, player_id)
+    assert len(notes) == 1
+    assert notes[0]["from_team"] == "Wild"
+    assert notes[0]["to_team"] == "Avalanche"
+    assert notes[0]["note"] == "Balancing rosters"
+
+
+def test_move_player_to_team_is_a_noop_for_the_same_team(conn, division_id):
+    team1 = core.add_team(conn, division_id, "Avalanche")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_roster_entry(conn, team1, "9", "Sidney Crosby", player_id=player_id)
+    core.move_player_to_team(conn, player_id, division_id, team1, note="Shouldn't record")
+    assert core.list_player_move_notes(conn, player_id) == []
+
+
+def test_move_player_to_team_raises_when_not_rostered_in_division(conn, division_id):
+    team1 = core.add_team(conn, division_id, "Avalanche")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    try:
+        core.move_player_to_team(conn, player_id, division_id, team1)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "isn't on a roster" in str(e)
+
+
+def test_move_player_to_team_raises_when_team_is_in_a_different_division(conn, division_id):
+    other_division_id = core.add_division(conn, 2026, "Summer", "Chipmunk")
+    team1 = core.add_team(conn, division_id, "Avalanche")
+    other_team = core.add_team(conn, other_division_id, "Blackhawks")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_roster_entry(conn, team1, "9", "Sidney Crosby", player_id=player_id)
+    try:
+        core.move_player_to_team(conn, player_id, division_id, other_team)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "isn't in this division" in str(e)
+
+
+def test_list_player_move_notes_scoped_to_a_division(conn, division_id):
+    other_division_id = core.add_division(conn, 2026, "Summer", "Chipmunk")
+    team1 = core.add_team(conn, division_id, "Avalanche")
+    team2 = core.add_team(conn, division_id, "Wild")
+    other_team1 = core.add_team(conn, other_division_id, "Blackhawks")
+    other_team2 = core.add_team(conn, other_division_id, "Bruins")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_roster_entry(conn, team1, "9", "Sidney Crosby", player_id=player_id)
+    core.add_roster_entry(conn, other_team1, "9", "Sidney Crosby", player_id=player_id)
+
+    core.move_player_to_team(conn, player_id, division_id, team2, note="Division A move")
+    core.move_player_to_team(conn, player_id, other_division_id, other_team2, note="Division B move")
+
+    assert len(core.list_player_move_notes(conn, player_id)) == 2
+    scoped = core.list_player_move_notes(conn, player_id, division_id)
+    assert len(scoped) == 1
+    assert scoped[0]["note"] == "Division A move"

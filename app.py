@@ -2886,17 +2886,18 @@ with tab_teams_group:
                             positions_by_player = core.get_positions_for_team(conn, working_division_id, roster_team_id)
                             grades_by_player = core.get_season_grades_for_division(conn, working_division_id)
 
-                            detail_cols = st.columns([1, 3, 1.5, 1.5])
+                            detail_cols = st.columns([1, 3, 1.5, 1.5, 0.8])
                             detail_cols[0].markdown("**Number**")
                             detail_cols[1].markdown("**Name**")
                             detail_cols[2].markdown("**Position**")
                             detail_cols[3].markdown("**Season Grade**")
+                            detail_cols[4].markdown("**Move**")
                             for roster_idx, entry in enumerate(roster_rows):
                                 with highlighted_row(
                                     entry["player_id"], row_key=f"roster_{roster_team_id}_{entry['id']}",
                                     index=roster_idx,
                                 ):
-                                    row_cols = st.columns([1, 3, 1.5, 1.5])
+                                    row_cols = st.columns([1, 3, 1.5, 1.5, 0.8])
                                     row_cols[0].write(entry["number"])
                                     row_cols[1].write(entry["name"])
                                     if entry["player_id"] is None:
@@ -2920,6 +2921,51 @@ with tab_teams_group:
                                             prefetched=grades_by_player.get(entry["player_id"]),
                                             label_visibility="collapsed", disabled=is_read_only,
                                         )
+                                    with row_cols[4]:
+                                        with st.popover("↔️"):
+                                            st.caption(f"Move {entry['name']} to a different team")
+                                            other_teams = {
+                                                t["id"]: t["name"] for t in teams if t["id"] != roster_team_id
+                                            }
+                                            if not other_teams:
+                                                st.caption("No other teams in this division yet.")
+                                            else:
+                                                move_team_id = st.selectbox(
+                                                    "Team", options=list(other_teams),
+                                                    format_func=lambda i: other_teams[i],
+                                                    key=f"move_team_{roster_team_id}_{entry['id']}",
+                                                    label_visibility="collapsed",
+                                                )
+                                                move_note = None
+                                                if user["is_admin"]:
+                                                    move_note = st.text_area(
+                                                        "Reason (admin only — coaches won't see this)",
+                                                        key=f"move_note_{roster_team_id}_{entry['id']}",
+                                                    )
+                                                if st.button(
+                                                    "Move", key=f"move_btn_{roster_team_id}_{entry['id']}",
+                                                    type="primary", disabled=is_read_only,
+                                                ):
+                                                    try:
+                                                        core.move_player_to_team(
+                                                            conn, entry["player_id"], working_division_id,
+                                                            move_team_id, note=move_note,
+                                                        )
+                                                        st.rerun()
+                                                    except ValueError as e:
+                                                        st.error(str(e))
+                                            if user["is_admin"]:
+                                                move_history = core.list_player_move_notes(
+                                                    conn, entry["player_id"], working_division_id
+                                                )
+                                                if move_history:
+                                                    st.divider()
+                                                    st.caption("Move history (admin only)")
+                                                    for m in move_history:
+                                                        st.write(
+                                                            f"- {m['from_team'] or '?'} → {m['to_team'] or '?'}: "
+                                                            f"{m['note'] or '(no reason given)'}"
+                                                        )
 
                     st.divider()
                     st.subheader(f"{team_options[roster_team_id]} — Coaches")

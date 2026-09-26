@@ -229,6 +229,22 @@ CREATE TABLE IF NOT EXISTS player_positions (
     PRIMARY KEY (player_id, division_id, team_id)
 );
 
+-- One row per post-draft move.move_player_to_team (Team Rosters) writes a
+-- row here whenever a reason is given for moving a player to a different
+-- team in the same division -- history, not a single overwritable note,
+-- since a player can be moved more than once in a season. Admin-only in
+-- the UI (see list_player_move_notes) -- coaches can move a player but
+-- don't see why past moves happened.
+CREATE TABLE IF NOT EXISTS player_move_notes (
+    id            SERIAL PRIMARY KEY,
+    player_id     INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    division_id   INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
+    from_team_id  INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+    to_team_id    INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+    note          TEXT,
+    created_at    TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ---------------------------------------------------------------------------
 -- Player draft — a live, snake-order draft of a division's registered-but-
 -- unrostered players onto its teams. Only one draft per division at a time

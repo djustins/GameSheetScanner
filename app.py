@@ -3159,31 +3159,8 @@ with tab_teams_group:
                         else:
                             st.dataframe(zebra_style(pd.DataFrame(coach_rows)), width="stretch", hide_index=True)
 
-                        with st.popover("➕ Add a new coach"):
-                            st.caption(
-                                "Creates a coach profile without assigning them to a team yet — do that "
-                                "below (once this division has a team) or later from Team Rosters."
-                            )
-                            dncol1, dncol2 = st.columns(2)
-                            new_div_coach_first = dncol1.text_input(
-                                "First name", key=f"new_div_coach_first_{d['id']}", disabled=is_read_only
-                            )
-                            new_div_coach_last = dncol2.text_input(
-                                "Last name", key=f"new_div_coach_last_{d['id']}", disabled=is_read_only
-                            )
-                            if st.button(
-                                "Create coach", key=f"add_div_coach_btn_{d['id']}", disabled=is_read_only
-                            ):
-                                if new_div_coach_first.strip():
-                                    core.add_coach(
-                                        conn, new_div_coach_first.strip(), new_div_coach_last.strip() or None
-                                    )
-                                    st.rerun()
-                                else:
-                                    st.error("First name is required.")
-
                         if not teams:
-                            st.caption("Add a team above to assign a coach to it.")
+                            st.caption("Add a team above first, then a coach can be assigned to it.")
                         else:
                             coach_team_options = {t["id"]: t["name"] for t in teams}
                             coach_team_id = st.selectbox(

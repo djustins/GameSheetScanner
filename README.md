@@ -179,12 +179,37 @@ move history (`GET /players/{id}/move-notes`) are admin-only, same as the
 Streamlit app's Team Rosters page.
 
 **Deploying it**: Streamlit Community Cloud only serves the Streamlit process
-itself, so this needs its own host — Render, Fly.io, Railway, a small VM,
-etc. Point its `DATABASE_URL` at the same Aiven Postgres database the
-Streamlit app uses, run `uvicorn api:app --host 0.0.0.0 --port $PORT`, and if
-your Postgres has an `ip_filter` (see "Restricting database access" above),
-add that host's outbound IP the same way you would Streamlit Community
-Cloud's.
+itself, so this needs its own host — `render.yaml` at the repo root is a
+ready-to-use blueprint for [Render](https://render.com)'s free tier:
+
+1. On Render: **New +** → **Blueprint** → connect this GitHub repo. It reads
+   `render.yaml` and creates a `gamesheetscanner-api` web service automatically
+   (build: `pip install -r requirements-api.txt`; start:
+   `uvicorn api:app --host 0.0.0.0 --port $PORT`).
+2. In that service's **Environment** tab, set `DATABASE_URL` to the same
+   connection string the Streamlit app uses (`render.yaml` deliberately leaves
+   it blank — never commit it).
+3. Deploy, then find the service's outbound IP (Render's dashboard shows this
+   under the service's **Connect** info, or add a temporary log line that
+   hits `https://api.ipify.org` on startup).
+4. Add that IP to your Postgres's `ip_filter` alongside Streamlit's own IPs
+   and any admin ones:
+   ```bash
+   python scripts/aiven_ip_filter.py sync --extra-cidr <render-ip>/32 --extra-cidr <your-other-extras> --yes
+   ```
+   Render's free tier doesn't guarantee that IP stays static long-term —
+   re-run `aiven_ip_filter.py check` occasionally (or after a Render
+   redeploy) to confirm it's still allowed; a paid Render plan or a host
+   with a dedicated static IP (Fly.io, Railway, a small VM) avoids the
+   re-check entirely.
+5. Your API is now live at `https://gamesheetscanner-api.onrender.com` (or
+   whatever Render named it) — `/docs` has the same Swagger UI you saw
+   locally.
+
+Prefer a different host (Fly.io, Railway, a VM)? The same three inputs apply
+anywhere: `pip install -r requirements-api.txt`, `DATABASE_URL` set, and
+`uvicorn api:app --host 0.0.0.0 --port $PORT` (or that host's equivalent) as
+the start command.
 
 ## Running tests
 

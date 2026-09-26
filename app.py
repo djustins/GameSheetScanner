@@ -907,30 +907,79 @@ def render_team_coach_manager(conn, team_id: int, team_name: str, key_prefix: st
     Rosters tab (scoped to the Working Division) and the Teams tab → Divisions
     (which manages every division, not just the working one), so both stay
     on one implementation of "the coach manager for a team" instead of two
-    copies that can quietly drift apart."""
+    copies that can quietly drift apart.
+
+    The assign flow mirrors render_create_player_popover's "search
+    existing, or create new" pattern — search first (coaches are global,
+    so the person being assigned may already have a profile from another
+    team/division/season and shouldn't get a duplicate), falling back to
+    creating a brand-new one, both in the same popover instead of a
+    separate pick-from-a-full-list dropdown and a disconnected "add a
+    coach" control."""
     assigned = core.list_team_coaches(conn, team_id)
     if assigned:
         st.write(", ".join(coach_label(c) for c in assigned))
     else:
         st.caption("No coaches assigned to this team yet.")
-    all_coaches = core.list_coaches(conn)
-    assigned_ids = {c["id"] for c in assigned}
-    available_coaches = {c["id"]: coach_label(c) for c in all_coaches if c["id"] not in assigned_ids}
-    acol1, acol2 = st.columns([3, 1])
-    with acol1:
-        coach_to_assign = st.selectbox(
-            "Assign coach", options=list(available_coaches), format_func=lambda i: available_coaches[i],
-            key=f"{key_prefix}_assign_coach_pick_{team_id}",
-        ) if available_coaches else None
-    with acol2:
-        if available_coaches and st.button(
-            "Assign", key=f"{key_prefix}_assign_coach_btn_{team_id}", disabled=is_read_only
+
+    with st.popover("➕ Assign Coach"):
+        st.caption(f"Assigning to {core.display_text(team_name)}")
+        assigned_ids = {c["id"] for c in assigned}
+        available_coaches = [c for c in core.list_coaches(conn) if c["id"] not in assigned_ids]
+
+        st.markdown("**Search for an existing coach**")
+        search_needle = st.text_input("Search by name", key=f"{key_prefix}_coach_search_{team_id}")
+        if search_needle.strip():
+            needle = search_needle.strip().lower()
+            matches = [
+                c for c in available_coaches
+                if needle in c["name"].lower() or needle in (c["nickname"] or "").lower()
+            ]
+            if not matches:
+                st.caption("No matching coaches.")
+            else:
+                match_options = {c["id"]: coach_label(c) for c in matches}
+                mcol1, mcol2 = st.columns([3, 1])
+                with mcol1:
+                    assign_pick_id = st.selectbox(
+                        "Matches", options=list(match_options), format_func=lambda i: match_options[i],
+                        key=f"{key_prefix}_coach_pick_{team_id}", label_visibility="collapsed",
+                    )
+                with mcol2:
+                    if st.button(
+                        "Assign", key=f"{key_prefix}_coach_assign_btn_{team_id}", type="primary",
+                        disabled=is_read_only,
+                    ):
+                        try:
+                            core.assign_coach_to_team(conn, team_id, assign_pick_id)
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+
+        st.divider()
+        st.markdown("**Or create a new coach**")
+        ncc1, ncc2 = st.columns(2)
+        new_coach_first = ncc1.text_input(
+            "First name", key=f"{key_prefix}_new_coach_first_{team_id}", disabled=is_read_only
+        )
+        new_coach_last = ncc2.text_input(
+            "Last name", key=f"{key_prefix}_new_coach_last_{team_id}", disabled=is_read_only
+        )
+        st.caption("Add phone/email/nickname/children for this coach in the Coaches tab.")
+        if st.button(
+            "Create & Assign", key=f"{key_prefix}_create_coach_btn_{team_id}", type="primary",
+            disabled=is_read_only,
         ):
-            try:
-                core.assign_coach_to_team(conn, team_id, coach_to_assign)
-                st.rerun()
-            except ValueError as e:
-                st.error(str(e))
+            if new_coach_first.strip():
+                new_coach_id = core.add_coach(conn, new_coach_first.strip(), new_coach_last.strip() or None)
+                try:
+                    core.assign_coach_to_team(conn, team_id, new_coach_id)
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+            else:
+                st.error("First name is required.")
+
     if assigned:
         assigned_names = {c["id"]: coach_label(c) for c in assigned}
         remove_col1, remove_col2 = st.columns([3, 1])
@@ -943,25 +992,6 @@ def render_team_coach_manager(conn, team_id: int, team_name: str, key_prefix: st
             if st.button("Remove", key=f"{key_prefix}_remove_coach_btn_{team_id}", disabled=is_read_only):
                 core.remove_coach_from_team(conn, team_id, coach_to_remove)
                 st.rerun()
-    with st.popover("➕ New coach"):
-        ncc1, ncc2 = st.columns(2)
-        new_coach_first = ncc1.text_input(
-            "First name", key=f"{key_prefix}_new_coach_first_{team_id}", disabled=is_read_only
-        )
-        new_coach_last = ncc2.text_input(
-            "Last name", key=f"{key_prefix}_new_coach_last_{team_id}", disabled=is_read_only
-        )
-        st.caption("Add phone/email/nickname/children for this coach in the Coaches tab.")
-        if st.button("Create coach", key=f"{key_prefix}_create_coach_btn_{team_id}", disabled=is_read_only):
-            if new_coach_first.strip():
-                new_coach_id = core.add_coach(conn, new_coach_first.strip(), new_coach_last.strip() or None)
-                try:
-                    core.assign_coach_to_team(conn, team_id, new_coach_id)
-                    st.rerun()
-                except ValueError as e:
-                    st.error(str(e))
-            else:
-                st.error("First name is required.")
 
 
 def render_coach_panel(

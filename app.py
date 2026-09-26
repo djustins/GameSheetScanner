@@ -3295,8 +3295,14 @@ with tab_teams_group:
                         # per-team grade breakdown, the Players section's Grade column
                         # and table below, and the coach-carryover panel's child-name
                         # matching/picker, instead of separate round trips for each.
-                        division_grades_by_player = core.get_season_grades_for_division(conn, d["id"])
+                        # get_latest_grades falls back to a player's most recent
+                        # evaluation from any division when this one doesn't have one
+                        # yet, so a fresh or returning player still shows a useful
+                        # reference grade instead of a blank cell.
                         division_players = core.list_players_in_division(conn, d["id"])
+                        division_grades_by_player = core.get_latest_grades(
+                            conn, d["id"], [p["id"] for p in division_players]
+                        )
 
                         st.subheader("Teams")
                         teams = core.list_teams(conn, d["id"])

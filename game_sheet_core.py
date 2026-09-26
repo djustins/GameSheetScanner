@@ -2090,6 +2090,28 @@ def get_season_grades_for_division(conn: PGConnection, division_id: int) -> dict
     return {r[0]: r[1] for r in rows}
 
 
+def get_latest_grades(conn: PGConnection, division_id: int, player_ids: list[int]) -> dict[int, str]:
+    """Each player's latest *available* grade for reference in this
+    division: this division's own evaluation if one exists, otherwise
+    their most recent evaluation from any other division — so a newly
+    imported or returning player still shows a useful grade before
+    they've been evaluated this season, instead of a blank cell. Used by
+    the Divisions page's Players table (and its per-team grade
+    breakdown); the player form's own Season Grade editor stays scoped to
+    exactly the Working Division on purpose (see season_grade_input) —
+    this is a read-only display convenience, not what gets edited.
+    player_id -> grade, omitting anyone with no evaluation anywhere."""
+    if not player_ids:
+        return {}
+    rows = conn.execute(
+        """SELECT DISTINCT ON (player_id) player_id, grade
+           FROM evaluations WHERE player_id = ANY(%s)
+           ORDER BY player_id, (division_id = %s) DESC, created_at DESC, id DESC""",
+        (player_ids, division_id),
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
 def list_evaluated_player_ids(conn: PGConnection, division_id: int) -> set[int]:
     """Every player_id with at least one evaluation recorded for this
     division — used to filter for "has a rating on file for division X",

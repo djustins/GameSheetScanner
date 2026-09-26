@@ -131,3 +131,27 @@ def test_find_coach_children_in_division_ignores_matches_in_other_divisions(conn
         contact_first_name="Robert", contact_last_name="Dobson",
     )
     assert core.find_coach_children_in_division(conn, coach_id, division_id) == []
+
+
+def test_get_latest_grades_prefers_this_divisions_own_evaluation(conn, division_id):
+    other_division_id = core.add_division(conn, 2026, "Spring", "Chipmunk")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_evaluation(conn, player_id, other_division_id, None, "C")
+    core.add_evaluation(conn, player_id, division_id, None, "A")
+    assert core.get_latest_grades(conn, division_id, [player_id]) == {player_id: "A"}
+
+
+def test_get_latest_grades_falls_back_to_latest_from_another_division(conn, division_id):
+    older = core.add_division(conn, 2024, "Fall", "Chipmunk")
+    newer = core.add_division(conn, 2025, "Fall", "Beaver")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_evaluation(conn, player_id, older, None, "C")
+    core.add_evaluation(conn, player_id, newer, None, "B")
+    # division_id itself has no evaluation -- falls back to the most
+    # recent evaluation from anywhere, not just the oldest/any one.
+    assert core.get_latest_grades(conn, division_id, [player_id]) == {player_id: "B"}
+
+
+def test_get_latest_grades_omits_players_with_no_evaluation_anywhere(conn, division_id):
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    assert core.get_latest_grades(conn, division_id, [player_id]) == {}

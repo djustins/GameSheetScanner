@@ -77,6 +77,28 @@ def test_team_crud_lifecycle(conn, admin_auth, division_id):
     assert client.get(f"/divisions/{division_id}/teams", auth=admin_auth).json() == []
 
 
+def test_roster_entry_renumber_lifecycle(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    create = client.post(
+        f"/teams/{team_id}/roster", json={"number": "TBD1", "name": "Sidney Crosby"}, auth=admin_auth
+    )
+    assert create.status_code == 201
+    entry_id = create.json()["id"]
+
+    renumbered = client.patch(f"/teams/{team_id}/roster/{entry_id}", json={"number": "87"}, auth=admin_auth)
+    assert renumbered.status_code == 200
+    assert renumbered.json()["number"] == "87"
+
+    other = client.post(f"/teams/{team_id}/roster", json={"number": "9", "name": "Bobby Orr"}, auth=admin_auth)
+    conflict = client.patch(
+        f"/teams/{team_id}/roster/{other.json()['id']}", json={"number": "87"}, auth=admin_auth
+    )
+    assert conflict.status_code == 409
+
+    missing = client.patch(f"/teams/{team_id}/roster/999999", json={"number": "1"}, auth=admin_auth)
+    assert missing.status_code == 404
+
+
 def test_read_only_role_can_read_but_not_write(conn, readonly_auth, division_id):
     listed = client.get(f"/divisions/{division_id}/teams", auth=readonly_auth)
     assert listed.status_code == 200

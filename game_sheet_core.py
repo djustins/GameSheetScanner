@@ -1814,6 +1814,34 @@ def add_roster_entry(conn: PGConnection, team_id: int, number: str, name: str, p
     return entry_id
 
 
+def update_roster_entry(conn: PGConnection, roster_entry_id: int, **fields) -> None:
+    """Update a roster entry's number and/or name directly, e.g. replacing
+    a draft's placeholder jersey number ("TBD3"/"AUTO3") with the coach's
+    real one, without resending the team's whole roster via replace_roster.
+    Raises ValueError if the new number is already taken by a *different*
+    entry on the same team (roster_entries has UNIQUE(team_id, number))."""
+    allowed = {"number", "name"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    if "number" in updates:
+        updates["number"] = updates["number"].strip()
+        row = conn.execute("SELECT team_id FROM roster_entries WHERE id = %s", (roster_entry_id,)).fetchone()
+        if row is None:
+            raise ValueError("Roster entry not found.")
+        conflict = conn.execute(
+            "SELECT id FROM roster_entries WHERE team_id = %s AND number = %s AND id != %s",
+            (row[0], updates["number"], roster_entry_id),
+        ).fetchone()
+        if conflict:
+            raise ValueError(f"Number {updates['number']!r} is already taken on this team.")
+    if "name" in updates:
+        updates["name"] = normalize_text(updates["name"]) or ""
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    conn.execute(f"UPDATE roster_entries SET {set_clause} WHERE id = %s", (*updates.values(), roster_entry_id))
+    conn.commit()
+
+
 def move_player_to_team(
     conn: PGConnection, player_id: int, division_id: int, new_team_id: int, note: str | None = None
 ) -> None:

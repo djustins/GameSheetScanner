@@ -63,6 +63,54 @@ def test_roster_reverts_to_unlinked_when_player_is_soft_deleted(conn, division_i
     assert core.list_roster(conn, team_id)[0]["player_id"] == player_id
 
 
+def test_update_roster_entry_renumbers(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    entry_id = core.add_roster_entry(conn, team_id, "TBD1", "Sidney Crosby")
+    core.update_roster_entry(conn, entry_id, number="87")
+    entry = core.list_roster(conn, team_id)[0]
+    assert entry["number"] == "87"
+    assert entry["name"] == "Sidney Crosby"
+
+
+def test_update_roster_entry_renames(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    entry_id = core.add_roster_entry(conn, team_id, "9", "Sid Crosby")
+    core.update_roster_entry(conn, entry_id, name="Sidney Crosby")
+    entry = core.list_roster(conn, team_id)[0]
+    assert entry["name"] == "Sidney Crosby"
+    assert entry["number"] == "9"
+
+
+def test_update_roster_entry_raises_on_number_collision(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    core.add_roster_entry(conn, team_id, "9", "Sidney Crosby")
+    entry2_id = core.add_roster_entry(conn, team_id, "87", "Bobby Orr")
+    try:
+        core.update_roster_entry(conn, entry2_id, number="9")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "already taken" in str(e)
+    # Unchanged on failure.
+    assert next(r for r in core.list_roster(conn, team_id) if r["id"] == entry2_id)["number"] == "87"
+
+
+def test_update_roster_entry_allows_keeping_its_own_number(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    entry_id = core.add_roster_entry(conn, team_id, "9", "Sidney Crosby")
+    core.update_roster_entry(conn, entry_id, number="9", name="Sid Crosby")
+    entry = core.list_roster(conn, team_id)[0]
+    assert entry["number"] == "9"
+    assert entry["name"] == "Sid Crosby"
+
+
+def test_update_roster_entry_raises_when_not_found(conn):
+    try:
+        core.update_roster_entry(conn, 999999, number="9")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "not found" in str(e)
+
+
 def test_move_player_to_team_updates_roster_entry(conn, division_id):
     team1 = core.add_team(conn, division_id, "Avalanche")
     team2 = core.add_team(conn, division_id, "Wild")

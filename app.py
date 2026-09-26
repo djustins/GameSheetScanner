@@ -3136,6 +3136,17 @@ with tab_teams_group:
                                                         st.session_state.pop(team_confirm_key, None)
                                                         st.rerun()
 
+                        with st.popover("➕ Add a team"):
+                            new_div_team_name = st.text_input(
+                                "Team name", key=f"new_div_team_name_{d['id']}", disabled=is_read_only
+                            )
+                            if st.button("Add team", key=f"add_div_team_btn_{d['id']}", disabled=is_read_only):
+                                if new_div_team_name.strip():
+                                    core.add_team(conn, d["id"], new_div_team_name.strip())
+                                    st.rerun()
+                                else:
+                                    st.error("Team name is required.")
+
                         st.divider()
                         st.subheader("Coaches")
                         division_coaches_by_team = core.list_team_coaches_for_division(conn, d["id"])
@@ -3374,17 +3385,6 @@ with tab_teams_group:
                             st.caption(f"{sched_done}/{sched_total} scheduled games played so far.")
                         else:
                             st.caption("No schedule uploaded yet for this division.")
-
-                        with st.popover("➕ Add a team"):
-                            new_div_team_name = st.text_input(
-                                "Team name", key=f"new_div_team_name_{d['id']}", disabled=is_read_only
-                            )
-                            if st.button("Add team", key=f"add_div_team_btn_{d['id']}", disabled=is_read_only):
-                                if new_div_team_name.strip():
-                                    core.add_team(conn, d["id"], new_div_team_name.strip())
-                                    st.rerun()
-                                else:
-                                    st.error("Team name is required.")
 
                         st.divider()
                         confirm_key = f"confirm_delete_div_{d['id']}"

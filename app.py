@@ -1955,6 +1955,40 @@ with st.sidebar:
         del st.session_state["user"]
         st.rerun()
 
+    with st.expander("🔑 API Tokens"):
+        st.caption(
+            "For scripts/integrations using api.py — a token authenticates as you, "
+            "without sending your actual password on every request."
+        )
+        new_token_key = "new_api_token_result"
+        if new_token_key in st.session_state:
+            new_id, new_name, new_raw = st.session_state.pop(new_token_key)
+            st.success(f'Created "{new_name}". Copy it now — it won\'t be shown again:')
+            st.code(new_raw, language=None)
+
+        new_token_name = st.text_input("New token name", key="new_api_token_name")
+        if st.button("Create token", key="create_api_token_btn"):
+            if new_token_name.strip():
+                token_id, raw_token = core.create_api_token(conn, user["id"], new_token_name.strip())
+                st.session_state[new_token_key] = (token_id, new_token_name.strip(), raw_token)
+                st.rerun()
+            else:
+                st.error("Name is required (e.g. \"My Laptop\" or \"Zapier\").")
+
+        existing_tokens = core.list_api_tokens(conn, user["id"])
+        active_tokens = [t for t in existing_tokens if t["revoked_at"] is None]
+        if not active_tokens:
+            st.caption("No active tokens.")
+        else:
+            for t in active_tokens:
+                trow1, trow2 = st.columns([3, 1])
+                last_used = f"last used {t['last_used_at']}" if t["last_used_at"] else "never used"
+                trow1.write(f"**{t['name']}**  \n*{last_used}*")
+                with trow2:
+                    if st.button("Revoke", key=f"revoke_token_{t['id']}"):
+                        core.revoke_api_token(conn, t["id"], user["id"])
+                        st.rerun()
+
 api_key = st.sidebar.text_input(
     "ANTHROPIC_API_KEY",
     value=os.environ.get("ANTHROPIC_API_KEY", ""),

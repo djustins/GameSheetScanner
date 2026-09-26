@@ -171,12 +171,21 @@ uvicorn api:app --reload
 
 Then open `http://localhost:8000/docs` for interactive API docs (Swagger UI).
 
-Auth is HTTP Basic against the same `users` table the Streamlit app's login
-screen uses — any existing user account works. Writes require the same
-"not read-only" check the app applies (an admin, or a non-read-only role);
-deletes require admin. A move-reason note (`POST /players/{id}/move`) and
-move history (`GET /players/{id}/move-notes`) are admin-only, same as the
-Streamlit app's Team Rosters page.
+Auth is either HTTP Basic against the same `users` table the Streamlit app's
+login screen uses (any existing account works), or a long-lived **API
+token** — better for a script or integration that shouldn't hold a real
+password. Create one from the Streamlit app's sidebar (**🔑 API Tokens**,
+under "Signed in as...") or via `POST /tokens` (needs Basic auth once to
+bootstrap); the raw token is shown exactly once, then send it as
+`Authorization: Bearer <token>` on every request afterward. It carries
+whatever access the user who created it has, and can be revoked (from that
+same sidebar section, or `DELETE /tokens/{id}`) without touching their
+password.
+
+Writes require the same "not read-only" check the app applies (an admin, or
+a non-read-only role); deletes require admin. A move-reason note (`POST
+/players/{id}/move`) and move history (`GET /players/{id}/move-notes`) are
+admin-only, same as the Streamlit app's Team Rosters page.
 
 **Deploying it**: Streamlit Community Cloud only serves the Streamlit process
 itself, so this needs its own host — `render.yaml` at the repo root is a

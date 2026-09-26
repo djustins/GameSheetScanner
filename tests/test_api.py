@@ -117,6 +117,29 @@ def test_division_players_endpoint_includes_grade_and_note(conn, admin_auth, div
     assert players[0]["grade"] == "A"
 
 
+def test_api_token_lifecycle(conn, admin_auth):
+    create = client.post("/tokens", json={"name": "My Laptop"}, auth=admin_auth)
+    assert create.status_code == 201
+    token = create.json()["token"]
+    assert token.startswith("gst_")
+
+    # The token authenticates just like the password did.
+    me = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
+    assert me.json()["email"] == ADMIN_EMAIL
+
+    listed = client.get("/tokens", auth=admin_auth)
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+    assert "token" not in listed.json()[0]
+
+    revoke = client.delete(f"/tokens/{create.json()['id']}", auth=admin_auth)
+    assert revoke.status_code == 204
+
+    rejected = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert rejected.status_code == 401
+
+
 def test_remove_all_players_from_division_endpoint(conn, admin_auth, division_id):
     team_id = core.add_team(conn, division_id, "Avalanche")
     player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)

@@ -30,7 +30,7 @@ import os
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from pydantic import BaseModel
 
 import game_sheet_core as core
@@ -47,7 +47,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
-security = HTTPBasic()
+# auto_error=False on both: a request supplies at most one of these (Basic
+# credentials or a Bearer token), never both, and each scheme's dependency
+# would otherwise 401 on its own before get_current_user gets a chance to
+# fall back to the other one.
+basic_security = HTTPBasic(auto_error=False)
+bearer_security = HTTPBearer(auto_error=False)
 
 
 # ---------------------------------------------------------------------------
@@ -69,16 +74,37 @@ def get_conn():
 
 
 def get_current_user(
-    credentials: HTTPBasicCredentials = Depends(security), conn=Depends(get_conn)
+    credentials: HTTPBasicCredentials | None = Depends(basic_security),
+    bearer: HTTPAuthorizationCredentials | None = Depends(bearer_security),
+    conn=Depends(get_conn),
 ) -> dict:
-    user = core.verify_login(conn, credentials.username, credentials.password)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return user
+    """Either an email/password (HTTP Basic, same as the Streamlit login)
+    or a long-lived API token (HTTP Bearer, see /tokens) works — pick
+    whichever the request actually sent. A token carries exactly the same
+    access as the user it belongs to (see verify_api_token)."""
+    if bearer is not None:
+        user = core.verify_api_token(conn, bearer.credentials)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or revoked API token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return user
+    if credentials is not None:
+        user = core.verify_login(conn, credentials.username, credentials.password)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password.",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Provide either HTTP Basic credentials or a Bearer API token.",
+        headers={"WWW-Authenticate": "Basic"},
+    )
 
 
 def require_writer(user: dict = Depends(get_current_user)) -> dict:
@@ -116,6 +142,42 @@ def whoami(user: dict = Depends(get_current_user)) -> dict:
         "email": user["email"], "display_name": user["display_name"], "is_admin": user["is_admin"],
         "read_only": user["read_only"], "coach_id": user["coach_id"], "pages": user["pages"],
     }
+
+
+# ---------------------------------------------------------------------------
+# API tokens — a long-lived alternative to sending your actual email/
+# password on every request (e.g. for a script or integration). Only ever
+# scoped to yourself: there's no endpoint here to manage another user's
+# tokens (an admin does that from the Streamlit app's User Management tab,
+# same as resetting someone's password).
+# ---------------------------------------------------------------------------
+
+class ApiTokenCreate(BaseModel):
+    name: str
+
+
+@app.post("/tokens", status_code=status.HTTP_201_CREATED, tags=["tokens"])
+def api_create_token(
+    body: ApiTokenCreate, conn=Depends(get_conn), user: dict = Depends(get_current_user)
+) -> dict:
+    """Creates a new API token for you. The `token` value in this response
+    is the only time it's ever shown — save it now (e.g. in a secrets
+    manager or .env), since it can't be retrieved again afterward, only
+    revoked and replaced with a new one."""
+    token_id, raw_token = core.create_api_token(conn, user["id"], body.name)
+    return {"id": token_id, "name": body.name, "token": raw_token}
+
+
+@app.get("/tokens", tags=["tokens"])
+def api_list_tokens(conn=Depends(get_conn), user: dict = Depends(get_current_user)) -> list[dict]:
+    """Your own tokens — never includes the raw value, only id/name/
+    created_at/last_used_at/revoked_at, for deciding what to revoke."""
+    return core.list_api_tokens(conn, user["id"])
+
+
+@app.delete("/tokens/{token_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["tokens"])
+def api_revoke_token(token_id: int, conn=Depends(get_conn), user: dict = Depends(get_current_user)):
+    core.revoke_api_token(conn, token_id, user["id"])
 
 
 # ---------------------------------------------------------------------------

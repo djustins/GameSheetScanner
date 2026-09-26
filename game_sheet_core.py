@@ -15,9 +15,11 @@ web framework (Streamlit/Flask) — it's the shared logic that every front end
 import base64
 import difflib
 import functools
+import hashlib
 import json
 import mimetypes
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -803,6 +805,92 @@ def verify_login(conn: PGConnection, email: str, password: str) -> dict | None:
     user["pages"] = list_role_pages(conn, user["role_id"])
     user["read_only"], user["hide_contact_details"] = _get_role_flags(conn, user["role_id"])
     return user
+
+
+def get_user(conn: PGConnection, user_id: int) -> dict | None:
+    return {u["id"]: u for u in list_users(conn, include_deleted=True)}.get(user_id)
+
+
+def _user_auth_context(conn: PGConnection, user_id: int) -> dict | None:
+    """The same shape verify_login returns (password hash never included),
+    for an already-known, still-active user id — used by verify_api_token
+    once a token's owner is looked up, so a token carries exactly the same
+    pages/read_only/hide_contact_details/is_admin a password login would."""
+    user = get_user(conn, user_id)
+    if not user or user["deleted_at"] is not None:
+        return None
+    user = dict(user)
+    user["pages"] = list_role_pages(conn, user["role_id"])
+    user["read_only"], user["hide_contact_details"] = _get_role_flags(conn, user["role_id"])
+    return user
+
+
+def _hash_api_token(raw_token: str) -> str:
+    """API tokens are long, high-entropy random strings (unlike a
+    user-chosen password), so a fast SHA-256 hash is enough to keep the raw
+    value unrecoverable from a DB leak — no need for bcrypt's deliberately
+    slow cost here."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def create_api_token(conn: PGConnection, user_id: int, name: str) -> tuple[int, str]:
+    """Creates a new API token for this user and returns (token_id,
+    raw_token). The raw value is only ever available here, at creation —
+    only its hash is stored (see verify_api_token), so losing it means
+    creating a replacement and revoking this one, not recovering it."""
+    raw_token = "gst_" + secrets.token_urlsafe(32)
+    cur = conn.execute(
+        "INSERT INTO api_tokens (user_id, name, token_hash) VALUES (%s, %s, %s) RETURNING id",
+        (user_id, name.strip(), _hash_api_token(raw_token)),
+    )
+    token_id = cur.fetchone()[0]
+    conn.commit()
+    return token_id, raw_token
+
+
+def verify_api_token(conn: PGConnection, raw_token: str) -> dict | None:
+    """The same dict shape verify_login returns, for a valid, non-revoked
+    API token whose owner is still an active user — None otherwise.
+    Records last_used_at on success (see list_api_tokens)."""
+    row = conn.execute(
+        "SELECT id, user_id FROM api_tokens WHERE token_hash = %s AND revoked_at IS NULL",
+        (_hash_api_token(raw_token),),
+    ).fetchone()
+    if row is None:
+        return None
+    token_id, user_id = row
+    user = _user_auth_context(conn, user_id)
+    if user is None:
+        return None
+    conn.execute(
+        "UPDATE api_tokens SET last_used_at = %s WHERE id = %s", (_utcnow().isoformat(timespec="seconds"), token_id)
+    )
+    conn.commit()
+    return user
+
+
+def list_api_tokens(conn: PGConnection, user_id: int) -> list[dict]:
+    """This user's own tokens (never the raw value or hash — only
+    create_api_token's return value ever carries the raw token), newest
+    first, including revoked ones (flagged via revoked_at) so a user can
+    see their token history, not just what's currently active."""
+    rows = conn.execute(
+        """SELECT id, name, created_at, last_used_at, revoked_at FROM api_tokens
+           WHERE user_id = %s ORDER BY created_at DESC, id DESC""",
+        (user_id,),
+    ).fetchall()
+    cols = ["id", "name", "created_at", "last_used_at", "revoked_at"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def revoke_api_token(conn: PGConnection, token_id: int, user_id: int):
+    """Revokes one of this user's own tokens (scoped to user_id so one
+    user can never revoke another's by guessing an id)."""
+    conn.execute(
+        "UPDATE api_tokens SET revoked_at = %s WHERE id = %s AND user_id = %s",
+        (_utcnow().isoformat(timespec="seconds"), token_id, user_id),
+    )
+    conn.commit()
 
 
 def add_user(

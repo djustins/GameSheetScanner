@@ -352,6 +352,23 @@ CREATE TABLE IF NOT EXISTS users (
 -- already-existing users table.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS coach_id INTEGER REFERENCES coaches(id) ON DELETE SET NULL;
 
+-- A long-lived credential for api.py, as an alternative to sending a
+-- user's actual email/password on every request -- e.g. for a script or
+-- integration that shouldn't have to hold a real login. Only token_hash is
+-- stored (see game_sheet_core.create_api_token/verify_api_token); the raw
+-- token is shown to whoever created it exactly once and can't be recovered
+-- afterward, only revoked (revoked_at set) and replaced with a new one.
+-- Carries the same access as the user it belongs to.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id            SERIAL PRIMARY KEY,
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    token_hash    TEXT NOT NULL UNIQUE,
+    created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_used_at  TEXT,
+    revoked_at    TEXT
+);
+
 -- A named bundle of page access (e.g. "Coach", "Scorer") — assigned to
 -- users so an admin configures pages once per role instead of once per
 -- person. Replaces the earlier per-user user_pages table: individual page

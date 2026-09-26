@@ -322,24 +322,28 @@ def api_add_roster_entry(
 class RosterEntryUpdate(BaseModel):
     number: str | None = None
     name: str | None = None
+    player_id: int | None = None
 
 
 @app.patch("/teams/{team_id}/roster/{entry_id}", tags=["teams"])
 def api_update_roster_entry(
     team_id: int, entry_id: int, body: RosterEntryUpdate, conn=Depends(get_conn), user=Depends(require_writer)
 ) -> dict:
-    """Renumber and/or rename a roster entry directly — e.g. swap a draft's
-    placeholder jersey number ("TBD3"/"AUTO3") for the real one, without
-    resending the team's whole roster."""
+    """Renumber, rename, and/or (re)link a roster entry to a player profile
+    directly — e.g. swap a draft's placeholder jersey number ("TBD3"/
+    "AUTO3") for the real one, or identify/correct which player a scanned
+    jersey number actually is, without resending the team's whole roster."""
     existing = next((r for r in core.list_roster(conn, team_id) if r["id"] == entry_id), None)
     if existing is None:
         not_found("Roster entry not found on this team.")
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    fields = {k: v for k, v in body.model_dump().items() if v is not None and k != "player_id"}
     if fields:
         try:
             core.update_roster_entry(conn, entry_id, **fields)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    if body.player_id is not None:
+        core.link_roster_entry_to_player(conn, entry_id, body.player_id)
     return next(r for r in core.list_roster(conn, team_id) if r["id"] == entry_id)
 
 

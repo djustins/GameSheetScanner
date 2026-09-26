@@ -99,6 +99,22 @@ def test_roster_entry_renumber_lifecycle(conn, admin_auth, division_id):
     assert missing.status_code == 404
 
 
+def test_roster_entry_update_relinks_player(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    create = client.post(
+        f"/teams/{team_id}/roster", json={"number": "9", "name": "Sidney Crosby"}, auth=admin_auth
+    )
+    entry_id = create.json()["id"]
+    assert create.json()["player_id"] is None
+
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    relinked = client.patch(
+        f"/teams/{team_id}/roster/{entry_id}", json={"player_id": player_id}, auth=admin_auth
+    )
+    assert relinked.status_code == 200
+    assert relinked.json()["player_id"] == player_id
+
+
 def test_roster_entry_delete(conn, admin_auth, division_id):
     team_id = core.add_team(conn, division_id, "Avalanche")
     create = client.post(

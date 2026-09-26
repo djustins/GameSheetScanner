@@ -2509,7 +2509,8 @@ def render_divisions_dialog():
                         experience_notes = core.player_experience_notes(
                             conn, d["id"], [p["id"] for p in division_players]
                         )
-                        st.dataframe(
+                        st.caption("Click a row to open that player's profile below.")
+                        players_table_state = st.dataframe(
                             style_player_notes(pd.DataFrame([
                                 {
                                     "Name": p["name"],
@@ -2522,7 +2523,27 @@ def render_divisions_dialog():
                                 for p in division_players
                             ])),
                             width="stretch", hide_index=True,
+                            on_select="rerun", selection_mode="single-row",
+                            key=f"division_players_table_{d['id']}",
                         )
+                        # Streamlit reports selection.rows as positions in the
+                        # *original* data passed in, not the currently
+                        # displayed sort order, so this lines up with
+                        # division_players even if the user has sorted a
+                        # column by clicking its header.
+                        selected_rows = players_table_state.selection.rows
+                        if selected_rows:
+                            selected_player = division_players[selected_rows[0]]
+                            st.divider()
+                            all_divisions_for_panel = core.list_divisions(conn)
+                            division_name_by_id_for_panel = {
+                                dd["id"]: f"{dd['year']} {dd['season']} — {division_label(dd['age_group'])}"
+                                for dd in all_divisions_for_panel
+                            }
+                            render_player_panel(
+                                conn, selected_player["id"], division_name_by_id_for_panel,
+                                all_divisions_for_panel, key_prefix=f"division_players_panel_{d['id']}",
+                            )
 
                     plan_key = f"player_import_plan_{d['id']}"
                     filename_key = f"player_import_filename_{d['id']}"

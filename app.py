@@ -3374,7 +3374,7 @@ with tab_teams_group:
                                 conn, coach_team_id, coach_team_options[coach_team_id], key_prefix=f"div_coaches_{d['id']}"
                             )
 
-                        with st.expander("📅 Assign Coaches from Last Season"):
+                        with st.expander("📅 Assign Coaches From Last Division"):
                             previous_division = core.find_previous_division(conn, d["id"])
                             if previous_division is None:
                                 st.caption("No earlier division found for this age group yet.")
@@ -3405,8 +3405,25 @@ with tab_teams_group:
                                     }
                                     current_team_options = {t["id"]: t["name"] for t in teams}
                                     for previous_team, coach in carry_rows:
+                                        # Only a coach whose own registered child is signed up
+                                        # for *this* division is a strong "still relevant"
+                                        # signal — a coach whose kid aged into a different
+                                        # division (or who never had a kid registered at all)
+                                        # is greyed out rather than hidden, so the row (and
+                                        # its "was <team>" context) stays visible but its
+                                        # controls are disabled.
+                                        coach_children_here = [
+                                            c for c in core.list_coach_children(conn, coach["id"])
+                                            if c["current_division_id"] == d["id"]
+                                        ]
+                                        is_relevant = bool(coach_children_here)
+
                                         crow1, crow2, crow3 = st.columns([2, 2.2, 1.6])
-                                        crow1.write(f"{coach_label(coach)}  \n*was {previous_team['name']}*")
+                                        label_text = f"{coach_label(coach)}  \n*was {previous_team['name']}*"
+                                        if is_relevant:
+                                            crow1.write(label_text)
+                                        else:
+                                            crow1.caption(label_text + "  \n*no player registered in this division*")
                                         current_team_id_for_coach = current_team_by_coach_id.get(coach["id"])
                                         team_pick_options = {None: "— Select a team —"} | current_team_options
                                         default_idx = (
@@ -3419,6 +3436,7 @@ with tab_teams_group:
                                                 format_func=lambda i: team_pick_options[i], index=default_idx,
                                                 key=f"carry_coach_team_{d['id']}_{coach['id']}",
                                                 label_visibility="collapsed",
+                                                disabled=is_read_only or not is_relevant,
                                             )
                                         with crow3:
                                             acol, rcol = st.columns(2)
@@ -3427,7 +3445,7 @@ with tab_teams_group:
                                                     "Assign", key=f"carry_coach_assign_{d['id']}_{coach['id']}",
                                                     type="primary",
                                                     disabled=(
-                                                        is_read_only or pick_team_id is None
+                                                        is_read_only or not is_relevant or pick_team_id is None
                                                         or pick_team_id == current_team_id_for_coach
                                                     ),
                                                 ):

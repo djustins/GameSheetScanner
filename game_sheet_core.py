@@ -1373,9 +1373,9 @@ _SEASON_ORDER = {"spring": 0, "summer": 1, "fall": 2, "winter": 3}
 def find_previous_division(conn: PGConnection, division_id: int) -> dict | None:
     """The most recent *other* division with the same age group that comes
     chronologically before this one (by year, then season within a year —
-    Spring < Summer < Fall < Winter) — this age group's "last season", for
+    Spring < Summer < Fall < Winter) — this age group's prior division, for
     carrying its coaches forward (see the Divisions page's "Assign Coaches
-    from Last Season"). None if this is the earliest division on record
+    From Last Division"). None if this is the earliest division on record
     for this age group."""
     current = conn.execute(
         "SELECT year, season, age_group FROM divisions WHERE id = %s", (division_id,)

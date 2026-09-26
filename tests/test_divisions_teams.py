@@ -127,6 +127,51 @@ def test_player_experience_notes_omits_players_with_no_history(conn, division_id
     assert core.player_experience_notes(conn, division_id, [player_id]) == {}
 
 
+def test_remove_all_players_from_division_clears_this_divisions_links(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    team2_id = core.add_team(conn, division_id, "Wild")
+    player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.add_roster_entry(conn, team_id, "9", "Sidney Crosby", player_id=player_id)
+    core.add_evaluation(conn, player_id, division_id, team_id, "A")
+    core.set_position(conn, player_id, division_id, team_id, "Forward")
+    core.move_player_to_team(conn, player_id, division_id, team2_id, note="Balancing rosters")
+
+    removed = core.remove_all_players_from_division(conn, division_id)
+    assert removed == 1
+
+    # The player record itself is untouched.
+    player = core.get_player(conn, player_id)
+    assert player is not None
+    assert player["current_division_id"] is None
+
+    assert core.list_roster(conn, team2_id) == []
+    assert core.list_evaluations(conn, player_id) == []
+    assert core.get_positions_for_team(conn, division_id, team_id) == {}
+    assert core.list_player_move_notes(conn, player_id) == []
+
+
+def test_remove_all_players_from_division_keeps_the_player_in_other_divisions(conn, division_id):
+    other_division_id = core.add_division(conn, 2026, "Fall", "Chipmunk")
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    other_team_id = core.add_team(conn, other_division_id, "Blackhawks")
+    player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.add_roster_entry(conn, team_id, "9", "Sidney Crosby", player_id=player_id)
+    core.add_roster_entry(conn, other_team_id, "9", "Sidney Crosby", player_id=player_id)
+    core.add_evaluation(conn, player_id, division_id, None, "A")
+    core.add_evaluation(conn, player_id, other_division_id, None, "B")
+
+    core.remove_all_players_from_division(conn, division_id)
+
+    assert core.get_player(conn, player_id) is not None
+    assert core.list_roster(conn, team_id) == []
+    assert [r["player_id"] for r in core.list_roster(conn, other_team_id)] == [player_id]
+    assert [e["grade"] for e in core.list_evaluations(conn, player_id)] == ["B"]
+
+
+def test_remove_all_players_from_division_returns_zero_when_nothing_to_remove(conn, division_id):
+    assert core.remove_all_players_from_division(conn, division_id) == 0
+
+
 def test_update_team_rejects_duplicate_name_in_same_division(conn, division_id):
     core.add_team(conn, division_id, "Avalanche")
     wild_id = core.add_team(conn, division_id, "Wild")

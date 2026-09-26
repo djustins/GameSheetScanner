@@ -605,6 +605,16 @@ def init_db(dsn: str) -> _ConnWrapper:
     return conn
 
 
+def connect(dsn: str) -> _ConnWrapper:
+    """A plain connection with none of init_db's one-time setup (schema
+    creation, migrations, backfill, purge) — for a caller that opens many
+    short-lived connections against a database some other caller has
+    already run init_db against at least once (e.g. api.py, opening one
+    connection per request), where repeating that setup on every single
+    connection would be wasted work rather than a one-time cost."""
+    return _ConnWrapper(psycopg2.connect(dsn))
+
+
 def get_setting(conn: PGConnection, key: str) -> str | None:
     """A durable (survives a restart) app-level preference, e.g. the
     last-selected Working Division — stored in the database itself rather
@@ -1535,6 +1545,31 @@ def purge_expired_divisions(conn: PGConnection, days: int = 30):
     cutoff = (_utcnow() - timedelta(days=days)).isoformat(timespec="seconds")
     conn.execute("DELETE FROM divisions WHERE deleted_at IS NOT NULL AND deleted_at <= %s", (cutoff,))
     conn.commit()
+
+
+def remove_all_players_from_division(conn: PGConnection, division_id: int) -> int:
+    """Strips every player's link to this division -- e.g. to undo a bad
+    import before trying again. Clears current_division_id wherever it
+    points here, and deletes this division's roster entries (on its
+    teams), evaluations, positions, and move notes -- but never touches
+    the player record itself, so a player who's also registered or
+    rostered in some *other* division keeps that history untouched.
+    Games/schedule data isn't division-player-scoped and is left alone;
+    use delete_draft/undo_auto_draft separately to reset a draft.
+    Returns how many distinct players were affected."""
+    player_ids = {p["id"] for p in list_players_in_division(conn, division_id)}
+    if not player_ids:
+        return 0
+    conn.execute(
+        "DELETE FROM roster_entries WHERE team_id IN (SELECT id FROM teams WHERE division_id = %s)",
+        (division_id,),
+    )
+    conn.execute("DELETE FROM evaluations WHERE division_id = %s", (division_id,))
+    conn.execute("DELETE FROM player_positions WHERE division_id = %s", (division_id,))
+    conn.execute("DELETE FROM player_move_notes WHERE division_id = %s", (division_id,))
+    conn.execute("UPDATE players SET current_division_id = NULL WHERE current_division_id = %s", (division_id,))
+    conn.commit()
+    return len(player_ids)
 
 
 # ---------------------------------------------------------------------------

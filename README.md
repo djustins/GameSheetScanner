@@ -156,6 +156,36 @@ python edit_game.py --list
 python edit_game.py --game-id 5
 ```
 
+### Running the API
+
+`api.py` is an HTTP API over the same `game_sheet_core.py` logic and database —
+a separate service from the Streamlit app, for anything that needs programmatic
+(read or write) access: divisions, teams, coaches, players, rosters, drafts,
+evaluations, schedule/games/stats.
+
+```bash
+pip install -r requirements-api.txt
+export DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+uvicorn api:app --reload
+```
+
+Then open `http://localhost:8000/docs` for interactive API docs (Swagger UI).
+
+Auth is HTTP Basic against the same `users` table the Streamlit app's login
+screen uses — any existing user account works. Writes require the same
+"not read-only" check the app applies (an admin, or a non-read-only role);
+deletes require admin. A move-reason note (`POST /players/{id}/move`) and
+move history (`GET /players/{id}/move-notes`) are admin-only, same as the
+Streamlit app's Team Rosters page.
+
+**Deploying it**: Streamlit Community Cloud only serves the Streamlit process
+itself, so this needs its own host — Render, Fly.io, Railway, a small VM,
+etc. Point its `DATABASE_URL` at the same Aiven Postgres database the
+Streamlit app uses, run `uvicorn api:app --host 0.0.0.0 --port $PORT`, and if
+your Postgres has an `ip_filter` (see "Restricting database access" above),
+add that host's outbound IP the same way you would Streamlit Community
+Cloud's.
+
 ## Running tests
 
 Tests run against `TEST_DATABASE_URL` — a separate *database* on the same Aiven

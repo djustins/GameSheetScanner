@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+anthropic
+pypdf
+psycopg2-binary
+python-dotenv
+bcrypt

@@ -3840,6 +3840,41 @@ with tab_teams_group:
                             st.caption("No schedule uploaded yet for this division.")
 
                         st.divider()
+                        remove_all_result_key = f"remove_all_players_result_{d['id']}"
+                        if remove_all_result_key in st.session_state:
+                            st.success(st.session_state.pop(remove_all_result_key))
+                        bulk_remove_key = f"confirm_remove_all_players_{d['id']}"
+                        if st.button(
+                            "🧹 Remove all players from this division",
+                            key=f"remove_all_players_{d['id']}", disabled=is_read_only,
+                        ):
+                            st.session_state[bulk_remove_key] = True
+                            st.rerun()
+                        if st.session_state.get(bulk_remove_key):
+                            st.warning(
+                                f"Remove every player from {division_title}? Clears their roster spot, "
+                                "evaluations, position, and move notes for this division only — player "
+                                "profiles stay, and any other division they're in is untouched. Useful "
+                                "for undoing a bad import."
+                            )
+                            rcol1, rcol2 = st.columns(2)
+                            with rcol1:
+                                if st.button(
+                                    "Yes, remove all", key=f"confirm_yes_remove_all_{d['id']}",
+                                    type="primary", disabled=is_read_only,
+                                ):
+                                    removed = core.remove_all_players_from_division(conn, d["id"])
+                                    st.session_state.pop(bulk_remove_key, None)
+                                    st.session_state[remove_all_result_key] = (
+                                        f"Removed {removed} player(s) from {division_title}."
+                                    )
+                                    st.rerun()
+                            with rcol2:
+                                if st.button("Cancel", key=f"confirm_no_remove_all_{d['id']}"):
+                                    st.session_state.pop(bulk_remove_key, None)
+                                    st.rerun()
+
+                        st.divider()
                         confirm_key = f"confirm_delete_div_{d['id']}"
                         if st.button("🗑️ Delete division", key=f"delete_div_{d['id']}", disabled=is_read_only):
                             st.session_state[confirm_key] = True

@@ -696,6 +696,7 @@ def zebra_style(df: pd.DataFrame):
 
 PLAYER_EXPERIENCE_NOTE_COLORS = {
     "Moved Up": "#2e7d32", "Has Experience": "#1565c0", "Played Before": "#8d6e63",
+    "Returning": "#37474f", "New": "#6a1b9a",
 }
 
 

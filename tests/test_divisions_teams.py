@@ -77,20 +77,20 @@ def _roster_player(conn, division_id, team_name, player_id):
     core.add_roster_entry(conn, team_id, "1", "Test Player", player_id=player_id)
 
 
-def test_player_experience_notes_none_for_first_division(conn):
+def test_player_experience_notes_new_for_first_division(conn):
     current = core.add_division(conn, 2026, "Summer", "Penguin")
     player_id = core.add_player(conn, "Sidney", "Crosby")
     _roster_player(conn, current, "Avalanche", player_id)
-    assert core.player_experience_notes(conn, current, [player_id]) == {}
+    assert core.player_experience_notes(conn, current, [player_id]) == {player_id: "New"}
 
 
-def test_player_experience_notes_none_when_played_same_age_group_last_season(conn):
+def test_player_experience_notes_returning_when_played_same_age_group_last_season(conn):
     last_season = core.add_division(conn, 2026, "Spring", "Penguin")
     current = core.add_division(conn, 2026, "Summer", "Penguin")
     player_id = core.add_player(conn, "Sidney", "Crosby")
     _roster_player(conn, last_season, "Avalanche", player_id)
     _roster_player(conn, current, "Wild", player_id)
-    assert core.player_experience_notes(conn, current, [player_id]) == {}
+    assert core.player_experience_notes(conn, current, [player_id]) == {player_id: "Returning"}
 
 
 def test_player_experience_notes_moved_up_from_lower_age_group(conn):
@@ -122,9 +122,9 @@ def test_player_experience_notes_has_experience_for_multiple_other_divisions(con
     assert core.player_experience_notes(conn, current, [player_id]) == {player_id: "Has Experience"}
 
 
-def test_player_experience_notes_omits_players_with_no_history(conn, division_id):
+def test_player_experience_notes_new_for_players_with_no_history(conn, division_id):
     player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
-    assert core.player_experience_notes(conn, division_id, [player_id]) == {}
+    assert core.player_experience_notes(conn, division_id, [player_id]) == {player_id: "New"}
 
 
 def test_remove_all_players_from_division_clears_this_divisions_links(conn, division_id):

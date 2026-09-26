@@ -1528,11 +1528,10 @@ def _find_division_id(conn: PGConnection, year: int, season: str, age_group: str
 
 
 def player_experience_notes(conn: PGConnection, division_id: int, player_ids: list[int]) -> dict[int, str]:
-    """A short highlighted note about each player's playing history
-    relative to this division, based on player_division_histories (i.e.
-    actually rostered on a team, not just registered) — player_id -> note,
-    omitting anyone with nothing to call out (no history, or they played
-    the expected prior season already).
+    """A short note about each player's playing history relative to this
+    division, based on player_division_histories (i.e. actually rostered
+    on a team, not just registered) — every id in player_ids gets exactly
+    one of the following (never omitted):
 
     - "Moved Up": didn't play this same age group last season, but did
       play the division one age group down last season — the normal
@@ -1542,16 +1541,17 @@ def player_experience_notes(conn: PGConnection, division_id: int, player_ids: li
       "Moved Up" doesn't apply.
     - "Played Before": exactly one other division of history, when
       neither of the above applies.
-
-    Nothing is returned for a player who played this same age group last
-    season (the ordinary, unremarkable case) or has no history at all."""
+    - "Returning": played this same age group last season — the
+      ordinary, expected continuing case.
+    - "New": no history in any other division at all."""
+    notes: dict[int, str] = {}
     if not player_ids:
-        return {}
+        return notes
     current = conn.execute(
         "SELECT year, season, age_group FROM divisions WHERE id = %s", (division_id,)
     ).fetchone()
     if current is None:
-        return {}
+        return {player_id: "New" for player_id in player_ids}
     year, season, age_group = current
     prev_year, prev_season = _previous_season(year, season)
 
@@ -1562,14 +1562,13 @@ def player_experience_notes(conn: PGConnection, division_id: int, player_ids: li
     )
 
     histories = player_division_histories(conn, player_ids)
-    notes: dict[int, str] = {}
     for player_id in player_ids:
         other_ids = {h["division_id"] for h in histories.get(player_id, []) if h["division_id"] != division_id}
         if not other_ids:
-            continue
-        if same_age_last_season_id is not None and same_age_last_season_id in other_ids:
-            continue
-        if lower_division_id is not None and lower_division_id in other_ids:
+            notes[player_id] = "New"
+        elif same_age_last_season_id is not None and same_age_last_season_id in other_ids:
+            notes[player_id] = "Returning"
+        elif lower_division_id is not None and lower_division_id in other_ids:
             notes[player_id] = "Moved Up"
         elif len(other_ids) >= 2:
             notes[player_id] = "Has Experience"

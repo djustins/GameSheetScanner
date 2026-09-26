@@ -3147,7 +3147,18 @@ with tab_teams_group:
                             st.caption("No coaches assigned to any team in this division yet.")
                         else:
                             st.dataframe(zebra_style(pd.DataFrame(coach_rows)), width="stretch", hide_index=True)
-                        st.caption("Assign or change a team's coach(es) above, or from Team Rosters.")
+
+                        if not teams:
+                            st.caption("Add a team above first, then a coach can be assigned to it.")
+                        else:
+                            coach_team_options = {t["id"]: t["name"] for t in teams}
+                            coach_team_id = st.selectbox(
+                                "Manage coaches for", options=list(coach_team_options),
+                                format_func=lambda i: coach_team_options[i], key=f"div_coach_team_pick_{d['id']}",
+                            )
+                            render_team_coach_manager(
+                                conn, coach_team_id, coach_team_options[coach_team_id], key_prefix=f"div_coaches_{d['id']}"
+                            )
 
                         st.divider()
                         st.subheader("Players")

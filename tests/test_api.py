@@ -117,6 +117,23 @@ def test_division_players_endpoint_includes_grade_and_note(conn, admin_auth, div
     assert players[0]["grade"] == "A"
 
 
+def test_division_players_endpoint_excludes_sub_placeholder(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    real_player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    sub_player_id = core.add_player(conn, "Sub", current_division_id=division_id)
+    core.add_roster_entry(conn, team_id, "99", "Sub", player_id=sub_player_id)
+
+    response = client.get(f"/divisions/{division_id}/players", auth=admin_auth)
+    assert response.status_code == 200
+    ids = [p["id"] for p in response.json()]
+    assert real_player_id in ids
+    assert sub_player_id not in ids
+
+    # Sub still shows up on the team's own roster.
+    roster = client.get(f"/teams/{team_id}/roster", auth=admin_auth)
+    assert sub_player_id in [r["player_id"] for r in roster.json()]
+
+
 def test_api_token_lifecycle(conn, admin_auth):
     create = client.post("/tokens", json={"name": "My Laptop"}, auth=admin_auth)
     assert create.status_code == 201

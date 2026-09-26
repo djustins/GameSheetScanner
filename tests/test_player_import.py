@@ -137,7 +137,33 @@ def test_matching_name_but_conflicting_birth_date_is_flagged_not_auto_merged(con
     assert entry["status"] == "conflict"
     assert entry["matched_player_id"] == player_id
     assert entry["resolved_action"] is None  # needs a human decision
-    assert entry["conflict_detail"] == {"existing": "2016-08-07", "incoming": "2015-01-01"}
+    assert entry["conflict_detail"] == {
+        "existing": "2016-08-07", "incoming": "2015-01-01", "sibling_match": None,
+    }
+
+
+def test_conflict_flags_when_incoming_birth_date_matches_a_sibling(conn, division_id):
+    # Simulates the real-world bug this caught: two siblings' birth dates
+    # swapped in a re-import, so each row's "conflicting" date is actually
+    # the *other* sibling's real one -- a strong sign it's a data swap, not
+    # a different person, that the reviewer should be warned about.
+    sibling_id = core.add_player(
+        conn, "Leah", "Pratti", birth_date="2018-05-04",
+        contact_first_name="Dave", contact_last_name="Pratti", contact_email="dave@example.com",
+    )
+    player_id = core.add_player(
+        conn, "David", "Pratti", birth_date="2020-03-13",
+        contact_first_name="Dave", contact_last_name="Pratti", contact_email="dave@example.com",
+    )
+    assert core.get_player(conn, sibling_id)["parent_id"] == core.get_player(conn, player_id)["parent_id"]
+
+    columns = core.detect_player_import_columns(["Player Name", "Date Of Birth"])
+    plan = core.build_player_import_plan(
+        conn, division_id, [{"Player Name": "David Pratti", "Date Of Birth": "2018-05-04"}], columns
+    )
+    entry = plan[0]
+    assert entry["status"] == "conflict"
+    assert entry["conflict_detail"]["sibling_match"] == "Leah Pratti"
 
 
 def test_same_name_no_birth_date_info_is_not_a_conflict(conn, division_id):

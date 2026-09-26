@@ -651,9 +651,9 @@ PAGES = {
     "stats": "Stats & Standings → Player Stats",
     "rosters": "Teams → Team Rosters",
     "teams": "Teams → Teams",
-    "players": "Teams → Players",
+    "players": "All Players",
     "coaches": "Teams → Coaches",
-    "divisions": "Teams → Divisions",
+    "divisions": "Divisions",
     "draft": "Teams → Draft",
 }
 
@@ -3081,7 +3081,12 @@ def build_player_import_plan(conn: PGConnection, division_id: int, rows: list[di
         "conflict_detail")
       "matched_player_id": set for "update" (auto-resolved) only
       "candidates": the competing existing players, for "ambiguous"
-      "conflict_detail": {"existing": ..., "incoming": ...} birth dates, for "conflict"
+      "conflict_detail": {"existing": ..., "incoming": ..., "sibling_match": ...}
+        birth dates for "conflict" -- "sibling_match" is a sibling's name
+        when the incoming date exactly matches one of the matched player's
+        siblings (same parent), a strong sign the file swapped two kids'
+        dates rather than this genuinely being a different birth date; None
+        otherwise
       "resolved_action": None for "ambiguous"/"conflict" until a caller
         (the UI) sets it to "use_existing" (with "resolved_player_id" set)
         or "create_new"; pre-set to "create"/"update" for the other two
@@ -3132,9 +3137,22 @@ def build_player_import_plan(conn: PGConnection, division_id: int, rows: list[di
         elif len(candidates) == 1:
             match = candidates[0]
             if entry["birth_date"] and match["birth_date"] and entry["birth_date"] != match["birth_date"]:
+                # The incoming birth date exactly matching one of this
+                # player's *siblings* (same parent) is a strong signal that
+                # two kids' dates got swapped/transposed in the source file
+                # -- e.g. "David" and "Leah" imported with each other's DOB
+                # -- rather than this genuinely being a different birth
+                # date. Surfaced to the reviewer so "Different person" isn't
+                # picked by mistake for what's actually the same kid.
+                sibling_match = next(
+                    (s for s in list_siblings(conn, match["id"]) if s["birth_date"] == entry["birth_date"]), None
+                )
                 entry.update(
                     status="conflict", matched_player_id=match["id"], candidates=[match],
-                    conflict_detail={"existing": match["birth_date"], "incoming": entry["birth_date"]},
+                    conflict_detail={
+                        "existing": match["birth_date"], "incoming": entry["birth_date"],
+                        "sibling_match": sibling_match["name"] if sibling_match else None,
+                    },
                     resolved_action=None, resolved_player_id=None,
                 )
             else:

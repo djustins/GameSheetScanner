@@ -214,7 +214,11 @@ def api_division_teams(division_id: int, conn=Depends(get_conn), user=Depends(ge
 
 @app.get("/divisions/{division_id}/players", tags=["divisions"])
 def api_division_players(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
-    players = core.list_players_in_division(conn, division_id)
+    """Excludes "Sub"/"SUB" placeholder players (one per team, for
+    attributing stats to an unidentified substitute rather than a real
+    person) -- a purely statistical bucket, not someone worth listing at
+    the division level. They still appear in GET /teams/{id}/roster."""
+    players = [p for p in core.list_players_in_division(conn, division_id) if p["name"].strip().lower() != "sub"]
     grades = core.get_latest_grades(conn, division_id, [p["id"] for p in players])
     notes = core.player_experience_notes(conn, division_id, [p["id"] for p in players])
     for p in players:

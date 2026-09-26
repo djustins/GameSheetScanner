@@ -81,3 +81,53 @@ def test_remove_coach_from_team(conn, division_id):
     core.assign_coach_to_team(conn, team_id, coach_id)
     core.remove_coach_from_team(conn, team_id, coach_id)
     assert core.list_team_coaches(conn, team_id) == []
+
+
+def test_find_coach_children_in_division_prefers_explicit_link(conn, division_id):
+    coach_id = core.add_coach(conn, "Robert", "Dobson")
+    player_id = core.add_player(conn, "Austin", "Dobson", current_division_id=division_id)
+    core.link_coach_child(conn, coach_id, player_id)
+    result = core.find_coach_children_in_division(conn, coach_id, division_id)
+    assert [p["id"] for p in result] == [player_id]
+
+
+def test_find_coach_children_in_division_falls_back_to_name_match_and_links_it(conn, division_id):
+    coach_id = core.add_coach(conn, "Robert", "Dobson")
+    player_id = core.add_player(
+        conn, "Austin", "Dobson", current_division_id=division_id,
+        contact_first_name="Robert", contact_last_name="Dobson",
+    )
+    result = core.find_coach_children_in_division(conn, coach_id, division_id)
+    assert [p["id"] for p in result] == [player_id]
+    # The match becomes an explicit link -- confirmed by list_coach_children
+    # (which never does name-matching itself) now finding it too.
+    assert [c["id"] for c in core.list_coach_children(conn, coach_id)] == [player_id]
+
+
+def test_find_coach_children_in_division_name_match_is_case_insensitive(conn, division_id):
+    coach_id = core.add_coach(conn, "Robert", "Dobson")
+    player_id = core.add_player(
+        conn, "Austin", "Dobson", current_division_id=division_id,
+        contact_first_name="robert", contact_last_name="DOBSON",
+    )
+    result = core.find_coach_children_in_division(conn, coach_id, division_id)
+    assert [p["id"] for p in result] == [player_id]
+
+
+def test_find_coach_children_in_division_returns_empty_when_no_match(conn, division_id):
+    coach_id = core.add_coach(conn, "Robert", "Dobson")
+    core.add_player(
+        conn, "Austin", "Someone", current_division_id=division_id,
+        contact_first_name="Jane", contact_last_name="Someone",
+    )
+    assert core.find_coach_children_in_division(conn, coach_id, division_id) == []
+
+
+def test_find_coach_children_in_division_ignores_matches_in_other_divisions(conn, division_id):
+    other_division_id = core.add_division(conn, 2026, "Summer", "Chipmunk")
+    coach_id = core.add_coach(conn, "Robert", "Dobson")
+    core.add_player(
+        conn, "Austin", "Dobson", current_division_id=other_division_id,
+        contact_first_name="Robert", contact_last_name="Dobson",
+    )
+    assert core.find_coach_children_in_division(conn, coach_id, division_id) == []

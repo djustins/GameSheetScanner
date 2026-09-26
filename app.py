@@ -1601,12 +1601,26 @@ def render_player_panel(
     if working_division_id is None:
         st.caption("Select a Working Division above to set this player's Season Grade.")
     else:
-        season_grade_input(
-            conn, player_id, working_division_id, None, key=f"{key_prefix}_season_grade_{player_id}",
-            help="This player's grade for the current Working Division — editing it here updates their "
-                 "most recent evaluation for that division instead of adding a new one to its history.",
-            disabled=is_read_only,
-        )
+        current_working_grade = core.get_season_grade(conn, player_id, working_division_id)
+        sg_col1, sg_col2 = st.columns([3, 1])
+        with sg_col1:
+            season_grade_input(
+                conn, player_id, working_division_id, None, key=f"{key_prefix}_season_grade_{player_id}",
+                prefetched=current_working_grade,
+                help="This player's grade for the current Working Division — editing it here updates "
+                     "their most recent evaluation for that division instead of adding a new one to its "
+                     "history. Use New Grade instead to start a fresh evaluation.",
+                disabled=is_read_only,
+            )
+        with sg_col2:
+            if st.button(
+                "➕ New Grade", key=f"{key_prefix}_new_grade_{player_id}",
+                disabled=is_read_only or not current_working_grade,
+                help="Starts a fresh evaluation for the current Working Division, keeping the existing "
+                     "one in this player's history instead of overwriting it.",
+            ):
+                core.add_evaluation(conn, player_id, working_division_id, None, "")
+                st.rerun()
 
     show_nav = nav_ids is not None and nav_pending_key is not None
     nav_idx = nav_ids.index(player_id) if show_nav and player_id in nav_ids else None
@@ -3215,11 +3229,12 @@ with tab_teams_group:
                 for d in divisions:
                     division_title = f"{d['year']} {d['season']} — {division_label(d['age_group'])}"
                     with st.expander(division_title):
-                        # Fetched once per division and reused by both the Teams
-                        # section's per-team grade breakdown and the Players
-                        # section's Grade column below, instead of a
-                        # get_season_grade() round trip per player.
+                        # Fetched once per division and reused by the Teams section's
+                        # per-team grade breakdown, the Players section's Grade column
+                        # and table below, and the coach-carryover panel's child-name
+                        # matching/picker, instead of separate round trips for each.
                         division_grades_by_player = core.get_season_grades_for_division(conn, d["id"])
+                        division_players = core.list_players_in_division(conn, d["id"])
 
                         st.subheader("Teams")
                         teams = core.list_teams(conn, d["id"])
@@ -3405,17 +3420,16 @@ with tab_teams_group:
                                     }
                                     current_team_options = {t["id"]: t["name"] for t in teams}
                                     for previous_team, coach in carry_rows:
-                                        # Only a coach whose own registered child is signed up
-                                        # for *this* division is a strong "still relevant"
-                                        # signal — a coach whose kid aged into a different
-                                        # division (or who never had a kid registered at all)
-                                        # is greyed out rather than hidden, so the row (and
-                                        # its "was <team>" context) stays visible but its
-                                        # controls are disabled.
-                                        coach_children_here = [
-                                            c for c in core.list_coach_children(conn, coach["id"])
-                                            if c["current_division_id"] == d["id"]
-                                        ]
+                                        # A coach almost always has a kid playing here -- that's
+                                        # usually why they were coaching. find_coach_children_in_division
+                                        # checks the explicit link first, then falls back to a
+                                        # name match against this division's players (auto-linking
+                                        # it if found). Only when *neither* finds anything do we
+                                        # grey the row out and ask directly who their child is,
+                                        # rather than silently guessing.
+                                        coach_children_here = core.find_coach_children_in_division(
+                                            conn, coach["id"], d["id"]
+                                        )
                                         is_relevant = bool(coach_children_here)
 
                                         crow1, crow2, crow3 = st.columns([2, 2.2, 1.6])
@@ -3424,6 +3438,37 @@ with tab_teams_group:
                                             crow1.write(label_text)
                                         else:
                                             crow1.caption(label_text + "  \n*no player registered in this division*")
+                                            with crow1.popover("❓ Who is their child?"):
+                                                st.caption(
+                                                    f"Which player in this division is "
+                                                    f"{coach_label(coach)}'s child?"
+                                                )
+                                                child_needle = st.text_input(
+                                                    "Search by name",
+                                                    key=f"carry_child_search_{d['id']}_{coach['id']}",
+                                                )
+                                                needle_norm = child_needle.strip().lower()
+                                                child_matches = [
+                                                    p for p in division_players
+                                                    if not needle_norm or needle_norm in p["name"].lower()
+                                                ]
+                                                if not child_matches:
+                                                    st.caption("No matching players.")
+                                                else:
+                                                    child_options = {p["id"]: p["name"] for p in child_matches}
+                                                    child_pick_id = st.selectbox(
+                                                        "Player", options=list(child_options),
+                                                        format_func=lambda i: child_options[i],
+                                                        key=f"carry_child_pick_{d['id']}_{coach['id']}",
+                                                        label_visibility="collapsed",
+                                                    )
+                                                    if st.button(
+                                                        "Link as child",
+                                                        key=f"carry_child_link_{d['id']}_{coach['id']}",
+                                                        type="primary", disabled=is_read_only,
+                                                    ):
+                                                        core.link_coach_child(conn, coach["id"], child_pick_id)
+                                                        st.rerun()
                                         current_team_id_for_coach = current_team_by_coach_id.get(coach["id"])
                                         team_pick_options = {None: "— Select a team —"} | current_team_options
                                         default_idx = (
@@ -3473,7 +3518,6 @@ with tab_teams_group:
 
                         st.divider()
                         st.subheader("Players")
-                        division_players = core.list_players_in_division(conn, d["id"])
                         if not division_players:
                             st.caption("No players signed up or rostered in this division yet.")
                         else:

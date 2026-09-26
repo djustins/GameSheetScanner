@@ -2344,6 +2344,37 @@ def coach_ids_with_children(conn: PGConnection) -> set[int]:
     return {r[0] for r in rows}
 
 
+def find_coach_children_in_division(conn: PGConnection, coach_id: int, division_id: int) -> list[dict]:
+    """This coach's registered child(ren) currently in this division —
+    the explicit coach_children link if one exists there; otherwise a
+    best-effort fallback that looks for a player registered in this
+    division (current_division_id) whose contact name matches the
+    coach's own name and, if found, links them (see link_coach_child) so
+    the match becomes an explicit, authoritative one from here on. This
+    mirrors get_or_create_parent's contact-based auto-matching, just
+    starting from the coach's own name instead of a shared parent —
+    used by the Divisions page's coach-carryover panel so a returning
+    coach whose kid is obviously registered under a matching name isn't
+    wrongly treated as unrelated just because nobody's linked them yet.
+    Still returns [] (never guesses) when no name matches, so the
+    caller can prompt to link one manually instead."""
+    explicit = [c for c in list_coach_children(conn, coach_id) if c["current_division_id"] == division_id]
+    if explicit:
+        return explicit
+
+    coach = get_coach(conn, coach_id)
+    coach_key = (normalize_text(coach["first_name"]), normalize_text(coach["last_name"])) if coach else (None, None)
+    if not coach_key[0]:
+        return []
+
+    for p in list_players_in_division(conn, division_id):
+        player_key = (normalize_text(p.get("contact_first_name")), normalize_text(p.get("contact_last_name")))
+        if player_key == coach_key:
+            link_coach_child(conn, coach_id, p["id"])
+            return [p]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Auto-draft — a one-shot alternative to the live pick-by-pick draft above
 # (start_draft/submit_draft_pick), which assigns the *entire* pool onto

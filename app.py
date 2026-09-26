@@ -1780,6 +1780,46 @@ if "user" not in st.session_state:
             st.rerun()
         else:
             st.error("Incorrect email or password.")
+            # A wrong password is very often just Caps Lock — Python has no
+            # way to read that (it's purely a client-side keyboard state),
+            # so this injects a live warning that appears under the
+            # password field the moment it's on, the next time they type.
+            # Same iframe-reaching pattern as the Home page's card-click
+            # wiring below, and for the same reason: Streamlit itself can't
+            # attach a plain <script> via st.markdown.
+            components.html(
+                """
+                <script>
+                (function() {
+                    function wire() {
+                        var doc = window.parent.document;
+                        doc.querySelectorAll('input[type="password"]').forEach(function(input) {
+                            if (input.getAttribute('data-capslock-wired')) return;
+                            input.setAttribute('data-capslock-wired', '1');
+
+                            var warning = doc.createElement('div');
+                            warning.textContent = '⚠️ Caps Lock is on';
+                            warning.style.color = '#e8a33d';
+                            warning.style.fontSize = '0.85rem';
+                            warning.style.marginTop = '0.25rem';
+                            warning.style.display = 'none';
+                            input.insertAdjacentElement('afterend', warning);
+
+                            function checkCapsLock(e) {
+                                var isOn = e.getModifierState && e.getModifierState('CapsLock');
+                                warning.style.display = isOn ? 'block' : 'none';
+                            }
+                            input.addEventListener('keydown', checkCapsLock);
+                            input.addEventListener('keyup', checkCapsLock);
+                        });
+                    }
+                    wire();
+                    new MutationObserver(wire).observe(window.parent.document.body, {childList: true, subtree: true});
+                })();
+                </script>
+                """,
+                height=0,
+            )
     st.stop()
 
 user = st.session_state["user"]
@@ -3167,15 +3207,34 @@ with tab_teams_group:
                                                         st.rerun()
 
                         with st.popover("➕ Add a team"):
-                            new_div_team_name = st.text_input(
-                                "Team name", key=f"new_div_team_name_{d['id']}", disabled=is_read_only
+                            new_div_team_count = st.number_input(
+                                "How many teams?", min_value=1, max_value=20, value=1, step=1,
+                                key=f"new_div_team_count_{d['id']}", disabled=is_read_only,
                             )
-                            if st.button("Add team", key=f"add_div_team_btn_{d['id']}", disabled=is_read_only):
-                                if new_div_team_name.strip():
-                                    core.add_team(conn, d["id"], new_div_team_name.strip())
-                                    st.rerun()
+                            if new_div_team_count == 1:
+                                new_div_team_name = st.text_input(
+                                    "Team name", key=f"new_div_team_name_{d['id']}", disabled=is_read_only
+                                )
+                            else:
+                                st.caption(
+                                    f"Creates {int(new_div_team_count)} teams named "
+                                    f"Team1, Team2, ... Team{int(new_div_team_count)} — rename them "
+                                    "individually afterward (⚙️ on each team above)."
+                                )
+                            if st.button(
+                                "Add team" if new_div_team_count == 1 else "Add teams",
+                                key=f"add_div_team_btn_{d['id']}", disabled=is_read_only,
+                            ):
+                                if new_div_team_count == 1:
+                                    if new_div_team_name.strip():
+                                        core.add_team(conn, d["id"], new_div_team_name.strip())
+                                        st.rerun()
+                                    else:
+                                        st.error("Team name is required.")
                                 else:
-                                    st.error("Team name is required.")
+                                    for team_num in range(1, int(new_div_team_count) + 1):
+                                        core.add_team(conn, d["id"], f"Team{team_num}")
+                                    st.rerun()
 
                         st.divider()
                         st.subheader("Coaches")

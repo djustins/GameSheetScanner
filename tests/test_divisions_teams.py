@@ -40,6 +40,38 @@ def test_same_team_name_in_different_divisions_is_separate(conn, division_id):
     assert team1 != team2
 
 
+def test_find_previous_division_picks_the_immediately_prior_season(conn):
+    spring = core.add_division(conn, 2026, "Spring", "Penguin")
+    summer = core.add_division(conn, 2026, "Summer", "Penguin")
+    fall = core.add_division(conn, 2026, "Fall", "Penguin")
+
+    assert core.find_previous_division(conn, summer)["id"] == spring
+    assert core.find_previous_division(conn, fall)["id"] == summer
+
+
+def test_find_previous_division_compares_year_before_season(conn):
+    last_year_winter = core.add_division(conn, 2025, "Winter", "Penguin")
+    this_year_spring = core.add_division(conn, 2026, "Spring", "Penguin")
+    assert core.find_previous_division(conn, this_year_spring)["id"] == last_year_winter
+
+
+def test_find_previous_division_ignores_other_age_groups(conn):
+    core.add_division(conn, 2026, "Spring", "Chipmunk")
+    summer_penguin = core.add_division(conn, 2026, "Summer", "Penguin")
+    assert core.find_previous_division(conn, summer_penguin) is None
+
+
+def test_find_previous_division_returns_none_for_the_earliest_division(conn, division_id):
+    assert core.find_previous_division(conn, division_id) is None
+
+
+def test_find_previous_division_ignores_deleted_divisions(conn):
+    spring = core.add_division(conn, 2026, "Spring", "Penguin")
+    summer = core.add_division(conn, 2026, "Summer", "Penguin")
+    core.soft_delete_division(conn, spring)
+    assert core.find_previous_division(conn, summer) is None
+
+
 def test_update_team_rejects_duplicate_name_in_same_division(conn, division_id):
     core.add_team(conn, division_id, "Avalanche")
     wild_id = core.add_team(conn, division_id, "Wild")

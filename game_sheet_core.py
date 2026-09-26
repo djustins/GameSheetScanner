@@ -600,6 +600,7 @@ def init_db(dsn: str) -> _ConnWrapper:
     conn = _ConnWrapper(psycopg2.connect(dsn))
     _apply_schema(conn)
     _migrate_legacy_names(conn)
+    backfill_player_parents(conn)
     purge_expired_divisions(conn)
     return conn
 
@@ -1366,6 +1367,39 @@ def add_division(conn: PGConnection, year: int, season: str, age_group: str,
     ).fetchone()[0]
 
 
+_SEASON_ORDER = {"spring": 0, "summer": 1, "fall": 2, "winter": 3}
+
+
+def find_previous_division(conn: PGConnection, division_id: int) -> dict | None:
+    """The most recent *other* division with the same age group that comes
+    chronologically before this one (by year, then season within a year —
+    Spring < Summer < Fall < Winter) — this age group's "last season", for
+    carrying its coaches forward (see the Divisions page's "Assign Coaches
+    from Last Season"). None if this is the earliest division on record
+    for this age group."""
+    current = conn.execute(
+        "SELECT year, season, age_group FROM divisions WHERE id = %s", (division_id,)
+    ).fetchone()
+    if current is None:
+        return None
+    year, season, age_group = current
+    current_key = (year, _SEASON_ORDER.get((season or "").lower(), 99))
+
+    best, best_key = None, None
+    for row in conn.execute(
+        "SELECT id, year, season, age_group, category FROM divisions "
+        "WHERE age_group = %s AND id != %s AND deleted_at IS NULL",
+        (age_group, division_id),
+    ).fetchall():
+        key = (row[1], _SEASON_ORDER.get((row[2] or "").lower(), 99))
+        if key < current_key and (best_key is None or key > best_key):
+            best, best_key = row, key
+
+    if best is None:
+        return None
+    return {"id": best[0], "year": best[1], "season": display_text(best[2]), "age_group": best[3], "category": best[4]}
+
+
 def resolve_division_id(conn: PGConnection, working_division_id: int, age_group: str | None) -> int:
     """Find-or-create the division that a game actually belongs to: the same
     year/season as the working division, but this game's own age group
@@ -1585,11 +1619,13 @@ def list_players(conn: PGConnection, include_deleted: bool = False) -> list[dict
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(
         f"""SELECT id, first_name, last_name, nickname, birth_date, current_division_id,
-                   contact_first_name, contact_last_name, contact_phone, contact_email, deleted_at
+                   contact_first_name, contact_last_name, contact_phone, contact_email, deleted_at,
+                   parent_id
             FROM players {where} ORDER BY last_name, first_name"""
     ).fetchall()
     cols = ["id", "first_name", "last_name", "nickname", "birth_date", "current_division_id",
-            "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "deleted_at"]
+            "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "deleted_at",
+            "parent_id"]
     players = [dict(zip(cols, r)) for r in rows]
     # "name" is a derived display convenience (not a real column — see
     # first_name/last_name above), kept so the many read-only call sites
@@ -1649,20 +1685,145 @@ def list_players_in_division(conn: PGConnection, division_id: int) -> list[dict]
     return result
 
 
+# ---------------------------------------------------------------------------
+# Parents — a shared entity multiple children (players) can link to, so
+# "siblings" is simply "players who share a parent" rather than a pairwise
+# link that gets awkward past two kids. Auto-matched from contact info on
+# add/update (see get_or_create_parent, called from add_player/
+# update_player) and backfilled once for players who predate this feature
+# (see backfill_player_parents, run automatically by init_db) — a
+# best-effort match, not a guarantee, correctable from the player's own
+# profile via set_player_parent.
+# ---------------------------------------------------------------------------
+
+def _normalize_phone(phone: str | None) -> str | None:
+    """Digits only, so "412-555-0100", "(412) 555-0100", and "4125550100"
+    all compare equal."""
+    if not phone:
+        return None
+    digits = "".join(c for c in phone if c.isdigit())
+    return digits or None
+
+
+def get_or_create_parent(
+    conn: PGConnection, first_name: str | None, last_name: str | None,
+    phone: str | None, email: str | None,
+) -> int | None:
+    """Find-or-create the parent/guardian identified by this contact info.
+    Matches, in priority order (whichever this contact info actually has),
+    on email, then phone, then first+last name — all case/formatting-
+    insensitive. Returns None if there's not enough identifying info to
+    safely match or create one at all (no name, no phone, no email)."""
+    email_norm = normalize_text(email) or None
+    phone_norm = _normalize_phone(phone)
+    first_norm = normalize_text(first_name) or None
+    last_norm = normalize_text(last_name) or None
+
+    if not (email_norm or phone_norm or first_norm or last_norm):
+        return None
+
+    if email_norm:
+        row = conn.execute("SELECT id FROM parents WHERE LOWER(email) = %s", (email_norm,)).fetchone()
+        if row:
+            return row[0]
+    if phone_norm:
+        for pid, existing_phone in conn.execute(
+            "SELECT id, phone FROM parents WHERE phone IS NOT NULL"
+        ).fetchall():
+            if _normalize_phone(existing_phone) == phone_norm:
+                return pid
+    if first_norm and last_norm:
+        row = conn.execute(
+            "SELECT id FROM parents WHERE LOWER(first_name) = %s AND LOWER(last_name) = %s",
+            (first_norm, last_norm),
+        ).fetchone()
+        if row:
+            return row[0]
+
+    cur = conn.execute(
+        "INSERT INTO parents (first_name, last_name, phone, email) VALUES (%s, %s, %s, %s) RETURNING id",
+        (
+            first_name.strip() if first_name else None, last_name.strip() if last_name else None,
+            phone.strip() if phone else None, email.strip() if email else None,
+        ),
+    )
+    parent_id = cur.fetchone()[0]
+    conn.commit()
+    return parent_id
+
+
+def list_parents(conn: PGConnection) -> list[dict]:
+    """Every parent on file — for a "search existing parent" picker when
+    manually linking/correcting a player's parent."""
+    rows = conn.execute(
+        "SELECT id, first_name, last_name, phone, email FROM parents ORDER BY last_name, first_name"
+    ).fetchall()
+    cols = ["id", "first_name", "last_name", "phone", "email"]
+    parents = [dict(zip(cols, r)) for r in rows]
+    for p in parents:
+        p["name"] = full_name(p["first_name"], p["last_name"]) or "(no name on file)"
+    return parents
+
+
+def set_player_parent(conn: PGConnection, player_id: int, parent_id: int | None):
+    """Manually link (parent_id given) or unlink (parent_id=None) a player
+    to a parent/sibling-group — for correcting a get_or_create_parent
+    auto-match that got it wrong, or linking two profiles that weren't
+    automatically matched (e.g. no contact info on file for one of them)."""
+    conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, player_id))
+    conn.commit()
+
+
+def list_siblings(conn: PGConnection, player_id: int) -> list[dict]:
+    """Other non-deleted players who share this player's parent — empty if
+    this player has no parent linked yet."""
+    player = get_player(conn, player_id)
+    if not player or not player.get("parent_id"):
+        return []
+    return [p for p in list_players(conn) if p["parent_id"] == player["parent_id"] and p["id"] != player_id]
+
+
+def backfill_player_parents(conn: PGConnection) -> int:
+    """One-time (but safe to re-run — skips anyone already linked) pass
+    matching every player who has contact info on file but no parent_id
+    yet, for players added before this feature existed. Run automatically
+    by init_db. Returns how many were newly linked."""
+    linked = 0
+    for p in list_players(conn, include_deleted=True):
+        if p.get("parent_id"):
+            continue
+        parent_id = get_or_create_parent(
+            conn, p.get("contact_first_name"), p.get("contact_last_name"),
+            p.get("contact_phone"), p.get("contact_email"),
+        )
+        if parent_id:
+            conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, p["id"]))
+            linked += 1
+    conn.commit()
+    return linked
+
+
 def add_player(
     conn: PGConnection, first_name: str, last_name: str | None = None, nickname: str | None = None,
     birth_date: str | None = None, current_division_id: int | None = None,
     contact_first_name: str | None = None, contact_last_name: str | None = None,
     contact_phone: str | None = None, contact_email: str | None = None,
 ) -> int:
+    # Auto-links this player to a parent/sibling-group matched (or created)
+    # from the contact info given here — see get_or_create_parent(). A
+    # best-effort match, not a guarantee (correctable afterward from the
+    # player's profile), which is why this never blocks on it and just
+    # takes whatever comes back, including None.
+    parent_id = get_or_create_parent(conn, contact_first_name, contact_last_name, contact_phone, contact_email)
     cur = conn.execute(
         """INSERT INTO players
            (first_name, last_name, nickname, birth_date, current_division_id, contact_first_name,
-            contact_last_name, contact_phone, contact_email)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            contact_last_name, contact_phone, contact_email, parent_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id""",
         (first_name.strip(), (last_name or "").strip() or None, (nickname or "").strip() or None,
-         birth_date, current_division_id, contact_first_name, contact_last_name, contact_phone, contact_email),
+         birth_date, current_division_id, contact_first_name, contact_last_name, contact_phone, contact_email,
+         parent_id),
     )
     player_id = cur.fetchone()[0]
     conn.commit()
@@ -1671,7 +1832,12 @@ def add_player(
 
 def update_player(conn: PGConnection, player_id: int, **fields):
     """Update any subset of a player's profile fields, e.g.
-    update_player(conn, 5, first_name="Alex", contact_phone="412-555-0100")."""
+    update_player(conn, 5, first_name="Alex", contact_phone="412-555-0100").
+
+    Touching any contact_* field re-derives parent_id too (merged with
+    whichever contact fields aren't part of this update), so editing just
+    the phone number, say, still matches/creates the right parent using
+    the name already on file rather than losing that context."""
     allowed = {
         "first_name", "last_name", "nickname", "birth_date", "current_division_id",
         "contact_first_name", "contact_last_name", "contact_phone", "contact_email",
@@ -1679,6 +1845,11 @@ def update_player(conn: PGConnection, player_id: int, **fields):
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
+    contact_fields = ("contact_first_name", "contact_last_name", "contact_phone", "contact_email")
+    if any(f in updates for f in contact_fields):
+        current = get_player(conn, player_id) or {}
+        merged = {f: updates.get(f, current.get(f)) for f in contact_fields}
+        updates["parent_id"] = get_or_create_parent(conn, *(merged[f] for f in contact_fields))
     set_clause = ", ".join(f"{k} = %s" for k in updates)
     conn.execute(
         f"UPDATE players SET {set_clause} WHERE id = %s", (*updates.values(), player_id)
@@ -1815,7 +1986,7 @@ def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
     """Players eligible to be drafted: registered for this division
     (current_division_id) and not already on any of its teams' rosters."""
     rows = conn.execute(
-        """SELECT p.id, p.first_name, p.last_name, p.nickname
+        """SELECT p.id, p.first_name, p.last_name, p.nickname, p.birth_date
            FROM players p
            WHERE p.current_division_id = %s AND p.deleted_at IS NULL
              AND p.id NOT IN (
@@ -1826,7 +1997,7 @@ def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
            ORDER BY p.last_name, p.first_name""",
         (division_id, division_id),
     ).fetchall()
-    cols = ["id", "first_name", "last_name", "nickname"]
+    cols = ["id", "first_name", "last_name", "nickname", "birth_date"]
     players = [dict(zip(cols, r)) for r in rows]
     for p in players:
         p["name"] = full_name(p["first_name"], p["last_name"])
@@ -2030,15 +2201,28 @@ def restore_coach(conn: PGConnection, coach_id: int):
 
 
 def assign_coach_to_team(conn: PGConnection, team_id: int, coach_id: int):
-    """Raises ValueError if this coach already coaches a different team in
-    the same division — a coach can coach only one team per division,
-    though that's still multiple teams across a season's different
-    divisions (e.g. U10 Summer and U13 Summer) or across different
-    seasons."""
+    """Raises ValueError in either direction of a one-team-one-coach rule:
+    if this team already has a *different* coach assigned (a team has
+    exactly one coach at a time — remove the existing one first to replace
+    them), or if this coach already coaches a different team in the same
+    division (a coach can coach only one team per division, though that's
+    still multiple teams across a season's different divisions, e.g. U10
+    Summer and U13 Summer, or across different seasons)."""
     row = conn.execute("SELECT division_id FROM teams WHERE id = %s", (team_id,)).fetchone()
     if row is None:
         raise ValueError("Team not found.")
     division_id = row[0]
+
+    existing_team_coach = conn.execute(
+        "SELECT c.first_name, c.last_name FROM team_coaches tc JOIN coaches c ON c.id = tc.coach_id "
+        "WHERE tc.team_id = %s AND tc.coach_id != %s",
+        (team_id, coach_id),
+    ).fetchone()
+    if existing_team_coach:
+        raise ValueError(
+            f"This team already has a coach ({full_name(*existing_team_coach)}) — remove them first."
+        )
+
     conflict = conn.execute(
         """SELECT t.name FROM team_coaches tc
            JOIN teams t ON t.id = tc.team_id
@@ -2158,6 +2342,237 @@ def coach_ids_with_children(conn: PGConnection) -> set[int]:
     "has children registered" without an N+1 query per coach."""
     rows = conn.execute("SELECT DISTINCT coach_id FROM coach_children").fetchall()
     return {r[0] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Auto-draft — a one-shot alternative to the live pick-by-pick draft above
+# (start_draft/submit_draft_pick), which assigns the *entire* pool onto
+# teams in a single pass instead of one pick at a time. Bypasses that flow
+# entirely (no drafts/draft_order/draft_picks rows) because its hard
+# placements -- siblings kept together, a coach's kid seated with their
+# own parent's team -- can't be honored by submit_draft_pick's fixed snake
+# turn order, which always determines the team for a pick, never the caller.
+# ---------------------------------------------------------------------------
+
+_AUTO_DRAFT_TIER_RANK = {"A": 0, "B": 1, "C": 2}  # anything else (D, or ungraded/"New") shares tier 3
+_AUTO_DRAFT_TIER_SKILL = {0: 4, 1: 3, 2: 2, 3: 1}  # numeric skill value per tier, for balancing totals
+
+
+def _birth_year(birth_date: str | None) -> int | None:
+    if not birth_date:
+        return None
+    match = re.search(r"(19|20)\d{2}", birth_date)
+    return int(match.group()) if match else None
+
+
+def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
+    """The division's auto-draft run still available to undo — None once
+    undone (undo_auto_draft deletes the row) or if auto_draft has never
+    been run for this division."""
+    row = conn.execute(
+        "SELECT id, roster_entry_ids, coach_assignments, created_at FROM auto_draft_runs WHERE division_id = %s",
+        (division_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row[0], "division_id": division_id,
+        "roster_entry_ids": json.loads(row[1]), "coach_assignments": json.loads(row[2]),
+        "created_at": row[3],
+    }
+
+
+def undo_auto_draft(conn: PGConnection, division_id: int):
+    """Reverses this division's auto-draft run: removes exactly the roster
+    rows and coach assignments it created (anything added or changed
+    manually afterward is left alone), then clears the run record so the
+    pool is back to how it was beforehand — ready for auto_draft() to be
+    run again from scratch. Raises ValueError if there's nothing to undo."""
+    run = get_auto_draft_run(conn, division_id)
+    if run is None:
+        raise ValueError("No auto-draft to undo for this division.")
+    for roster_entry_id in run["roster_entry_ids"]:
+        conn.execute("DELETE FROM roster_entries WHERE id = %s", (roster_entry_id,))
+    for assignment in run["coach_assignments"]:
+        conn.execute(
+            "DELETE FROM team_coaches WHERE team_id = %s AND coach_id = %s",
+            (assignment["team_id"], assignment["coach_id"]),
+        )
+    conn.execute("DELETE FROM auto_draft_runs WHERE id = %s", (run["id"],))
+    conn.commit()
+
+
+def auto_draft(conn: PGConnection, division_id: int) -> dict:
+    """One-shot auto-draft: assigns every currently-undrafted player in this
+    division's pool (see draft_pool) onto its teams in a single pass.
+
+    Ranking: A > B > C > (D and ungraded/"New" players, treated as tied
+    with each other, tie-broken by birth year — an older "New" player
+    ranks above a D player rather than New always sorting last).
+
+    Hard placements, resolved before the balanced pass so it treats them
+    as already-seated when sizing up how full each team is:
+      - Siblings (players sharing a parent, see the parents table) always
+        land on the same team. If a sibling already has a team in this
+        division from outside this run, the rest of the group is forced
+        onto that team.
+      - A coach's own registered child (coach_children) is forced onto
+        whichever team that coach already coaches in this division.
+    Coach-follows-kid: a coach who does *not* yet coach a team in this
+    division, but whose child is auto-drafted here, is assigned to
+    whichever team their child lands on afterward (skipped with a warning
+    if that team already ended up with a different coach).
+
+    Everyone else is assigned greedily, best-skill unit first, always to
+    whichever team currently has the lowest total skill (ties broken by
+    fewest players so far) — keeping both roster size and aggregate rank
+    as even as possible across teams.
+
+    Re-running this when a previous run exists for this division first
+    undoes it (see undo_auto_draft), so re-drafting from scratch is just
+    calling this again rather than a separate manual cleanup step.
+
+    Raises ValueError if there are fewer than 2 teams or an empty pool.
+    Returns {"assigned": n, "teams": n, "warnings": [...]}."""
+    if get_auto_draft_run(conn, division_id) is not None:
+        undo_auto_draft(conn, division_id)
+
+    teams = list_teams(conn, division_id)
+    if len(teams) < 2:
+        raise ValueError("Add at least two teams to this division before auto-drafting.")
+    pool = draft_pool(conn, division_id)
+    if not pool:
+        raise ValueError("No eligible players in this division's pool.")
+
+    pool_by_id = {p["id"]: p for p in pool}
+    grades = get_season_grades_for_division(conn, division_id)
+
+    def tier_rank_of(player_id: int) -> int:
+        tier = (grades.get(player_id) or "").strip().upper()
+        return _AUTO_DRAFT_TIER_RANK.get(tier, 3)
+
+    def skill_of(player_id: int) -> int:
+        return _AUTO_DRAFT_TIER_SKILL[tier_rank_of(player_id)]
+
+    def draft_order_key(player_id: int) -> tuple[int, int]:
+        """Lower sorts first (drafted sooner). Only within tier 3 (D and
+        ungraded/"New", deliberately tied with each other) does birth year
+        break the tie — older (smaller year) first — per an older "New"
+        player outranking a D player; A/B/C players don't need it since
+        they're already separated by tier."""
+        tier_rank = tier_rank_of(player_id)
+        if tier_rank != 3:
+            return (tier_rank, 0)
+        birth_year = _birth_year(pool_by_id[player_id]["birth_date"])
+        return (tier_rank, birth_year if birth_year is not None else 9999)
+
+    division_players = conn.execute(
+        "SELECT id, parent_id FROM players WHERE current_division_id = %s AND deleted_at IS NULL", (division_id,)
+    ).fetchall()
+    parent_of = {r[0]: r[1] for r in division_players if r[1] is not None}
+    siblings_by_parent: dict[int, list[int]] = {}
+    for pid, parent_id in parent_of.items():
+        siblings_by_parent.setdefault(parent_id, []).append(pid)
+
+    existing_team_by_player: dict[int, int] = {
+        row[0]: row[1] for row in conn.execute(
+            """SELECT re.player_id, re.team_id FROM roster_entries re
+               JOIN teams t ON t.id = re.team_id
+               WHERE t.division_id = %s AND re.player_id IS NOT NULL""",
+            (division_id,),
+        ).fetchall()
+    }
+
+    # One "unit" per pool player, merging in any pool siblings (an
+    # already-rostered sibling pins the unit's team but isn't itself
+    # re-assigned — it's already seated).
+    units = []
+    seen: set[int] = set()
+    for player_id in pool_by_id:
+        if player_id in seen:
+            continue
+        parent_id = parent_of.get(player_id)
+        group = siblings_by_parent.get(parent_id, [player_id]) if parent_id else [player_id]
+        pool_member_ids = [pid for pid in group if pid in pool_by_id]
+        pinned_team_id = next(
+            (existing_team_by_player[pid] for pid in group if pid in existing_team_by_player), None
+        )
+        seen.update(pool_member_ids)
+        units.append({"player_ids": pool_member_ids, "pinned_team_id": pinned_team_id})
+
+    # Coach's-kid: pin a unit to a team the coach already coaches.
+    coach_team_by_id: dict[int, int] = {}
+    for team_id, coaches in list_team_coaches_for_division(conn, division_id).items():
+        for c in coaches:
+            coach_team_by_id[c["id"]] = team_id
+    for coach_id, team_id in coach_team_by_id.items():
+        children = {c["id"] for c in list_coach_children(conn, coach_id)}
+        if not children:
+            continue
+        for unit in units:
+            if children.intersection(unit["player_ids"]):
+                unit["pinned_team_id"] = unit["pinned_team_id"] or team_id
+
+    team_size = {t["id"]: 0 for t in teams}
+    team_skill = {t["id"]: 0 for t in teams}
+    for player_id, team_id in existing_team_by_player.items():
+        if team_id in team_size:
+            team_size[team_id] += 1
+            team_skill[team_id] += skill_of(player_id)
+
+    assignments: dict[int, int] = {}
+    pinned_units = [u for u in units if u["pinned_team_id"] is not None]
+    open_units = sorted(
+        (u for u in units if u["pinned_team_id"] is None),
+        key=lambda u: min(draft_order_key(pid) for pid in u["player_ids"]),
+    )
+
+    for unit in pinned_units + open_units:
+        team_id = unit["pinned_team_id"] or min(team_size, key=lambda t: (team_skill[t], team_size[t], t))
+        for pid in unit["player_ids"]:
+            assignments[pid] = team_id
+        team_size[team_id] += len(unit["player_ids"])
+        team_skill[team_id] += sum(skill_of(pid) for pid in unit["player_ids"])
+
+    # Number each team's new players after whatever's already on its
+    # roster, same "placeholder jersey number" convention as
+    # submit_draft_pick's "TBD<n>".
+    next_number = {t["id"]: 0 for t in teams}
+    for team_id in existing_team_by_player.values():
+        if team_id in next_number:
+            next_number[team_id] += 1
+    roster_entry_ids = []
+    for player_id, team_id in assignments.items():
+        next_number[team_id] += 1
+        roster_entry_id = add_roster_entry(
+            conn, team_id, f"AUTO{next_number[team_id]}", pool_by_id[player_id]["name"], player_id=player_id
+        )
+        roster_entry_ids.append(roster_entry_id)
+
+    # Coach-follows-kid: a coach with no team yet in this division whose
+    # child just got auto-drafted is assigned to that child's team.
+    warnings: list[str] = []
+    coach_assignments = []
+    for coach_id in coach_ids_with_children(conn):
+        if coach_id in coach_team_by_id:
+            continue
+        children_ids = {c["id"] for c in list_coach_children(conn, coach_id)}
+        landed_team_ids = {assignments[pid] for pid in children_ids if pid in assignments}
+        if not landed_team_ids:
+            continue
+        team_id = sorted(landed_team_ids)[0]
+        try:
+            assign_coach_to_team(conn, team_id, coach_id)
+            coach_assignments.append({"team_id": team_id, "coach_id": coach_id})
+        except ValueError as e:
+            warnings.append(str(e))
+
+    conn.execute(
+        "INSERT INTO auto_draft_runs (division_id, roster_entry_ids, coach_assignments) VALUES (%s, %s, %s)",
+        (division_id, json.dumps(roster_entry_ids), json.dumps(coach_assignments)),
+    )
+    conn.commit()
+    return {"assigned": len(assignments), "teams": len(teams), "warnings": warnings}
 
 
 # ---------------------------------------------------------------------------
@@ -2432,12 +2847,12 @@ def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[di
     the row's own "team_name"/"coach_name") -- a name-only row just
     creates/updates the player profile and nothing else. A team is
     found-or-created in this division by name; a coach is found-or-created
-    globally by name and assigned to that team (a team can have more than
-    one coach — e.g. an assistant — so this never conflicts with whoever
-    else is already on it). It's skipped with a warning (not an error that
-    aborts the rest of the import) only if that same coach is already
-    coaching a *different* team in this division, per
-    assign_coach_to_team's one-team-per-coach-per-division rule."""
+    globally by name and assigned to that team. That assignment is skipped
+    with a warning (not an error that aborts the rest of the import) if it
+    would violate assign_coach_to_team's one-coach-per-team /
+    one-team-per-coach-per-division rule -- either this team already has a
+    *different* coach, or this coach already coaches a *different* team in
+    this division."""
     created = updated = skipped = rostered = coached = 0
     warnings: list[str] = []
 

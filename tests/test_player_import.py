@@ -220,9 +220,9 @@ def test_apply_assigns_coach_when_given_with_team(conn, division_id):
     assert coaches[0]["name"] == "Mario Lemieux"
 
 
-def test_apply_assigns_a_second_coach_to_the_same_team_without_conflict(conn, division_id):
-    # A team can have more than one coach (e.g. an assistant) -- assigning
-    # a new one alongside an existing one is not a conflict.
+def test_apply_warns_instead_of_failing_when_team_already_has_a_different_coach(conn, division_id):
+    # A team can have only one coach at a time -- assigning a second one
+    # is a conflict that's reported as a warning, not a hard failure.
     team_id = core.add_team(conn, division_id, "Avalanche")
     existing_coach_id = core.add_coach(conn, "Robert", "Dobson")
     core.assign_coach_to_team(conn, team_id, existing_coach_id)
@@ -233,9 +233,11 @@ def test_apply_assigns_a_second_coach_to_the_same_team_without_conflict(conn, di
         [{"Player Name": "Sidney Crosby", "Team": "Avalanche", "Coach": "Mario Lemieux"}], columns,
     )
     result = core.apply_player_import_plan(conn, division_id, plan)
-    assert result["coached"] == 1
-    assert result["warnings"] == []
-    assert {c["name"] for c in core.list_team_coaches(conn, team_id)} == {"Robert Dobson", "Mario Lemieux"}
+    assert result["created"] == 1  # the player import itself still succeeds
+    assert result["coached"] == 0
+    assert len(result["warnings"]) == 1
+    assert "already has a coach" in result["warnings"][0]
+    assert [c["name"] for c in core.list_team_coaches(conn, team_id)] == ["Robert Dobson"]
 
 
 def test_apply_warns_instead_of_failing_when_coach_already_coaches_a_different_team(conn, division_id):

@@ -128,6 +128,25 @@ ALTER TABLE players ADD COLUMN IF NOT EXISTS first_name TEXT;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS last_name TEXT;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS nickname TEXT;
 
+-- A player's parent/guardian as a shared entity multiple children can
+-- link to, so "siblings" is simply "players who share a parent" instead
+-- of a pairwise link that gets awkward past two kids. Separate from
+-- players.contact_* above (left as-is -- a lighter "who to call about
+-- this player" field, still per-player): parent_id exists specifically
+-- for grouping siblings (e.g. so the draft keeps them on one team).
+-- Auto-matched by contact info on import/backfill, not trusted blindly --
+-- verified/correctable from the player's own profile.
+CREATE TABLE IF NOT EXISTS parents (
+    id          SERIAL PRIMARY KEY,
+    first_name  TEXT,
+    last_name   TEXT,
+    phone       TEXT,
+    email       TEXT,
+    created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE players ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES parents(id) ON DELETE SET NULL;
+
 -- Per-team jersey-number roster row, auto-extracted from game sheets and
 -- used to attribute goals/assists/penalties by number. Optionally linked to
 -- a global player profile once identified.
@@ -254,6 +273,20 @@ CREATE TABLE IF NOT EXISTS draft_picks (
     picked_at        TEXT DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(draft_id, pick_number),
     UNIQUE(draft_id, player_id)
+);
+
+-- Records exactly what one run of game_sheet_core.auto_draft() created (its
+-- roster rows and any coach-follows-kid team_coaches assignments), so
+-- undo_auto_draft() can reverse precisely that and nothing a person did
+-- manually afterward. One row per division at a time -- running auto_draft
+-- again first undoes whatever's here (see auto_draft's docstring), so
+-- "re-draft" is just calling it a second time rather than a separate step.
+CREATE TABLE IF NOT EXISTS auto_draft_runs (
+    id                  SERIAL PRIMARY KEY,
+    division_id         INTEGER NOT NULL UNIQUE REFERENCES divisions(id) ON DELETE CASCADE,
+    roster_entry_ids    TEXT NOT NULL,  -- JSON list of roster_entries.id
+    coach_assignments   TEXT NOT NULL,  -- JSON list of {"team_id": .., "coach_id": ..}
+    created_at          TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Official season schedule, uploaded as a CSV and persisted here so it

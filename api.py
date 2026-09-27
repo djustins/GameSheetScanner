@@ -573,6 +573,32 @@ def api_player_move_notes(
     return core.list_player_move_notes(conn, player_id, division_id)
 
 
+@app.get("/players/{player_id}/position", tags=["players"])
+def api_get_position(
+    player_id: int, division_id: int, team_id: int, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> dict:
+    """A player's position on one specific team/division — pass both as
+    query params, e.g. ?division_id=1&team_id=2."""
+    return {"position": core.get_position(conn, player_id, division_id, team_id)}
+
+
+class PositionUpdate(BaseModel):
+    division_id: int
+    team_id: int
+    position: str
+
+
+@app.put("/players/{player_id}/position", tags=["players"])
+def api_set_position(
+    player_id: int, body: PositionUpdate, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    """Sets (or clears, with position="") a player's position for one
+    team/division — a plain current value with no history, same as the
+    Streamlit app's Position dropdown."""
+    core.set_position(conn, player_id, body.division_id, body.team_id, body.position)
+    return {"position": core.get_position(conn, player_id, body.division_id, body.team_id)}
+
+
 # ---------------------------------------------------------------------------
 # Draft
 # ---------------------------------------------------------------------------

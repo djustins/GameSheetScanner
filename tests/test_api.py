@@ -99,6 +99,37 @@ def test_roster_entry_renumber_lifecycle(conn, admin_auth, division_id):
     assert missing.status_code == 404
 
 
+def test_set_and_get_position(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+
+    initial = client.get(
+        f"/players/{player_id}/position", params={"division_id": division_id, "team_id": team_id}, auth=admin_auth
+    )
+    assert initial.status_code == 200
+    assert initial.json() == {"position": None}
+
+    setresp = client.put(
+        f"/players/{player_id}/position",
+        json={"division_id": division_id, "team_id": team_id, "position": "Goalie"},
+        auth=admin_auth,
+    )
+    assert setresp.status_code == 200
+    assert setresp.json() == {"position": "Goalie"}
+
+    getresp = client.get(
+        f"/players/{player_id}/position", params={"division_id": division_id, "team_id": team_id}, auth=admin_auth
+    )
+    assert getresp.json() == {"position": "Goalie"}
+
+    cleared = client.put(
+        f"/players/{player_id}/position",
+        json={"division_id": division_id, "team_id": team_id, "position": ""},
+        auth=admin_auth,
+    )
+    assert cleared.json() == {"position": None}
+
+
 def test_roster_entry_update_relinks_player(conn, admin_auth, division_id):
     team_id = core.add_team(conn, division_id, "Avalanche")
     create = client.post(

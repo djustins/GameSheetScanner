@@ -1649,7 +1649,12 @@ def render_player_panel(
                 "◀ Previous", key=f"{key_prefix}_nav_prev_{player_id}", disabled=not can_prev, width="stretch"
             ):
                 st.session_state[nav_pending_key] = nav_ids[nav_idx - 1]
-                st.rerun()
+                # Every current caller that passes nav_ids does so from inside
+                # a dialog (a Streamlit fragment) -- a plain st.rerun() defaults
+                # to scope="app", a full-script rerun, which closes the dialog
+                # since the button that originally opened it isn't being
+                # re-clicked. scope="fragment" reruns just the dialog instead.
+                st.rerun(scope="fragment")
     else:
         save_col, delete_col, eval_col = st.columns(3)
     with save_col:
@@ -1738,7 +1743,7 @@ def render_player_panel(
                 "Next ▶", key=f"{key_prefix}_nav_next_{player_id}", disabled=not can_next, width="stretch"
             ):
                 st.session_state[nav_pending_key] = nav_ids[nav_idx + 1]
-                st.rerun()
+                st.rerun(scope="fragment")
 
     render_evaluation_progress_chart(evaluations)
     render_player_stats_summary(conn, player_id)

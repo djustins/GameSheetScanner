@@ -7,7 +7,22 @@
       "Bash(mkdir -p /tmp/sqlite_compare)",
       "Bash(git show *)",
       "Read(//tmp/**)",
-      "Bash(cp uploaded_hockey.db /tmp/sqlite_compare/compare.db)"
+      "Bash(cp uploaded_hockey.db /tmp/sqlite_compare/compare.db)",
+      "Bash(venv/Scripts/python.exe -m py_compile api.py)",
+      "Bash(venv/Scripts/python.exe -m pyflakes api.py)",
+      "Bash(venv/Scripts/python.exe -m pyflakes tests/test_api.py)",
+      "Bash(venv/Scripts/python.exe -m pytest tests/test_api.py -k \"login\" -q)",
+      "Bash(npm --version)",
+      "Bash(venv/Scripts/python.exe -m pytest tests/test_api.py -q)",
+      "PowerShell(node --version)",
+      "PowerShell(npm --version)",
+      "PowerShell(winget --version 2>&1)",
+      "PowerShell(choco --version 2>&1)",
+      "PowerShell(winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements)",
+      "Read(//c/Program Files/nodejs/**)",
+      "Bash(curl -s http://127.0.0.1:8000/ -w \"\\\\nstatus: %{http_code}\\\\n\")",
+      "Bash(kill -f 474)",
+      "Bash(taskkill //F //PID 474)"
     ]
   }
 }

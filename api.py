@@ -30,6 +30,7 @@ import os
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -45,6 +46,19 @@ app = FastAPI(
     title="GameSheetScanner API",
     description="Programmatic access to the same league data the Streamlit app manages.",
     version="1.0.0",
+)
+
+# A browser-based frontend (e.g. the React app) runs on a different origin than
+# this API, so it needs explicit CORS allowance — FastAPI has none by default.
+# Wide open: auth here is a Bearer token in a header, not a cookie, so there's
+# no session to leak cross-origin, and allow_credentials must be False anyway
+# — browsers reject the combination of a wildcard origin with credentials=True.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # auto_error=False on both: a request supplies at most one of these (Basic
@@ -134,14 +148,37 @@ def root():
     return {"name": "GameSheetScanner API", "docs": "/docs"}
 
 
-@app.get("/me", tags=["meta"])
-def whoami(user: dict = Depends(get_current_user)) -> dict:
-    """Confirms your credentials work and shows what they grant — the
-    quickest way to sanity-check an API client's auth setup."""
+def _public_user(user: dict) -> dict:
     return {
         "email": user["email"], "display_name": user["display_name"], "is_admin": user["is_admin"],
         "read_only": user["read_only"], "coach_id": user["coach_id"], "pages": user["pages"],
     }
+
+
+@app.get("/me", tags=["meta"])
+def whoami(user: dict = Depends(get_current_user)) -> dict:
+    """Confirms your credentials work and shows what they grant — the
+    quickest way to sanity-check an API client's auth setup."""
+    return _public_user(user)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/login", tags=["meta"])
+def login(body: LoginRequest, conn=Depends(get_conn)) -> dict:
+    """A one-step email/password -> token exchange, for a browser-based
+    client (e.g. a React app) that shouldn't hold onto Basic auth
+    credentials on every request. Equivalent to logging in with Basic once
+    and immediately calling POST /tokens -- creates a new token each call,
+    named "Login" (revoke old ones from GET /tokens if they pile up)."""
+    user = core.verify_login(conn, body.email, body.password)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
+    _, raw_token = core.create_api_token(conn, user["id"], "Login")
+    return {"token": raw_token, "user": _public_user(user)}
 
 
 # ---------------------------------------------------------------------------

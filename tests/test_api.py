@@ -58,6 +58,24 @@ def test_me_reflects_the_logged_in_user(conn, admin_auth):
     assert body["is_admin"] is True
 
 
+def test_login_returns_a_working_token(conn, admin_auth):
+    response = client.post("/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["user"]["email"] == ADMIN_EMAIL
+    token = body["token"]
+    assert token.startswith("gst_")
+
+    me = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
+    assert me.json()["email"] == ADMIN_EMAIL
+
+
+def test_login_rejects_wrong_password(conn, admin_auth):
+    response = client.post("/login", json={"email": ADMIN_EMAIL, "password": "wrong-password"})
+    assert response.status_code == 401
+
+
 def test_team_crud_lifecycle(conn, admin_auth, division_id):
     create = client.post("/teams", json={"division_id": division_id, "name": "Avalanche"}, auth=admin_auth)
     assert create.status_code == 201

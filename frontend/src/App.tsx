@@ -6,7 +6,9 @@ import { StatsStandingsPage } from './pages/StatsStandingsPage'
 import { TeamRosterPage } from './pages/TeamRosterPage'
 import { CoachesPage } from './pages/CoachesPage'
 import { DraftPage } from './pages/DraftPage'
+import { UserManagementPage } from './pages/UserManagementPage'
 import { ProtectedRoute } from './auth/ProtectedRoute'
+import { AdminRoute } from './auth/AdminRoute'
 import { AppLayout } from './layout/AppLayout'
 
 function App() {
@@ -27,6 +29,14 @@ function App() {
         <Route path="/teams/:teamId" element={<TeamRosterPage />} />
         <Route path="/coaches" element={<CoachesPage />} />
         <Route path="/draft" element={<DraftPage />} />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminRoute>
+              <UserManagementPage />
+            </AdminRoute>
+          }
+        />
       </Route>
     </Routes>
   )

@@ -1,5 +1,5 @@
 import { apiFetch } from './client'
-import type { Coach, RosterEntry, Team } from './types'
+import type { Coach, DeletedTeam, RosterEntry, Team } from './types'
 
 export function createTeam(body: { division_id: number; name: string }): Promise<Team> {
   return apiFetch<Team>('/teams', { method: 'POST', body: JSON.stringify(body) })
@@ -11,6 +11,14 @@ export function updateTeam(teamId: number, body: { name?: string; color?: string
 
 export function deleteTeam(teamId: number): Promise<void> {
   return apiFetch<void>(`/teams/${teamId}`, { method: 'DELETE' })
+}
+
+export function restoreTeam(teamId: number): Promise<void> {
+  return apiFetch<void>(`/teams/${teamId}/restore`, { method: 'POST' })
+}
+
+export function listDeletedTeams(): Promise<DeletedTeam[]> {
+  return apiFetch<DeletedTeam[]>('/teams/deleted')
 }
 
 export function listRoster(teamId: number): Promise<RosterEntry[]> {

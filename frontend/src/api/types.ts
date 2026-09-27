@@ -6,11 +6,22 @@ export interface Division {
   category: string | null
 }
 
+export interface DeletedDivision extends Division {
+  deleted_at: string
+}
+
 export interface Team {
   id: number
   name: string
   color: string | null
   deleted_at: string | null
+}
+
+export interface DeletedTeam extends Team {
+  division_id: number
+  year: number
+  season: string
+  age_group: string
 }
 
 export interface Player {
@@ -26,6 +37,7 @@ export interface Player {
   contact_phone: string | null
   contact_email: string | null
   parent_id: number | null
+  deleted_at?: string | null
 }
 
 export interface DivisionPlayer extends Player {
@@ -69,6 +81,20 @@ export interface RosterEntry {
   number: string
   name: string
   player_id: number | null
+}
+
+export interface PlayerHistoryEntry {
+  division_id: number
+  year: number
+  season: string
+  age_group: string
+  category: string | null
+  team_id: number
+  team_name: string
+  number: string
+  position: string | null
+  grade: string | null
+  coaches: Coach[]
 }
 
 export interface DraftPoolPlayer {
@@ -122,20 +148,6 @@ export interface AutoDraftResult {
   warnings: string[]
 }
 
-export interface PlayerHistoryEntry {
-  division_id: number
-  year: number
-  season: string
-  age_group: string
-  category: string | null
-  team_id: number
-  team_name: string
-  number: string
-  position: string | null
-  grade: string | null
-  coaches: Coach[]
-}
-
 export interface StandingsRow {
   team: string
   games_played: number
@@ -162,4 +174,56 @@ export interface PlayerStatsRow {
   penalties: number
   shootout_goals: number
   shootout_misses: number
+}
+
+export interface Role {
+  id: number
+  name: string
+  read_only: boolean
+  hide_contact_details: boolean
+  pages: string[]
+}
+
+export interface User {
+  id: number
+  email: string
+  display_name: string | null
+  is_admin: boolean
+  role_id: number | null
+  coach_id: number | null
+  deleted_at: string | null
+  pages: string[]
+  read_only: boolean
+  hide_contact_details: boolean
+}
+
+export interface Parent {
+  id: number
+  first_name: string | null
+  last_name: string | null
+  phone: string | null
+  email: string | null
+  name: string
+}
+
+export interface ScheduleRow {
+  id: number
+  order_num: number | null
+  round: string | null
+  game_date: string
+  home_team: string
+  away_team: string
+  start_time: string | null
+  end_time: string | null
+  location: string | null
+  field: string | null
+  accounted_for: boolean
+  possible_matches: { id: number; game_date: string }[]
+  result: {
+    game_id: number
+    home_team: string
+    away_team: string
+    home_score: number | null
+    away_score: number | null
+  } | null
 }

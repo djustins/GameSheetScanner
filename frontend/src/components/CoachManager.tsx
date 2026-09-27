@@ -19,7 +19,7 @@ export function CoachManager({ teamId }: { teamId: number }) {
     queryKey: ['team-coaches', teamId],
     queryFn: () => listTeamCoaches(teamId),
   })
-  const { data: allCoaches } = useQuery({ queryKey: ['coaches'], queryFn: listCoaches })
+  const { data: allCoaches } = useQuery({ queryKey: ['coaches'], queryFn: () => listCoaches() })
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['team-coaches', teamId] })
   const onError = (err: unknown) =>

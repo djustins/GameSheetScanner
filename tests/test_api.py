@@ -379,3 +379,199 @@ def test_move_player_note_is_dropped_for_non_admin(conn, division_id):
     )
     assert response.status_code == 204
     assert core.list_player_move_notes(conn, player_id) == []
+
+
+def test_role_lifecycle(conn, admin_auth):
+    create = client.post(
+        "/roles", json={"name": "Coach", "pages": ["rosters", "coaches"], "read_only": False}, auth=admin_auth
+    )
+    assert create.status_code == 201
+    role = create.json()
+    assert sorted(role["pages"]) == ["coaches", "rosters"]
+
+    updated = client.patch(f"/roles/{role['id']}", json={"read_only": True}, auth=admin_auth)
+    assert updated.status_code == 200
+    assert updated.json()["read_only"] is True
+    assert sorted(updated.json()["pages"]) == ["coaches", "rosters"]
+
+    deleted = client.delete(f"/roles/{role['id']}", auth=admin_auth)
+    assert deleted.status_code == 204
+    assert all(r["id"] != role["id"] for r in client.get("/roles", auth=admin_auth).json())
+
+
+def test_role_endpoints_require_admin(conn, readonly_auth):
+    response = client.get("/roles", auth=readonly_auth)
+    assert response.status_code == 403
+
+
+def test_user_lifecycle(conn, admin_auth):
+    coach_id = core.add_coach(conn, "Mario", "Lemieux")
+    role_id = core.add_role(conn, "Coach Role", pages=["rosters"])
+
+    create = client.post(
+        "/users",
+        json={"email": "new_coach@example.com", "password": "temp12345", "display_name": "New Coach"},
+        auth=admin_auth,
+    )
+    assert create.status_code == 201
+    user = create.json()
+    assert user["email"] == "new_coach@example.com"
+    assert "password_hash" not in user
+
+    duplicate = client.post(
+        "/users", json={"email": "new_coach@example.com", "password": "x"}, auth=admin_auth
+    )
+    assert duplicate.status_code == 409
+
+    updated = client.patch(
+        f"/users/{user['id']}", json={"role_id": role_id, "coach_id": coach_id}, auth=admin_auth
+    )
+    assert updated.status_code == 200
+    assert updated.json()["role_id"] == role_id
+    assert updated.json()["coach_id"] == coach_id
+
+    cleared = client.patch(f"/users/{user['id']}", json={"role_id": None}, auth=admin_auth)
+    assert cleared.json()["role_id"] is None
+
+    login_before = client.post(
+        "/login", json={"email": "new_coach@example.com", "password": "temp12345"}
+    )
+    assert login_before.status_code == 200
+
+    reset = client.put(f"/users/{user['id']}/password", json={"password": "newpassword1"}, auth=admin_auth)
+    assert reset.status_code == 200
+
+    login_after_old = client.post(
+        "/login", json={"email": "new_coach@example.com", "password": "temp12345"}
+    )
+    assert login_after_old.status_code == 401
+    login_after_new = client.post(
+        "/login", json={"email": "new_coach@example.com", "password": "newpassword1"}
+    )
+    assert login_after_new.status_code == 200
+
+    deactivated = client.delete(f"/users/{user['id']}", auth=admin_auth)
+    assert deactivated.status_code == 204
+    active = client.get("/users", auth=admin_auth).json()
+    assert all(u["id"] != user["id"] for u in active)
+    all_users = client.get("/users", params={"include_deleted": True}, auth=admin_auth).json()
+    assert any(u["id"] == user["id"] for u in all_users)
+
+    restored = client.post(f"/users/{user['id']}/restore", auth=admin_auth)
+    assert restored.status_code == 204
+    active_again = client.get("/users", auth=admin_auth).json()
+    assert any(u["id"] == user["id"] for u in active_again)
+
+
+def test_user_endpoints_require_admin(conn, readonly_auth):
+    response = client.get("/users", auth=readonly_auth)
+    assert response.status_code == 403
+
+
+def test_schedule_import_and_clear(conn, admin_auth, division_id):
+    imported = client.post(
+        f"/divisions/{division_id}/schedule",
+        json={"rows": [
+            {"game_date": "2026-09-01", "home_team": "Avalanche", "away_team": "Wild"},
+            {"game_date": "", "home_team": "Missing date", "away_team": "Skipped"},
+        ]},
+        auth=admin_auth,
+    )
+    assert imported.status_code == 200
+    assert imported.json() == {"saved": 1}
+
+    scheduled = client.get(f"/divisions/{division_id}/schedule", auth=admin_auth).json()
+    assert len(scheduled) == 1
+    assert scheduled[0]["home_team"] == "Avalanche"
+
+    cleared = client.delete(f"/divisions/{division_id}/schedule", auth=admin_auth)
+    assert cleared.status_code == 204
+    assert client.get(f"/divisions/{division_id}/schedule", auth=admin_auth).json() == []
+
+
+def test_coach_carryover_endpoints(conn, admin_auth, division_id):
+    # The `division_id` fixture is a 2026 Summer Penguin division -- an
+    # earlier Penguin division should be found as "previous" for it.
+    previous_division_id = core.add_division(conn, 2025, "Fall", "Penguin")
+    team_id = core.add_team(conn, previous_division_id, "Avalanche")
+    coach_id = core.add_coach(conn, "Mario", "Lemieux")
+    core.assign_coach_to_team(conn, team_id, coach_id)
+
+    previous = client.get(f"/divisions/{division_id}/previous", auth=admin_auth)
+    assert previous.status_code == 200
+    assert previous.json()["id"] == previous_division_id
+
+    child_id = core.add_player(
+        conn, "Austin", "Lemieux", current_division_id=division_id,
+        contact_first_name="Mario", contact_last_name="Lemieux",
+    )
+    matched = client.get(
+        f"/coaches/{coach_id}/children-in-division",
+        params={"division_id": division_id},
+        auth=admin_auth,
+    )
+    assert matched.status_code == 200
+    assert [c["id"] for c in matched.json()] == [child_id]
+
+
+def test_parent_and_siblings_endpoints(conn, admin_auth):
+    p1 = core.add_player(conn, "Leah", "Pratti")
+    p2 = core.add_player(conn, "Nico", "Pratti")
+
+    parents_before = client.get("/parents", auth=admin_auth)
+    assert parents_before.status_code == 200
+
+    linked = client.put(f"/players/{p1}/parent", json={"parent_id": None}, auth=admin_auth)
+    assert linked.status_code == 200
+
+    parent_id = core.get_or_create_parent(conn, "Pratti", "Family", None, "pratti@example.com")
+    client.put(f"/players/{p1}/parent", json={"parent_id": parent_id}, auth=admin_auth)
+    client.put(f"/players/{p2}/parent", json={"parent_id": parent_id}, auth=admin_auth)
+
+    siblings = client.get(f"/players/{p1}/siblings", auth=admin_auth)
+    assert siblings.status_code == 200
+    assert [s["id"] for s in siblings.json()] == [p2]
+
+
+def test_recycle_bin_endpoints(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    coach_id = core.add_coach(conn, "Mario", "Lemieux")
+
+    client.delete(f"/teams/{team_id}", auth=admin_auth)
+    client.delete(f"/players/{player_id}", auth=admin_auth)
+    client.delete(f"/coaches/{coach_id}", auth=admin_auth)
+    client.delete(f"/divisions/{division_id}", auth=admin_auth)
+
+    deleted_divisions = client.get("/divisions/deleted", auth=admin_auth).json()
+    assert any(d["id"] == division_id for d in deleted_divisions)
+
+    deleted_teams = client.get("/teams/deleted", auth=admin_auth).json()
+    assert any(t["id"] == team_id for t in deleted_teams)
+
+    deleted_players = client.get("/players", params={"include_deleted": True}, auth=admin_auth).json()
+    assert any(p["id"] == player_id and p["deleted_at"] for p in deleted_players)
+
+    deleted_coaches = client.get("/coaches", params={"include_deleted": True}, auth=admin_auth).json()
+    assert any(c["id"] == coach_id and c["deleted_at"] for c in deleted_coaches)
+
+    assert client.post(f"/divisions/{division_id}/restore", auth=admin_auth).status_code == 204
+    assert client.post(f"/teams/{team_id}/restore", auth=admin_auth).status_code == 204
+    assert client.post(f"/players/{player_id}/restore", auth=admin_auth).status_code == 204
+    assert client.post(f"/coaches/{coach_id}/restore", auth=admin_auth).status_code == 204
+
+    assert any(d["id"] == division_id for d in client.get("/divisions", auth=admin_auth).json())
+    assert any(t["id"] == team_id for t in client.get(f"/divisions/{division_id}/teams", auth=admin_auth).json())
+    active_players = client.get("/players", auth=admin_auth).json()
+    assert any(p["id"] == player_id for p in active_players)
+    active_coaches = client.get("/coaches", auth=admin_auth).json()
+    assert any(c["id"] == coach_id for c in active_coaches)
+
+
+def test_export_workbook_endpoint(conn, admin_auth, division_id):
+    response = client.get(f"/divisions/{division_id}/export.xlsx", auth=admin_auth)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert len(response.content) > 0

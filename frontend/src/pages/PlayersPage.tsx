@@ -1,15 +1,27 @@
 import { useMemo, useState } from 'react'
-import { Stack, Table, Text, TextInput, Title } from '@mantine/core'
-import { useQuery } from '@tanstack/react-query'
-import { listPlayers } from '../api/players'
+import { Button, Group, Stack, Table, Text, TextInput, Title } from '@mantine/core'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { listPlayers, restorePlayer } from '../api/players'
 import type { Player } from '../api/types'
 import { PlayerDetailDrawer } from '../components/PlayerDetailDrawer'
+import { useAuth } from '../auth/AuthContext'
 
 export function PlayersPage() {
+  const { user } = useAuth()
+  const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null)
 
-  const { data: players, isLoading } = useQuery({ queryKey: ['players'], queryFn: listPlayers })
+  const { data: players, isLoading } = useQuery({ queryKey: ['players'], queryFn: () => listPlayers() })
+  const { data: allPlayers } = useQuery({ queryKey: ['players', 'all'], queryFn: () => listPlayers(true) })
+  const deletedPlayers = (allPlayers ?? []).filter((p) => p.deleted_at)
+
+  const restoreMutation = useMutation({
+    mutationFn: restorePlayer,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['players'] })
+    },
+  })
 
   const filtered = useMemo(() => {
     if (!players) return []
@@ -51,6 +63,25 @@ export function PlayersPage() {
           No players found.
         </Text>
       )}
+
+      {user?.is_admin && deletedPlayers.length > 0 && (
+        <>
+          <Title order={5} mt="md">
+            Deleted Players ({deletedPlayers.length})
+          </Title>
+          <Stack gap="xs">
+            {deletedPlayers.map((p) => (
+              <Group key={p.id} justify="space-between">
+                <Text size="sm">{p.name}</Text>
+                <Button size="xs" variant="subtle" onClick={() => restoreMutation.mutate(p.id)}>
+                  Restore
+                </Button>
+              </Group>
+            ))}
+          </Stack>
+        </>
+      )}
+
       <PlayerDetailDrawer player={selectedPlayer} onClose={() => setSelectedPlayer(null)} />
     </Stack>
   )

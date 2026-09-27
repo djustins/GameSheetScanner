@@ -51,3 +51,18 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 
   return body as T
 }
+
+export async function apiFetchBlob(path: string): Promise<{ blob: Blob; filename: string | null }> {
+  const headers = new Headers()
+  const token = getToken()
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Request failed (${response.status})`)
+  }
+  const disposition = response.headers.get('content-disposition')
+  const match = disposition?.match(/filename=([^;]+)/)
+  return { blob: await response.blob(), filename: match ? match[1].trim() : null }
+}

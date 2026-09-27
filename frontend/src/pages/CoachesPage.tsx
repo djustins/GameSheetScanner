@@ -18,6 +18,7 @@ import {
   listCoachChildren,
   listCoaches,
   listCoachTeams,
+  restoreCoach,
   unlinkCoachChild,
   updateCoach,
 } from '../api/coaches'
@@ -34,9 +35,11 @@ export function CoachesPage() {
   const [newFirst, setNewFirst] = useState('')
   const [newLast, setNewLast] = useState('')
 
-  const { data: coaches } = useQuery({ queryKey: ['coaches'], queryFn: listCoaches })
+  const { data: coaches } = useQuery({ queryKey: ['coaches'], queryFn: () => listCoaches() })
+  const { data: allCoaches } = useQuery({ queryKey: ['coaches', 'all'], queryFn: () => listCoaches(true) })
+  const deletedCoaches = (allCoaches ?? []).filter((c) => c.deleted_at)
   const { data: divisions } = useQuery({ queryKey: ['divisions'], queryFn: listDivisions })
-  const { data: players } = useQuery({ queryKey: ['players'], queryFn: listPlayers })
+  const { data: players } = useQuery({ queryKey: ['players'], queryFn: () => listPlayers() })
 
   const coach = coaches?.find((c) => String(c.id) === selectedId);
 
@@ -81,6 +84,12 @@ export function CoachesPage() {
       queryClient.invalidateQueries({ queryKey: ['coaches'] })
       setSelectedId(null)
     },
+    onError,
+  })
+
+  const restoreMutation = useMutation({
+    mutationFn: (coachId: number) => restoreCoach(coachId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['coaches'] }),
     onError,
   })
 
@@ -219,6 +228,24 @@ export function CoachesPage() {
             </Button>
           </Group>
         </Stack>
+      )}
+
+      {deletedCoaches.length > 0 && (
+        <>
+          <Title order={5} mt="md">
+            Deleted Coaches ({deletedCoaches.length})
+          </Title>
+          <Stack gap="xs">
+            {deletedCoaches.map((c) => (
+              <Group key={c.id} justify="space-between">
+                <Text size="sm">{c.name}</Text>
+                <Button size="xs" variant="subtle" onClick={() => restoreMutation.mutate(c.id)}>
+                  Restore
+                </Button>
+              </Group>
+            ))}
+          </Stack>
+        </>
       )}
 
       <Modal opened={createOpen} onClose={() => setCreateOpen(false)} title="Add a new coach">

@@ -1,12 +1,24 @@
 import { apiFetch } from './client'
 import type { Player, PlayerHistoryEntry } from './types'
 
-export function listPlayers(): Promise<Player[]> {
-  return apiFetch<Player[]>('/players')
+export function listPlayers(includeDeleted = false): Promise<Player[]> {
+  return apiFetch<Player[]>(`/players?include_deleted=${includeDeleted}`)
+}
+
+export function restorePlayer(playerId: number): Promise<void> {
+  return apiFetch<void>(`/players/${playerId}/restore`, { method: 'POST' })
+}
+
+export function deletePlayer(playerId: number): Promise<void> {
+  return apiFetch<void>(`/players/${playerId}`, { method: 'DELETE' })
 }
 
 export function getPlayerHistory(playerId: number): Promise<PlayerHistoryEntry[]> {
   return apiFetch<PlayerHistoryEntry[]>(`/players/${playerId}/history`)
+}
+
+export function getSiblings(playerId: number): Promise<Player[]> {
+  return apiFetch<Player[]>(`/players/${playerId}/siblings`)
 }
 
 export function getPosition(playerId: number, divisionId: number, teamId: number): Promise<{ position: string | null }> {

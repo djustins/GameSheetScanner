@@ -1,8 +1,8 @@
 import { apiFetch } from './client'
 import type { Coach, CoachChild, CoachTeam } from './types'
 
-export function listCoaches(): Promise<Coach[]> {
-  return apiFetch<Coach[]>('/coaches')
+export function listCoaches(includeDeleted = false): Promise<Coach[]> {
+  return apiFetch<Coach[]>(`/coaches?include_deleted=${includeDeleted}`)
 }
 
 export function createCoach(body: {
@@ -24,6 +24,14 @@ export function updateCoach(
 
 export function deleteCoach(coachId: number): Promise<void> {
   return apiFetch<void>(`/coaches/${coachId}`, { method: 'DELETE' })
+}
+
+export function restoreCoach(coachId: number): Promise<void> {
+  return apiFetch<void>(`/coaches/${coachId}/restore`, { method: 'POST' })
+}
+
+export function getCoachChildrenInDivision(coachId: number, divisionId: number): Promise<CoachChild[]> {
+  return apiFetch<CoachChild[]>(`/coaches/${coachId}/children-in-division?division_id=${divisionId}`)
 }
 
 export function listCoachChildren(coachId: number): Promise<CoachChild[]> {

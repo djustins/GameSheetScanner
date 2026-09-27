@@ -16,6 +16,7 @@ export function AppLayout() {
   const { user, logout } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
+  const navItems = user?.is_admin ? [...NAV_ITEMS, { to: '/admin/users', label: 'User Management' }] : NAV_ITEMS
 
   return (
     <AppShell
@@ -40,7 +41,7 @@ export function AppLayout() {
         </Group>
       </AppShell.Header>
       <AppShell.Navbar p="md">
-        {NAV_ITEMS.map((item) => (
+        {navItems.map((item) => (
           <NavLink
             key={item.to}
             label={item.label}

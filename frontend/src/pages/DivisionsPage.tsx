@@ -21,6 +21,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createDivision,
   deleteDivision,
+  downloadExportWorkbook,
   listDivisionPlayers,
   listDivisionTeams,
   listDivisions,
@@ -30,8 +31,11 @@ import { getAgeGroups } from '../api/meta'
 import type { Player } from '../api/types'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import { CoachCarryoverPanel } from '../components/CoachCarryoverPanel'
 import { ExperienceBadge } from '../components/ExperienceBadge'
 import { PlayerDetailDrawer } from '../components/PlayerDetailDrawer'
+import { RecycleBinModal } from '../components/RecycleBinModal'
+import { SchedulePanel } from '../components/SchedulePanel'
 import { divisionSeasonLabel } from '../utils/format'
 
 const SEASONS = ['Spring', 'Summer', 'Fall', 'Winter']
@@ -42,6 +46,7 @@ export function DivisionsPage() {
   const queryClient = useQueryClient()
   const [divisionId, setDivisionId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const [recycleBinOpen, setRecycleBinOpen] = useState(false)
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null)
   const [newTeamName, setNewTeamName] = useState('')
 
@@ -111,7 +116,12 @@ export function DivisionsPage() {
     <Stack>
       <Group justify="space-between">
         <Title order={2}>Divisions</Title>
-        {user?.is_admin && <Button onClick={() => setCreateOpen(true)}>New Division</Button>}
+        <Group>
+          <Button variant="subtle" onClick={() => setRecycleBinOpen(true)}>
+            Recycle Bin
+          </Button>
+          {user?.is_admin && <Button onClick={() => setCreateOpen(true)}>New Division</Button>}
+        </Group>
       </Group>
 
       <Select
@@ -130,19 +140,24 @@ export function DivisionsPage() {
           <Text size="sm" c="dimmed">
             {divisionSeasonLabel(selectedDivision)}
           </Text>
-          {user?.is_admin && (
-            <ActionIcon
-              color="red"
-              variant="subtle"
-              onClick={() => {
-                if (confirm('Delete this division? Teams and players are kept, just removed from this division.')) {
-                  deleteMutation.mutate(selectedDivision.id)
-                }
-              }}
-            >
-              <IconTrash size={18} />
-            </ActionIcon>
-          )}
+          <Group gap="xs">
+            <Button size="xs" variant="subtle" onClick={() => downloadExportWorkbook(selectedDivision.id)}>
+              Export to Excel
+            </Button>
+            {user?.is_admin && (
+              <ActionIcon
+                color="red"
+                variant="subtle"
+                onClick={() => {
+                  if (confirm('Delete this division? Teams and players are kept, just removed from this division.')) {
+                    deleteMutation.mutate(selectedDivision.id)
+                  }
+                }}
+              >
+                <IconTrash size={18} />
+              </ActionIcon>
+            )}
+          </Group>
         </Group>
       )}
 
@@ -151,6 +166,8 @@ export function DivisionsPage() {
           <Tabs.List>
             <Tabs.Tab value="players">Players</Tabs.Tab>
             <Tabs.Tab value="teams">Teams</Tabs.Tab>
+            <Tabs.Tab value="coaches">Coach Carryover</Tabs.Tab>
+            <Tabs.Tab value="schedule">Schedule</Tabs.Tab>
           </Tabs.List>
 
           <Tabs.Panel value="players" pt="md">
@@ -221,10 +238,20 @@ export function DivisionsPage() {
               </Table.Tbody>
             </Table>
           </Tabs.Panel>
+
+          <Tabs.Panel value="coaches" pt="md">
+            <CoachCarryoverPanel divisionId={Number(divisionId)} teams={teams ?? []} divisionPlayers={players ?? []} />
+          </Tabs.Panel>
+
+          <Tabs.Panel value="schedule" pt="md">
+            <SchedulePanel divisionId={Number(divisionId)} />
+          </Tabs.Panel>
         </Tabs>
       )}
 
       <PlayerDetailDrawer player={selectedPlayer} onClose={() => setSelectedPlayer(null)} />
+
+      <RecycleBinModal opened={recycleBinOpen} onClose={() => setRecycleBinOpen(false)} />
 
       <Modal opened={createOpen} onClose={() => setCreateOpen(false)} title="New Division">
         <form onSubmit={form.onSubmit((values) => createMutation.mutate(values))}>

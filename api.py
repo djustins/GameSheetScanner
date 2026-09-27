@@ -31,6 +31,7 @@ import os
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -244,9 +245,28 @@ def api_delete_division(division_id: int, conn=Depends(get_conn), user=Depends(r
     core.soft_delete_division(conn, division_id)
 
 
+@app.post("/divisions/{division_id}/restore", status_code=status.HTTP_204_NO_CONTENT, tags=["divisions"])
+def api_restore_division(division_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+    core.restore_division(conn, division_id)
+
+
+@app.get("/divisions/deleted", tags=["divisions"])
+def api_list_deleted_divisions(conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    return core.list_deleted_divisions(conn)
+
+
+@app.get("/divisions/{division_id}/previous", tags=["divisions"])
+def api_previous_division(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict | None:
+    """The most recent earlier division with the same age group -- used by
+    the coach-carryover panel to offer "assign coaches from last season"."""
+    return core.find_previous_division(conn, division_id)
+
+
 @app.get("/divisions/{division_id}/teams", tags=["divisions"])
-def api_division_teams(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
-    return core.list_teams(conn, division_id)
+def api_division_teams(
+    division_id: int, include_deleted: bool = False, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> list[dict]:
+    return core.list_teams(conn, division_id, include_deleted=include_deleted)
 
 
 @app.get("/divisions/{division_id}/players", tags=["divisions"])
@@ -279,6 +299,39 @@ def api_remove_all_players_from_division(
 @app.get("/divisions/{division_id}/schedule", tags=["divisions"])
 def api_division_schedule(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
     return core.list_schedule(conn, division_id)
+
+
+class ScheduleImportRequest(BaseModel):
+    rows: list[dict]
+
+
+@app.post("/divisions/{division_id}/schedule", tags=["divisions"])
+def api_import_schedule(
+    division_id: int, body: ScheduleImportRequest, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    """Upserts a parsed schedule (e.g. from a CSV the frontend already
+    parsed client-side) by (division_id, date, home, away) -- re-importing
+    a corrected file updates round/time/location in place instead of
+    duplicating rows. See core.import_schedule for the row shape."""
+    saved = core.import_schedule(conn, division_id, body.rows)
+    return {"saved": saved}
+
+
+@app.delete("/divisions/{division_id}/schedule", status_code=status.HTTP_204_NO_CONTENT, tags=["divisions"])
+def api_clear_schedule(division_id: int, conn=Depends(get_conn), user=Depends(require_writer)):
+    core.clear_schedule(conn, division_id)
+
+
+@app.get("/divisions/{division_id}/export.xlsx", tags=["divisions"])
+def api_export_workbook(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)):
+    """One .xlsx with a sheet each for Games/Standings/Player Stats/Rosters
+    -- the same workbook the Streamlit app's Export button produces."""
+    workbook = core.export_workbook(conn, division_id)
+    return StreamingResponse(
+        iter([workbook]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=division_{division_id}.xlsx"},
+    )
 
 
 @app.get("/divisions/{division_id}/games", tags=["divisions"])
@@ -335,6 +388,16 @@ def api_update_team(
 @app.delete("/teams/{team_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["teams"])
 def api_delete_team(team_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
     core.soft_delete_team(conn, team_id)
+
+
+@app.post("/teams/{team_id}/restore", status_code=status.HTTP_204_NO_CONTENT, tags=["teams"])
+def api_restore_team(team_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+    core.restore_team(conn, team_id)
+
+
+@app.get("/teams/deleted", tags=["teams"])
+def api_list_deleted_teams(conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    return core.list_deleted_teams(conn)
 
 
 @app.get("/teams/{team_id}/roster", tags=["teams"])
@@ -440,8 +503,10 @@ class CoachUpdate(BaseModel):
 
 
 @app.get("/coaches", tags=["coaches"])
-def api_list_coaches(conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
-    return core.list_coaches(conn)
+def api_list_coaches(
+    include_deleted: bool = False, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> list[dict]:
+    return core.list_coaches(conn, include_deleted=include_deleted)
 
 
 @app.post("/coaches", status_code=status.HTTP_201_CREATED, tags=["coaches"])
@@ -474,6 +539,23 @@ def api_update_coach(
 @app.delete("/coaches/{coach_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["coaches"])
 def api_delete_coach(coach_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
     core.soft_delete_coach(conn, coach_id)
+
+
+@app.post("/coaches/{coach_id}/restore", status_code=status.HTTP_204_NO_CONTENT, tags=["coaches"])
+def api_restore_coach(coach_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+    core.restore_coach(conn, coach_id)
+
+
+@app.get("/coaches/{coach_id}/children-in-division", tags=["coaches"])
+def api_coach_children_in_division(
+    coach_id: int, division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> list[dict]:
+    """This coach's registered child(ren) in one division -- an explicit
+    link if one exists, otherwise a name-match fallback against that
+    division's players that auto-links it when found (see
+    core.find_coach_children_in_division). Used by the coach-carryover
+    panel to guess who's "relevant" without asking."""
+    return core.find_coach_children_in_division(conn, coach_id, division_id)
 
 
 @app.get("/coaches/{coach_id}/children", tags=["coaches"])
@@ -531,8 +613,10 @@ class PlayerUpdate(BaseModel):
 
 
 @app.get("/players", tags=["players"])
-def api_list_players(conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
-    return core.list_players(conn)
+def api_list_players(
+    include_deleted: bool = False, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> list[dict]:
+    return core.list_players(conn, include_deleted=include_deleted)
 
 
 @app.post("/players", status_code=status.HTTP_201_CREATED, tags=["players"])
@@ -570,9 +654,32 @@ def api_delete_player(player_id: int, conn=Depends(get_conn), user=Depends(requi
     core.soft_delete_player(conn, player_id)
 
 
+@app.post("/players/{player_id}/restore", status_code=status.HTTP_204_NO_CONTENT, tags=["players"])
+def api_restore_player(player_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+    core.restore_player(conn, player_id)
+
+
 @app.get("/players/{player_id}/siblings", tags=["players"])
 def api_player_siblings(player_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
     return core.list_siblings(conn, player_id)
+
+
+@app.get("/parents", tags=["players"])
+def api_list_parents(conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    return core.list_parents(conn)
+
+
+class PlayerParentUpdate(BaseModel):
+    parent_id: int | None = None
+
+
+@app.put("/players/{player_id}/parent", tags=["players"])
+def api_set_player_parent(
+    player_id: int, body: PlayerParentUpdate, conn=Depends(get_conn), user=Depends(require_writer)
+):
+    """Manually link or unlink (parent_id: null) a player to a parent/
+    sibling-group -- see GET /players/{id}/siblings and core.set_player_parent."""
+    core.set_player_parent(conn, player_id, body.parent_id)
 
 
 @app.get("/players/{player_id}/evaluations", tags=["players"])
@@ -792,6 +899,133 @@ def api_undo_auto_draft(division_id: int, conn=Depends(get_conn), user=Depends(r
         core.undo_auto_draft(conn, division_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Roles & Users -- admin-only, mirroring the Streamlit app's User Management
+# tab, which is itself gated to admins only (require_admin below matches).
+# ---------------------------------------------------------------------------
+
+class RoleCreate(BaseModel):
+    name: str
+    pages: list[str] = []
+    read_only: bool = False
+    hide_contact_details: bool = False
+
+
+class RoleUpdate(BaseModel):
+    name: str | None = None
+    pages: list[str] | None = None
+    read_only: bool | None = None
+    hide_contact_details: bool | None = None
+
+
+@app.get("/roles", tags=["users"])
+def api_list_roles(conn=Depends(get_conn), user=Depends(require_admin)) -> list[dict]:
+    return core.list_roles(conn)
+
+
+@app.post("/roles", status_code=status.HTTP_201_CREATED, tags=["users"])
+def api_create_role(body: RoleCreate, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    role_id = core.add_role(
+        conn, body.name, pages=body.pages, read_only=body.read_only, hide_contact_details=body.hide_contact_details
+    )
+    return core.get_role(conn, role_id)
+
+
+@app.patch("/roles/{role_id}", tags=["users"])
+def api_update_role(role_id: int, body: RoleUpdate, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    core.update_role(
+        conn, role_id, name=body.name, pages=body.pages,
+        read_only=body.read_only, hide_contact_details=body.hide_contact_details,
+    )
+    role = core.get_role(conn, role_id)
+    if role is None:
+        not_found("Role not found.")
+    return role
+
+
+@app.delete("/roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["users"])
+def api_delete_role(role_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+    """Any user with this role loses it (falls back to no page access, same
+    as core.delete_role's ON DELETE SET NULL) rather than the delete being
+    blocked."""
+    core.delete_role(conn, role_id)
+
+
+@app.get("/users", tags=["users"])
+def api_list_users(
+    include_deleted: bool = False, conn=Depends(get_conn), user=Depends(require_admin)
+) -> list[dict]:
+    return core.list_users(conn, include_deleted=include_deleted)
+
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    display_name: str | None = None
+    is_admin: bool = False
+    role_id: int | None = None
+
+
+@app.post("/users", status_code=status.HTTP_201_CREATED, tags=["users"])
+def api_create_user(body: UserCreate, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    if core.get_user_by_email(conn, body.email):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A user with that email already exists.")
+    user_id = core.add_user(
+        conn, body.email, body.password, display_name=body.display_name,
+        is_admin=body.is_admin, role_id=body.role_id,
+    )
+    return core.get_user(conn, user_id)
+
+
+class UserUpdate(BaseModel):
+    display_name: str | None = None
+    is_admin: bool | None = None
+    role_id: int | None = None
+    coach_id: int | None = None
+
+
+@app.patch("/users/{user_id}", tags=["users"])
+def api_update_user(user_id: int, body: UserUpdate, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """Bundles update_user + set_user_role + set_user_coach into one call,
+    matching the Streamlit User Management tab's single "Save" button for a
+    user row -- pass only the fields that changed; role_id/coach_id are
+    each still applied (including clearing to null) whenever the field is
+    present in the request body at all, same as PATCH elsewhere in this API."""
+    body_fields = body.model_dump(exclude_unset=True)
+    if "display_name" in body_fields or "is_admin" in body_fields:
+        core.update_user(conn, user_id, display_name=body.display_name, is_admin=body.is_admin)
+    if "role_id" in body_fields:
+        core.set_user_role(conn, user_id, body.role_id)
+    if "coach_id" in body_fields:
+        core.set_user_coach(conn, user_id, body.coach_id)
+    updated = core.get_user(conn, user_id)
+    if updated is None:
+        not_found("User not found.")
+    return updated
+
+
+class PasswordUpdate(BaseModel):
+    password: str
+
+
+@app.put("/users/{user_id}/password", tags=["users"])
+def api_set_user_password(
+    user_id: int, body: PasswordUpdate, conn=Depends(get_conn), user=Depends(require_admin)
+) -> dict:
+    core.set_user_password(conn, user_id, body.password)
+    return {"ok": True}
+
+
+@app.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["users"])
+def api_deactivate_user(user_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+    core.soft_delete_user(conn, user_id)
+
+
+@app.post("/users/{user_id}/restore", status_code=status.HTTP_204_NO_CONTENT, tags=["users"])
+def api_restore_user(user_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+    core.restore_user(conn, user_id)
 
 
 # ---------------------------------------------------------------------------

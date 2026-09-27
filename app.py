@@ -1744,6 +1744,38 @@ def render_player_panel(
     render_player_stats_summary(conn, player_id)
 
 
+def render_player_season_history(conn, player_id: int, history: list[dict] | None = None):
+    """A table of a player's own seasons — team, position, grade, coach —
+    one row per (year, season, age_group) they've actually been rostered
+    in, resolved from player_division_history(). `history`, if given
+    (even []), skips the round trip when the caller already has it (e.g.
+    player_division_histories() batched for a whole list)."""
+    if history is None:
+        history = core.player_division_history(conn, player_id)
+    if not history:
+        st.caption("No season history on file yet.")
+        return
+
+    grade_by_season: dict[tuple, str] = {}
+    for e in core.list_evaluations(conn, player_id):
+        key = (e["year"], e["season"], e["age_group"])
+        grade_by_season.setdefault(key, e["grade"])  # newest first, so first write wins
+
+    rows = []
+    for h in history:
+        position = core.get_position(conn, player_id, h["division_id"], h["team_id"])
+        coaches = core.list_team_coaches(conn, h["team_id"])
+        rows.append({
+            "Season": f"{h['year']} {h['season']}",
+            "Division": division_label(h["age_group"]),
+            "Team": h["team_name"],
+            "Grade": grade_by_season.get((h["year"], h["season"], h["age_group"])) or "—",
+            "Position": position or "—",
+            "Coach": ", ".join(coach_label(c) for c in coaches) if coaches else "—",
+        })
+    st.dataframe(zebra_style(pd.DataFrame(rows)), width="stretch", hide_index=True)
+
+
 # ---------------------------------------------------------------------------
 # Sidebar: shared settings
 # ---------------------------------------------------------------------------
@@ -2951,6 +2983,10 @@ def render_all_players_dialog():
                     conn, selected_player_id, division_name_by_id, all_divisions_for_players,
                     key_prefix="players_tab", nav_ids=player_ids, nav_pending_key=pending_key,
                 )
+
+                st.divider()
+                st.subheader("Previous Seasons")
+                render_player_season_history(conn, selected_player_id, histories.get(selected_player_id, []))
 
         deleted_players = core.list_players(conn, include_deleted=True)
         deleted_players = [p for p in deleted_players if p["deleted_at"]]

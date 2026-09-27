@@ -566,6 +566,24 @@ def api_player_evaluations(player_id: int, conn=Depends(get_conn), user=Depends(
     return core.list_evaluations(conn, player_id)
 
 
+@app.get("/players/{player_id}/history", tags=["players"])
+def api_player_history(player_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    """One row per season this player was rostered in (team, position,
+    grade, coaches) -- the same data the Streamlit app's All Players
+    dialog shows under a selected player, pre-joined here so the frontend
+    doesn't need a position + coaches round trip per season."""
+    history = core.player_division_history(conn, player_id)
+    grade_by_season: dict[tuple, str] = {}
+    for e in core.list_evaluations(conn, player_id):
+        key = (e["year"], e["season"], e["age_group"])
+        grade_by_season.setdefault(key, e["grade"])  # newest first, so first write wins
+    for h in history:
+        h["position"] = core.get_position(conn, player_id, h["division_id"], h["team_id"])
+        h["coaches"] = core.list_team_coaches(conn, h["team_id"])
+        h["grade"] = grade_by_season.get((h["year"], h["season"], h["age_group"]))
+    return history
+
+
 class EvaluationCreate(BaseModel):
     division_id: int
     team_id: int | None = None

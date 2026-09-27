@@ -219,6 +219,25 @@ def test_division_players_endpoint_includes_grade_and_note(conn, admin_auth, div
     assert players[0]["grade"] == "A"
 
 
+def test_player_history_endpoint_includes_team_grade_and_coach(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    coach_id = core.add_coach(conn, "Mario", "Lemieux")
+    core.assign_coach_to_team(conn, team_id, coach_id)
+    player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.add_roster_entry(conn, team_id, "87", "Sidney Crosby", player_id=player_id)
+    core.set_position(conn, player_id, division_id, team_id, "Center")
+    core.add_evaluation(conn, player_id, division_id, team_id, "A")
+
+    response = client.get(f"/players/{player_id}/history", auth=admin_auth)
+    assert response.status_code == 200
+    history = response.json()
+    assert len(history) == 1
+    assert history[0]["team_name"] == "Avalanche"
+    assert history[0]["position"] == "Center"
+    assert history[0]["grade"] == "A"
+    assert [c["id"] for c in history[0]["coaches"]] == [coach_id]
+
+
 def test_division_players_endpoint_excludes_sub_placeholder(conn, admin_auth, division_id):
     team_id = core.add_team(conn, division_id, "Avalanche")
     real_player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)

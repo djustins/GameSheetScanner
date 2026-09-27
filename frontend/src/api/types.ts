@@ -227,3 +227,65 @@ export interface ScheduleRow {
     away_score: number | null
   } | null
 }
+
+export interface Goal {
+  side: 'home' | 'away'
+  scorer_number: string
+  assist1_number: string | null
+  assist2_number: string | null
+  period: string | null
+  time: string | null
+}
+
+export interface Penalty {
+  side: 'home' | 'away'
+  player_number: string
+  penalty_type: string
+  period: string | null
+  time: string | null
+}
+
+export interface ShootoutAttempt {
+  side: 'home' | 'away'
+  round: number
+  player_number: string
+  scored: boolean
+}
+
+export interface GameData {
+  game_date: string
+  division: string
+  home_team: string
+  home_color: string | null
+  home_final_score: number | null
+  away_team: string
+  away_color: string | null
+  away_final_score: number | null
+  goals: Goal[]
+  penalties: Penalty[]
+  shootout_attempts: ShootoutAttempt[]
+  winner?: 'home' | 'away' | 'tie'
+}
+
+export interface GameSummary {
+  id: number
+  game_date: string
+  division: string
+  home_team: string
+  away_team: string
+  home_final_score: number | null
+  away_final_score: number | null
+}
+
+export interface GameListRow extends GameSummary {
+  winner: string | null
+  ot_winner: string | null
+  ot_loser: string | null
+  source_file: string
+}
+
+export interface ExtractResult {
+  label: string
+  extracted_data: GameData
+  duplicate: GameSummary | null
+}

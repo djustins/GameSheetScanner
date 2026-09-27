@@ -27,9 +27,11 @@ gets exposed beyond trusted, already-vetted league admins/coaches.
 """
 
 import os
+from pathlib import Path
 
+import anthropic
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
@@ -899,6 +901,103 @@ def api_undo_auto_draft(division_id: int, conn=Depends(get_conn), user=Depends(r
         core.undo_auto_draft(conn, division_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Game sheets (Claude OCR extraction) & Games
+# ---------------------------------------------------------------------------
+
+def _anthropic_client() -> anthropic.Anthropic:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ANTHROPIC_API_KEY is not configured on the server.",
+        )
+    return anthropic.Anthropic(api_key=api_key)
+
+
+@app.post("/game-sheets/extract", tags=["games"])
+async def api_extract_game_sheet(
+    file: UploadFile = File(...), conn=Depends(get_conn), user=Depends(require_writer)
+) -> list[dict]:
+    """Extracts one uploaded game sheet (PDF or image) with Claude. A
+    multi-page PDF is split first (core.split_pdf_bytes) so each page comes
+    back as its own queue item, matching the Streamlit app's Import
+    Scoresheets flow -- one {label, extracted_data, duplicate} entry per
+    page, "duplicate" set to the existing game on file under that label
+    (core.find_game_by_source_file) so the frontend can prompt Replace/Skip
+    before saving over it."""
+    raw = await file.read()
+    mime = core.guess_mime(file.filename)
+    pages = core.split_pdf_bytes(raw) if mime == "application/pdf" else [raw]
+    stem = Path(file.filename).stem
+    client = _anthropic_client()
+
+    results = []
+    for i, page_bytes in enumerate(pages, start=1):
+        label = file.filename if len(pages) == 1 else f"{stem}_p{i}.pdf"
+        page_mime = mime if len(pages) == 1 else "application/pdf"
+        try:
+            content_block = core.build_content_block(page_bytes, page_mime)
+            extracted = core.extract_game_sheet(client, content_block)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Extraction failed for {label}: {e}"
+            )
+        results.append({
+            "label": label, "extracted_data": extracted,
+            "duplicate": core.find_game_by_source_file(conn, label),
+        })
+    return results
+
+
+class GameSave(BaseModel):
+    data: dict
+    source_file: str
+    division_id: int
+
+
+@app.post("/games", status_code=status.HTTP_201_CREATED, tags=["games"])
+def api_create_game(body: GameSave, conn=Depends(get_conn), user=Depends(require_writer)) -> dict:
+    """`division_id` here is the *working* division -- insert_game resolves
+    the game's own division (year/season same as working, age group from
+    the sheet itself, which can differ) via core.resolve_division_id."""
+    try:
+        game_id, already_existed = core.insert_game(conn, body.data, body.source_file, body.division_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"id": game_id, "already_existed": already_existed}
+
+
+@app.get("/games/{game_id}", tags=["games"])
+def api_get_game(game_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    data, source_file = core.load_game(conn, game_id)
+    if data is None:
+        not_found("Game not found.")
+    return {"data": data, "source_file": source_file}
+
+
+class GameUpdate(BaseModel):
+    data: dict
+    division_id: int
+
+
+@app.patch("/games/{game_id}", tags=["games"])
+def api_update_game(game_id: int, body: GameUpdate, conn=Depends(get_conn), user=Depends(require_writer)) -> dict:
+    existing, _ = core.load_game(conn, game_id)
+    if existing is None:
+        not_found("Game not found.")
+    try:
+        core.update_game(conn, game_id, body.data, body.division_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"id": game_id}
+
+
+@app.delete("/games/{game_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["games"])
+def api_delete_game(game_id: int, conn=Depends(get_conn), user=Depends(require_writer)):
+    core.delete_game(conn, game_id)
 
 
 # ---------------------------------------------------------------------------

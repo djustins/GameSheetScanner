@@ -575,3 +575,123 @@ def test_export_workbook_endpoint(conn, admin_auth, division_id):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert len(response.content) > 0
+
+
+def _game_payload(home="Avalanche", away="Wild", home_score=3, away_score=2, **overrides):
+    data = {
+        "game_date": "2026-07-14", "division": "Penguin",
+        "home_team": home, "home_color": "Red", "home_final_score": home_score,
+        "away_team": away, "away_color": "Blue", "away_final_score": away_score,
+        "goals": [], "penalties": [], "shootout_attempts": [],
+    }
+    data.update(overrides)
+    return data
+
+
+def test_game_crud_lifecycle(conn, admin_auth, division_id):
+    create = client.post(
+        "/games",
+        json={"data": _game_payload(), "source_file": "sheet1.pdf", "division_id": division_id},
+        auth=admin_auth,
+    )
+    assert create.status_code == 201
+    game_id = create.json()["id"]
+    assert create.json()["already_existed"] is False
+
+    fetched = client.get(f"/games/{game_id}", auth=admin_auth)
+    assert fetched.status_code == 200
+    assert fetched.json()["source_file"] == "sheet1.pdf"
+    assert fetched.json()["data"]["home_team"] == "Avalanche"
+
+    updated = client.patch(
+        f"/games/{game_id}",
+        json={"data": _game_payload(home_score=5), "division_id": division_id},
+        auth=admin_auth,
+    )
+    assert updated.status_code == 200
+    assert client.get(f"/games/{game_id}", auth=admin_auth).json()["data"]["home_final_score"] == 5
+
+    deleted = client.delete(f"/games/{game_id}", auth=admin_auth)
+    assert deleted.status_code == 204
+    assert client.get(f"/games/{game_id}", auth=admin_auth).status_code == 404
+
+
+def test_create_game_rejects_a_tie(conn, admin_auth, division_id):
+    response = client.post(
+        "/games",
+        json={
+            "data": _game_payload(home_score=2, away_score=2), "source_file": "tie.pdf",
+            "division_id": division_id,
+        },
+        auth=admin_auth,
+    )
+    assert response.status_code == 409
+
+
+class _FakeTextBlock:
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class _FakeMessage:
+    def __init__(self, text):
+        self.content = [_FakeTextBlock(text)]
+
+
+class _FakeMessages:
+    def __init__(self, text):
+        self._text = text
+
+    def create(self, **kwargs):
+        return _FakeMessage(self._text)
+
+
+class _FakeAnthropicClient:
+    def __init__(self, text):
+        self.messages = _FakeMessages(text)
+
+
+def test_extract_game_sheet_endpoint(conn, admin_auth, division_id, monkeypatch):
+    import json as _json
+
+    fake_extracted = _game_payload()
+    monkeypatch.setattr(api, "_anthropic_client", lambda: _FakeAnthropicClient(_json.dumps(fake_extracted)))
+
+    response = client.post(
+        "/game-sheets/extract",
+        files={"file": ("sheet1.png", b"fake-image-bytes", "image/png")},
+        auth=admin_auth,
+    )
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) == 1
+    assert results[0]["label"] == "sheet1.png"
+    assert results[0]["extracted_data"]["home_team"] == "Avalanche"
+    assert results[0]["duplicate"] is None
+
+
+def test_extract_game_sheet_flags_duplicate(conn, admin_auth, division_id, monkeypatch):
+    import json as _json
+
+    core.insert_game(conn, _game_payload(), source_file="sheet1.png", working_division_id=division_id)
+    fake_extracted = _game_payload()
+    monkeypatch.setattr(api, "_anthropic_client", lambda: _FakeAnthropicClient(_json.dumps(fake_extracted)))
+
+    response = client.post(
+        "/game-sheets/extract",
+        files={"file": ("sheet1.png", b"fake-image-bytes", "image/png")},
+        auth=admin_auth,
+    )
+    assert response.status_code == 200
+    assert response.json()[0]["duplicate"] is not None
+    assert response.json()[0]["duplicate"]["home_team"] == "Avalanche"
+
+
+def test_extract_game_sheet_requires_writer(conn, readonly_auth):
+    response = client.post(
+        "/game-sheets/extract",
+        files={"file": ("sheet1.png", b"fake-image-bytes", "image/png")},
+        auth=readonly_auth,
+    )
+    assert response.status_code == 403

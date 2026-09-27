@@ -52,6 +52,25 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return body as T
 }
 
+export async function apiFetchMultipart<T>(path: string, formData: FormData): Promise<T> {
+  const headers = new Headers()
+  headers.set('Accept', 'application/json')
+  const token = getToken()
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  const response = await fetch(`${API_BASE_URL}${path}`, { method: 'POST', headers, body: formData })
+
+  const isJson = response.headers.get('content-type')?.includes('application/json')
+  const body = isJson ? await response.json() : await response.text()
+
+  if (!response.ok) {
+    const message = isJson && body?.detail ? String(body.detail) : `Request failed (${response.status})`
+    throw new ApiError(response.status, message)
+  }
+  return body as T
+}
+
 export async function apiFetchBlob(path: string): Promise<{ blob: Blob; filename: string | null }> {
   const headers = new Headers()
   const token = getToken()

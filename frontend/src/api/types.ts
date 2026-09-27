@@ -37,9 +37,89 @@ export interface DivisionPlayer extends Player {
 export interface Coach {
   id: number
   first_name: string
-  last_name: string
+  last_name: string | null
   nickname: string | null
+  phone: string | null
+  email: string | null
+  deleted_at: string | null
   name: string
+}
+
+export interface CoachTeam {
+  team_id: number
+  team_name: string
+  division_id: number
+  year: number
+  season: string
+  age_group: string
+  category: string | null
+}
+
+export interface CoachChild {
+  id: number
+  first_name: string
+  last_name: string | null
+  nickname: string | null
+  current_division_id: number | null
+  name: string
+}
+
+export interface RosterEntry {
+  id: number
+  number: string
+  name: string
+  player_id: number | null
+}
+
+export interface DraftPoolPlayer {
+  id: number
+  first_name: string
+  last_name: string | null
+  nickname: string | null
+  birth_date: string | null
+  name: string
+}
+
+export interface DraftOrderEntry {
+  slot: number
+  team_id: number
+  team_name: string
+}
+
+export interface Draft {
+  id: number
+  division_id: number
+  status: 'in_progress' | 'completed'
+  current_pick_number: number
+  order: DraftOrderEntry[]
+  current_team_id?: number | null
+  current_team_name?: string | null
+  round?: number
+}
+
+export interface DraftPick {
+  pick_number: number
+  round: number
+  team_name: string
+  first_name: string
+  last_name: string | null
+  nickname: string | null
+  picked_at: string
+  player_name: string
+}
+
+export interface AutoDraftRun {
+  id: number
+  division_id: number
+  roster_entry_ids: number[]
+  coach_assignments: { team_id: number; coach_id: number }[]
+  created_at: string
+}
+
+export interface AutoDraftResult {
+  assigned: number
+  teams: number
+  warnings: string[]
 }
 
 export interface PlayerHistoryEntry {

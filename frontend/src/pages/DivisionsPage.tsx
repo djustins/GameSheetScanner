@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   ActionIcon,
   Button,
@@ -10,6 +11,7 @@ import {
   Table,
   Tabs,
   Text,
+  TextInput,
   Title,
 } from '@mantine/core'
 import { useForm } from '@mantine/form'
@@ -23,6 +25,7 @@ import {
   listDivisionTeams,
   listDivisions,
 } from '../api/divisions'
+import { createTeam } from '../api/teams'
 import { getAgeGroups } from '../api/meta'
 import type { Player } from '../api/types'
 import { ApiError } from '../api/client'
@@ -35,10 +38,12 @@ const SEASONS = ['Spring', 'Summer', 'Fall', 'Winter']
 
 export function DivisionsPage() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [divisionId, setDivisionId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null)
+  const [newTeamName, setNewTeamName] = useState('')
 
   const { data: divisions, isLoading } = useQuery({ queryKey: ['divisions'], queryFn: listDivisions })
   const { data: ageGroups } = useQuery({ queryKey: ['age-groups'], queryFn: getAgeGroups })
@@ -65,6 +70,17 @@ export function DivisionsPage() {
     },
     onError: (err) => {
       notifications.show({ color: 'red', message: err instanceof ApiError ? err.message : 'Failed to create division.' })
+    },
+  })
+
+  const createTeamMutation = useMutation({
+    mutationFn: () => createTeam({ division_id: Number(divisionId), name: newTeamName.trim() }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['division-teams', divisionId] })
+      setNewTeamName('')
+    },
+    onError: (err) => {
+      notifications.show({ color: 'red', message: err instanceof ApiError ? err.message : 'Failed to create team.' })
     },
   })
 
@@ -168,6 +184,22 @@ export function DivisionsPage() {
           </Tabs.Panel>
 
           <Tabs.Panel value="teams" pt="md">
+            {user?.is_admin && (
+              <Group mb="sm">
+                <TextInput
+                  placeholder="Team name"
+                  value={newTeamName}
+                  onChange={(e) => setNewTeamName(e.currentTarget.value)}
+                />
+                <Button
+                  disabled={!newTeamName.trim()}
+                  loading={createTeamMutation.isPending}
+                  onClick={() => createTeamMutation.mutate()}
+                >
+                  New Team
+                </Button>
+              </Group>
+            )}
             <Table striped highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
@@ -177,7 +209,11 @@ export function DivisionsPage() {
               </Table.Thead>
               <Table.Tbody>
                 {(teams ?? []).map((t) => (
-                  <Table.Tr key={t.id}>
+                  <Table.Tr
+                    key={t.id}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => navigate(`/teams/${t.id}?division=${divisionId}`)}
+                  >
                     <Table.Td>{t.name}</Table.Td>
                     <Table.Td>{t.color ?? '—'}</Table.Td>
                   </Table.Tr>

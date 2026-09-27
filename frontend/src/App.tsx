@@ -3,6 +3,9 @@ import { LoginPage } from './pages/LoginPage'
 import { DivisionsPage } from './pages/DivisionsPage'
 import { PlayersPage } from './pages/PlayersPage'
 import { StatsStandingsPage } from './pages/StatsStandingsPage'
+import { TeamRosterPage } from './pages/TeamRosterPage'
+import { CoachesPage } from './pages/CoachesPage'
+import { DraftPage } from './pages/DraftPage'
 import { ProtectedRoute } from './auth/ProtectedRoute'
 import { AppLayout } from './layout/AppLayout'
 
@@ -21,6 +24,9 @@ function App() {
         <Route path="/divisions" element={<DivisionsPage />} />
         <Route path="/players" element={<PlayersPage />} />
         <Route path="/stats-standings" element={<StatsStandingsPage />} />
+        <Route path="/teams/:teamId" element={<TeamRosterPage />} />
+        <Route path="/coaches" element={<CoachesPage />} />
+        <Route path="/draft" element={<DraftPage />} />
       </Route>
     </Routes>
   )

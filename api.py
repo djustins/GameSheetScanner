@@ -488,6 +488,20 @@ def api_link_coach_child(
     core.link_coach_child(conn, coach_id, player_id)
 
 
+@app.delete("/coaches/{coach_id}/children/{player_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["coaches"])
+def api_unlink_coach_child(
+    coach_id: int, player_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+):
+    core.unlink_coach_child(conn, coach_id, player_id)
+
+
+@app.get("/coaches/{coach_id}/teams", tags=["coaches"])
+def api_coach_teams(coach_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    """Every team this coach has ever been assigned to, across every
+    division/season -- the Coaches page's "Teams coached" history."""
+    return core.list_coach_teams(conn, coach_id)
+
+
 # ---------------------------------------------------------------------------
 # Players
 # ---------------------------------------------------------------------------
@@ -654,13 +668,61 @@ def api_set_position(
     return {"position": core.get_position(conn, player_id, body.division_id, body.team_id)}
 
 
+@app.get("/players/{player_id}/season-grade", tags=["players"])
+def api_get_season_grade(
+    player_id: int, division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> dict:
+    """A player's "Season Grade" for one division -- the most recent
+    evaluation on record there, same value the Team Rosters grid's Season
+    Grade cell shows/edits (a quick edit here updates that evaluation in
+    place rather than growing a new history row; use POST
+    /players/{id}/evaluations for that)."""
+    return {"grade": core.get_season_grade(conn, player_id, division_id)}
+
+
+class SeasonGradeUpdate(BaseModel):
+    division_id: int
+    team_id: int | None = None
+    grade: str
+
+
+@app.put("/players/{player_id}/season-grade", tags=["players"])
+def api_set_season_grade(
+    player_id: int, body: SeasonGradeUpdate, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    core.set_season_grade(conn, player_id, body.division_id, body.team_id, body.grade)
+    return {"grade": core.get_season_grade(conn, player_id, body.division_id)}
+
+
 # ---------------------------------------------------------------------------
 # Draft
 # ---------------------------------------------------------------------------
 
 @app.get("/divisions/{division_id}/draft", tags=["draft"])
 def api_get_draft(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict | None:
-    return core.get_draft(conn, division_id)
+    """None if no draft exists yet for this division. Otherwise also
+    includes "order" (the snake draft's team sequence) and, while
+    in_progress, "current_team_id"/"current_team_name"/"round" -- so the
+    frontend doesn't need to reimplement the snake-order math client-side
+    just to show whose turn it is."""
+    draft = core.get_draft(conn, division_id)
+    if draft is None:
+        return None
+    order = core.list_draft_order(conn, draft["id"])
+    draft["order"] = order
+    if draft["status"] == "in_progress" and order:
+        current_team_id = core.current_pick_team_id(conn, draft["id"])
+        draft["current_team_id"] = current_team_id
+        draft["current_team_name"] = next(
+            (o["team_name"] for o in order if o["team_id"] == current_team_id), None
+        )
+        draft["round"] = (draft["current_pick_number"] - 1) // len(order) + 1
+    return draft
+
+
+@app.get("/divisions/{division_id}/draft/auto-draft-run", tags=["draft"])
+def api_get_auto_draft_run(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict | None:
+    return core.get_auto_draft_run(conn, division_id)
 
 
 @app.get("/divisions/{division_id}/draft/pool", tags=["draft"])

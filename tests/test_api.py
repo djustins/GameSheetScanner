@@ -148,6 +148,36 @@ def test_set_and_get_position(conn, admin_auth, division_id):
     assert cleared.json() == {"position": None}
 
 
+def test_set_and_get_season_grade(conn, admin_auth, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+
+    initial = client.get(
+        f"/players/{player_id}/season-grade", params={"division_id": division_id}, auth=admin_auth
+    )
+    assert initial.status_code == 200
+    assert initial.json() == {"grade": None}
+
+    setresp = client.put(
+        f"/players/{player_id}/season-grade",
+        json={"division_id": division_id, "team_id": team_id, "grade": "A"},
+        auth=admin_auth,
+    )
+    assert setresp.status_code == 200
+    assert setresp.json() == {"grade": "A"}
+
+    # Editing again updates the same evaluation in place rather than adding
+    # a second one.
+    client.put(
+        f"/players/{player_id}/season-grade",
+        json={"division_id": division_id, "team_id": team_id, "grade": "B"},
+        auth=admin_auth,
+    )
+    evaluations = client.get(f"/players/{player_id}/evaluations", auth=admin_auth).json()
+    assert len(evaluations) == 1
+    assert evaluations[0]["grade"] == "B"
+
+
 def test_roster_entry_update_relinks_player(conn, admin_auth, division_id):
     team_id = core.add_team(conn, division_id, "Avalanche")
     create = client.post(
@@ -288,6 +318,48 @@ def test_remove_all_players_from_division_endpoint(conn, admin_auth, division_id
     assert response.json() == {"removed": 1}
     assert core.get_player(conn, player_id) is not None
     assert core.list_roster(conn, team_id) == []
+
+
+def test_coach_teams_and_unlink_child_endpoints(conn, admin_auth, division_id):
+    coach_id = core.add_coach(conn, "Mario", "Lemieux")
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    core.assign_coach_to_team(conn, team_id, coach_id)
+    player_id = core.add_player(conn, "Austin", "Lemieux")
+    core.link_coach_child(conn, coach_id, player_id)
+
+    teams = client.get(f"/coaches/{coach_id}/teams", auth=admin_auth)
+    assert teams.status_code == 200
+    assert [t["team_id"] for t in teams.json()] == [team_id]
+
+    unlinked = client.delete(f"/coaches/{coach_id}/children/{player_id}", auth=admin_auth)
+    assert unlinked.status_code == 204
+    assert client.get(f"/coaches/{coach_id}/children", auth=admin_auth).json() == []
+
+
+def test_draft_endpoint_includes_order_and_current_team(conn, admin_auth, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+
+    no_draft = client.get(f"/divisions/{division_id}/draft", auth=admin_auth)
+    assert no_draft.status_code == 200
+    assert no_draft.json() is None
+
+    started = client.post(
+        f"/divisions/{division_id}/draft/start", json={"team_ids_in_order": [team_a, team_b]}, auth=admin_auth
+    )
+    assert started.status_code == 201
+
+    draft = client.get(f"/divisions/{division_id}/draft", auth=admin_auth)
+    assert draft.status_code == 200
+    body = draft.json()
+    assert [o["team_id"] for o in body["order"]] == [team_a, team_b]
+    assert body["current_team_id"] == team_a
+    assert body["round"] == 1
+
+    no_run = client.get(f"/divisions/{division_id}/draft/auto-draft-run", auth=admin_auth)
+    assert no_run.status_code == 200
+    assert no_run.json() is None
 
 
 def test_move_player_note_is_dropped_for_non_admin(conn, division_id):

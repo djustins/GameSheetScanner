@@ -7,6 +7,8 @@ const NAV_ITEMS = [
   { to: '/divisions', label: 'Divisions' },
   { to: '/players', label: 'All Players' },
   { to: '/stats-standings', label: 'Stats & Standings' },
+  { to: '/coaches', label: 'Coaches' },
+  { to: '/draft', label: 'Draft' },
 ]
 
 export function AppLayout() {

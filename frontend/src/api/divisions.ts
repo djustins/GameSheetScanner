@@ -46,6 +46,10 @@ export function getPlayerStats(divisionId: number): Promise<PlayerStatsRow[]> {
   return apiFetch<PlayerStatsRow[]>(`/divisions/${divisionId}/stats`)
 }
 
+export function getSeasonGrades(divisionId: number): Promise<Record<string, string>> {
+  return apiFetch<Record<string, string>>(`/divisions/${divisionId}/season-grades`)
+}
+
 export function getSchedule(divisionId: number): Promise<ScheduleRow[]> {
   return apiFetch<ScheduleRow[]>(`/divisions/${divisionId}/schedule`)
 }

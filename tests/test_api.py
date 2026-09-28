@@ -265,6 +265,19 @@ def test_division_players_endpoint_includes_grade_and_note(conn, admin_auth, div
     assert players[0]["grade"] == "A"
 
 
+def test_division_season_grades_endpoint(conn, admin_auth, division_id):
+    p1 = core.add_player(conn, "Sidney", "Crosby")
+    p2 = core.add_player(conn, "Wayne", "Gretzky")
+    core.add_evaluation(conn, p1, division_id, None, "A")
+    core.add_evaluation(conn, p2, division_id, None, "C")
+
+    response = client.get(f"/divisions/{division_id}/season-grades", auth=admin_auth)
+    assert response.status_code == 200
+    grades = response.json()
+    assert grades[str(p1)] == "A"
+    assert grades[str(p2)] == "C"
+
+
 def test_player_history_endpoint_includes_team_grade_and_coach(conn, admin_auth, division_id):
     team_id = core.add_team(conn, division_id, "Avalanche")
     coach_id = core.add_coach(conn, "Mario", "Lemieux")

@@ -351,6 +351,18 @@ def api_division_stats(division_id: int, conn=Depends(get_conn), user=Depends(ge
     return core.get_player_stats(conn, division_id)
 
 
+@app.get("/divisions/{division_id}/season-grades", tags=["divisions"])
+def api_division_season_grades(
+    division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> dict[int, str]:
+    """Every player's most recent evaluation grade for this division,
+    player_id -> grade, in one query -- for a Teams overview's average/
+    breakdown or a grade-distribution summary without a per-player round
+    trip. Keys are ints but come back as JSON object string keys, same as
+    any dict[int, ...] FastAPI response."""
+    return core.get_season_grades_for_division(conn, division_id)
+
+
 # ---------------------------------------------------------------------------
 # Teams
 # ---------------------------------------------------------------------------

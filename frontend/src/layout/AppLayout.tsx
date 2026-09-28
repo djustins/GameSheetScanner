@@ -4,6 +4,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 
 const NAV_ITEMS = [
+  { to: '/', label: 'Home' },
   { to: '/divisions', label: 'Divisions' },
   { to: '/players', label: 'All Players' },
   { to: '/games', label: 'Games' },
@@ -49,7 +50,7 @@ export function AppLayout() {
           <NavLink
             key={item.to}
             label={item.label}
-            active={location.pathname.startsWith(item.to)}
+            active={item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)}
             onClick={() => navigate(item.to)}
           />
         ))}

@@ -36,7 +36,9 @@ import { ExperienceBadge } from '../components/ExperienceBadge'
 import { PlayerDetailDrawer } from '../components/PlayerDetailDrawer'
 import { RecycleBinModal } from '../components/RecycleBinModal'
 import { SchedulePanel } from '../components/SchedulePanel'
+import { TeamsOverviewTable } from '../components/TeamsOverviewTable'
 import { divisionSeasonLabel } from '../utils/format'
+import { gradeBreakdown } from '../utils/grades'
 
 const SEASONS = ['Spring', 'Summer', 'Fall', 'Winter']
 
@@ -171,6 +173,13 @@ export function DivisionsPage() {
           </Tabs.List>
 
           <Tabs.Panel value="players" pt="md">
+            <Text size="sm" c="dimmed" mb="xs">
+              {players?.length ?? 0} player(s)
+              {players && players.length > 0 && (() => {
+                const { gradedCount, breakdown } = gradeBreakdown(players.map((p) => p.grade))
+                return ` · ${gradedCount} graded${gradedCount > 0 ? ` · ${breakdown}` : ''}`
+              })()}
+            </Text>
             <Table striped highlightOnHover>
               <Table.Thead>
                 <Table.Tr>
@@ -217,26 +226,11 @@ export function DivisionsPage() {
                 </Button>
               </Group>
             )}
-            <Table striped highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Name</Table.Th>
-                  <Table.Th>Color</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {(teams ?? []).map((t) => (
-                  <Table.Tr
-                    key={t.id}
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => navigate(`/teams/${t.id}?division=${divisionId}`)}
-                  >
-                    <Table.Td>{t.name}</Table.Td>
-                    <Table.Td>{t.color ?? '—'}</Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
+            <TeamsOverviewTable
+              divisionId={Number(divisionId)}
+              teams={teams ?? []}
+              onRowClick={(t) => navigate(`/teams/${t.id}?division=${divisionId}`)}
+            />
           </Tabs.Panel>
 
           <Tabs.Panel value="coaches" pt="md">

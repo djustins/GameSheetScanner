@@ -298,6 +298,47 @@ def api_remove_all_players_from_division(
     return {"removed": removed}
 
 
+@app.post("/divisions/{division_id}/players/import-plan", tags=["divisions"])
+async def api_player_import_plan(
+    division_id: int, file: UploadFile = File(...), conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    """Reads an uploaded player list (CSV/XLSX/XLS/ODS), matches each row
+    against existing player profiles by name (and birth date, to tell
+    same-named players apart or flag a possible mismatch), and returns a
+    plan for review -- see core.build_player_import_plan. Any row whose
+    status is "ambiguous"/"conflict" needs a "resolved_action" filled in
+    (client-side) before POST .../import-apply will act on it."""
+    raw = await file.read()
+    try:
+        rows = core.read_table_bytes(file.filename, raw)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    columns = core.detect_player_import_columns(list(rows[0].keys()) if rows else [])
+    has_name = "name" in columns or ("first_name" in columns and "last_name" in columns)
+    if not has_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Couldn\'t find a name column (e.g. "Player Name", "Name", or separate "First Name"/'
+                   '"Last Name" columns) — can\'t match or create players without one.',
+        )
+    plan = core.build_player_import_plan(conn, division_id, rows, columns)
+    return {"columns": columns, "plan": plan}
+
+
+class PlayerImportApply(BaseModel):
+    plan: list[dict]
+
+
+@app.post("/divisions/{division_id}/players/import-apply", tags=["divisions"])
+def api_player_import_apply(
+    division_id: int, body: PlayerImportApply, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    """Writes a plan from POST .../import-plan (with every ambiguous/
+    conflict row's resolved_action filled in) to the database -- see
+    core.apply_player_import_plan."""
+    return core.apply_player_import_plan(conn, division_id, body.plan)
+
+
 @app.get("/divisions/{division_id}/schedule", tags=["divisions"])
 def api_division_schedule(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
     return core.list_schedule(conn, division_id)

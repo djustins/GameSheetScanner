@@ -314,3 +314,45 @@ export interface Evaluation {
   grade: string
   created_at: string
 }
+
+export interface PlayerImportCandidate {
+  id: number
+  name: string
+  birth_date: string | null
+}
+
+export interface PlayerImportEntry {
+  row_number: number
+  name: string | null
+  first_name: string | null
+  last_name: string | null
+  birth_date: string | null
+  contact_first_name: string | null
+  contact_last_name: string | null
+  contact_phone: string | null
+  contact_email: string | null
+  team_name: string | null
+  number: string | null
+  position: string | null
+  coach_name: string | null
+  status: 'invalid' | 'create' | 'update' | 'ambiguous' | 'conflict'
+  matched_player_id: number | null
+  candidates: PlayerImportCandidate[]
+  conflict_detail: { existing: string | null; incoming: string | null; sibling_match: string | null } | null
+  resolved_action: 'invalid' | 'create' | 'update' | 'use_existing' | null
+  resolved_player_id: number | null
+}
+
+export interface PlayerImportPlanResponse {
+  columns: Record<string, string>
+  plan: PlayerImportEntry[]
+}
+
+export interface PlayerImportResult {
+  created: number
+  updated: number
+  skipped: number
+  rostered: number
+  coached: number
+  warnings: string[]
+}

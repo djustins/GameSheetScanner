@@ -33,6 +33,7 @@ import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { CoachCarryoverPanel } from '../components/CoachCarryoverPanel'
 import { ExperienceBadge } from '../components/ExperienceBadge'
+import { ImportPlayersPanel } from '../components/ImportPlayersPanel'
 import { PlayerDetailDrawer } from '../components/PlayerDetailDrawer'
 import { RecycleBinModal } from '../components/RecycleBinModal'
 import { SchedulePanel } from '../components/SchedulePanel'
@@ -170,6 +171,7 @@ export function DivisionsPage() {
             <Tabs.Tab value="teams">Teams</Tabs.Tab>
             <Tabs.Tab value="coaches">Coach Carryover</Tabs.Tab>
             <Tabs.Tab value="schedule">Schedule</Tabs.Tab>
+            <Tabs.Tab value="import">Import Players</Tabs.Tab>
           </Tabs.List>
 
           <Tabs.Panel value="players" pt="md">
@@ -239,6 +241,10 @@ export function DivisionsPage() {
 
           <Tabs.Panel value="schedule" pt="md">
             <SchedulePanel divisionId={Number(divisionId)} />
+          </Tabs.Panel>
+
+          <Tabs.Panel value="import" pt="md">
+            <ImportPlayersPanel divisionId={Number(divisionId)} />
           </Tabs.Panel>
         </Tabs>
       )}

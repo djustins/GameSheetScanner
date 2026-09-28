@@ -647,6 +647,65 @@ def test_recycle_bin_endpoints(conn, admin_auth, division_id):
     assert any(c["id"] == coach_id for c in active_coaches)
 
 
+def test_player_import_plan_and_apply(conn, admin_auth, division_id):
+    csv_bytes = (
+        b"Name,Date of Birth,Team,Number,Coach\n"
+        b"Sidney Crosby,2015-08-07,Avalanche,87,Mario Lemieux\n"
+        b"Wayne Gretzky,,Avalanche,99,\n"
+    )
+    plan_resp = client.post(
+        f"/divisions/{division_id}/players/import-plan",
+        files={"file": ("players.csv", csv_bytes, "text/csv")},
+        auth=admin_auth,
+    )
+    assert plan_resp.status_code == 200
+    body = plan_resp.json()
+    assert body["columns"]["name"] == "Name"
+    plan = body["plan"]
+    assert len(plan) == 2
+    assert all(e["status"] == "create" for e in plan)
+    assert all(e["resolved_action"] == "create" for e in plan)
+
+    apply_resp = client.post(
+        f"/divisions/{division_id}/players/import-apply", json={"plan": plan}, auth=admin_auth
+    )
+    assert apply_resp.status_code == 200
+    result = apply_resp.json()
+    assert result["created"] == 2
+    assert result["rostered"] == 2
+    assert result["coached"] == 1
+
+    all_players = client.get("/players", auth=admin_auth).json()
+    assert {"Sidney Crosby", "Wayne Gretzky"} <= {p["name"] for p in all_players}
+
+    roster = client.get(f"/divisions/{division_id}/teams", auth=admin_auth).json()
+    assert any(t["name"] == "Avalanche" for t in roster)
+
+
+def test_player_import_plan_rejects_file_with_no_name_column(conn, admin_auth, division_id):
+    csv_bytes = b"Team,Number\nAvalanche,87\n"
+    response = client.post(
+        f"/divisions/{division_id}/players/import-plan",
+        files={"file": ("players.csv", csv_bytes, "text/csv")},
+        auth=admin_auth,
+    )
+    assert response.status_code == 400
+
+
+def test_player_import_plan_detects_conflict(conn, admin_auth, division_id):
+    core.add_player(conn, "Sidney", "Crosby", birth_date="2015-08-07")
+    csv_bytes = b"Name,Date of Birth\nSidney Crosby,2015-08-08\n"
+    response = client.post(
+        f"/divisions/{division_id}/players/import-plan",
+        files={"file": ("players.csv", csv_bytes, "text/csv")},
+        auth=admin_auth,
+    )
+    assert response.status_code == 200
+    plan = response.json()["plan"]
+    assert plan[0]["status"] == "conflict"
+    assert plan[0]["resolved_action"] is None
+
+
 def test_export_workbook_endpoint(conn, admin_auth, division_id):
     response = client.get(f"/divisions/{division_id}/export.xlsx", auth=admin_auth)
     assert response.status_code == 200

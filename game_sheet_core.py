@@ -3738,3 +3738,31 @@ def export_workbook(conn: PGConnection, division_id: int) -> bytes:
             df = pd.DataFrame(rows)
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     return buf.getvalue()
+
+
+def read_table_bytes(filename: str, data: bytes) -> list[dict]:
+    """A CSV/XLSX/XLS/ODS file's rows as a list of {header: value} dicts,
+    dispatched by filename extension -- the byte-based twin of the
+    Streamlit app's read_uploaded_table (which takes a Streamlit
+    UploadedFile instead), for a caller that already has the raw bytes
+    (e.g. an API endpoint's UploadFile). Raises ValueError for an
+    unrecognized extension or a file pandas can't parse, with a message
+    naming the actual problem rather than a raw pandas traceback."""
+    import pandas as pd
+
+    name = (filename or "").lower()
+    buf = BytesIO(data)
+    try:
+        if name.endswith(".csv"):
+            df = pd.read_csv(buf, dtype=str)
+        elif name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(buf, dtype=str)
+        elif name.endswith(".ods"):
+            df = pd.read_excel(buf, engine="odf", dtype=str)
+        else:
+            raise ValueError(f"Unrecognized file type for {filename!r} — use a .csv, .xlsx, .xls, or .ods file.")
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Couldn't read {filename!r}: {e}") from e
+    return df.to_dict("records")

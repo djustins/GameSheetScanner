@@ -11,3 +11,7 @@ export function setPlayerParent(playerId: number, parentId: number | null): Prom
     body: JSON.stringify({ parent_id: parentId }),
   })
 }
+
+export function linkSiblings(playerId: number, otherPlayerId: number): Promise<{ parent_id: number }> {
+  return apiFetch(`/players/${playerId}/siblings/${otherPlayerId}`, { method: 'POST' })
+}

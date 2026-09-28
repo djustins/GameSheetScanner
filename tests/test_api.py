@@ -237,6 +237,22 @@ def test_assign_coach_conflict_surfaces_as_409(conn, admin_auth, division_id):
     assert conflict.status_code == 409
 
 
+def test_delete_evaluation_endpoint(conn, admin_auth, division_id):
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    created = client.post(
+        f"/players/{player_id}/evaluations", json={"division_id": division_id, "grade": "A"}, auth=admin_auth
+    )
+    assert created.status_code == 201
+    evaluation_id = created.json()["id"]
+
+    deleted = client.delete(f"/players/{player_id}/evaluations/{evaluation_id}", auth=admin_auth)
+    assert deleted.status_code == 204
+    assert client.get(f"/players/{player_id}/evaluations", auth=admin_auth).json() == []
+
+    missing = client.delete(f"/players/{player_id}/evaluations/{evaluation_id}", auth=admin_auth)
+    assert missing.status_code == 404
+
+
 def test_division_players_endpoint_includes_grade_and_note(conn, admin_auth, division_id):
     player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
     core.add_evaluation(conn, player_id, division_id, None, "A")
@@ -531,6 +547,56 @@ def test_parent_and_siblings_endpoints(conn, admin_auth):
     siblings = client.get(f"/players/{p1}/siblings", auth=admin_auth)
     assert siblings.status_code == 200
     assert [s["id"] for s in siblings.json()] == [p2]
+
+
+def test_link_siblings_endpoint_creates_shared_parent(conn, admin_auth):
+    p1 = core.add_player(conn, "Leah", "Pratti")
+    p2 = core.add_player(conn, "Nico", "Pratti")
+    assert core.get_player(conn, p1)["parent_id"] is None
+
+    linked = client.post(f"/players/{p1}/siblings/{p2}", auth=admin_auth)
+    assert linked.status_code == 200
+    parent_id = linked.json()["parent_id"]
+    assert parent_id is not None
+    assert core.get_player(conn, p1)["parent_id"] == parent_id
+    assert core.get_player(conn, p2)["parent_id"] == parent_id
+
+    siblings = client.get(f"/players/{p1}/siblings", auth=admin_auth)
+    assert [s["id"] for s in siblings.json()] == [p2]
+
+
+def test_link_siblings_endpoint_merges_existing_groups(conn, admin_auth):
+    p1 = core.add_player(conn, "Leah", "Pratti")
+    p2 = core.add_player(conn, "Nico", "Pratti")
+    p3 = core.add_player(conn, "Mia", "Pratti")
+    core.link_players_as_siblings(conn, p2, p3)  # p2 and p3 already siblings
+
+    client.post(f"/players/{p1}/siblings/{p2}", auth=admin_auth)
+
+    siblings = client.get(f"/players/{p1}/siblings", auth=admin_auth)
+    assert sorted(s["id"] for s in siblings.json()) == sorted([p2, p3])
+
+
+def test_link_siblings_endpoint_rejects_self_link(conn, admin_auth):
+    p1 = core.add_player(conn, "Leah", "Pratti")
+    response = client.post(f"/players/{p1}/siblings/{p1}", auth=admin_auth)
+    assert response.status_code == 409
+
+
+def test_player_usa_ball_hockey_id_field(conn, admin_auth):
+    create = client.post(
+        "/players", json={"first_name": "Sidney", "last_name": "Crosby", "usa_ball_hockey_id": "USA12345"},
+        auth=admin_auth,
+    )
+    assert create.status_code == 201
+    player_id = create.json()["id"]
+    assert create.json()["usa_ball_hockey_id"] == "USA12345"
+
+    updated = client.patch(
+        f"/players/{player_id}", json={"usa_ball_hockey_id": "USA99999"}, auth=admin_auth
+    )
+    assert updated.status_code == 200
+    assert updated.json()["usa_ball_hockey_id"] == "USA99999"
 
 
 def test_recycle_bin_endpoints(conn, admin_auth, division_id):

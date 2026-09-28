@@ -35,6 +35,9 @@ export function AppLayout() {
             <Text size="sm" c="dimmed">
               {user?.display_name}
             </Text>
+            <Text size="sm" c="blue" style={{ cursor: 'pointer' }} onClick={() => navigate('/tokens')}>
+              API Tokens
+            </Text>
             <Text size="sm" c="blue" style={{ cursor: 'pointer' }} onClick={logout}>
               Log out
             </Text>

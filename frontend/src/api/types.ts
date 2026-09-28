@@ -37,6 +37,7 @@ export interface Player {
   contact_phone: string | null
   contact_email: string | null
   parent_id: number | null
+  usa_ball_hockey_id: string | null
   deleted_at?: string | null
 }
 
@@ -288,4 +289,28 @@ export interface ExtractResult {
   label: string
   extracted_data: GameData
   duplicate: GameSummary | null
+}
+
+export interface ApiToken {
+  id: number
+  name: string
+  created_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
+export interface ApiTokenCreated {
+  id: number
+  name: string
+  token: string
+}
+
+export interface Evaluation {
+  id: number
+  year: number
+  season: string
+  age_group: string
+  team_name: string | null
+  grade: string
+  created_at: string
 }

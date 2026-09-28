@@ -8,6 +8,7 @@ import { CoachesPage } from './pages/CoachesPage'
 import { DraftPage } from './pages/DraftPage'
 import { UserManagementPage } from './pages/UserManagementPage'
 import { GamesPage } from './pages/GamesPage'
+import { ApiTokensPage } from './pages/ApiTokensPage'
 import { ProtectedRoute } from './auth/ProtectedRoute'
 import { AdminRoute } from './auth/AdminRoute'
 import { AppLayout } from './layout/AppLayout'
@@ -31,6 +32,7 @@ function App() {
         <Route path="/coaches" element={<CoachesPage />} />
         <Route path="/draft" element={<DraftPage />} />
         <Route path="/games" element={<GamesPage />} />
+        <Route path="/tokens" element={<ApiTokensPage />} />
         <Route
           path="/admin/users"
           element={

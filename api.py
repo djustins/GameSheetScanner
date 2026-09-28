@@ -600,6 +600,7 @@ class PlayerCreate(BaseModel):
     contact_last_name: str | None = None
     contact_phone: str | None = None
     contact_email: str | None = None
+    usa_ball_hockey_id: str | None = None
 
 
 class PlayerUpdate(BaseModel):
@@ -612,6 +613,7 @@ class PlayerUpdate(BaseModel):
     contact_last_name: str | None = None
     contact_phone: str | None = None
     contact_email: str | None = None
+    usa_ball_hockey_id: str | None = None
 
 
 @app.get("/players", tags=["players"])
@@ -626,6 +628,7 @@ def api_create_player(body: PlayerCreate, conn=Depends(get_conn), user=Depends(r
     player_id = core.add_player(
         conn, body.first_name, body.last_name, body.nickname, body.birth_date, body.current_division_id,
         body.contact_first_name, body.contact_last_name, body.contact_phone, body.contact_email,
+        body.usa_ball_hockey_id,
     )
     return core.get_player(conn, player_id)
 
@@ -664,6 +667,21 @@ def api_restore_player(player_id: int, conn=Depends(get_conn), user=Depends(requ
 @app.get("/players/{player_id}/siblings", tags=["players"])
 def api_player_siblings(player_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
     return core.list_siblings(conn, player_id)
+
+
+@app.post("/players/{player_id}/siblings/{other_player_id}", tags=["players"])
+def api_link_siblings(
+    player_id: int, other_player_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    """Directly marks two players as siblings, without needing a parent
+    record with real name/contact info on file first -- see
+    core.link_players_as_siblings. If either already has a parent group,
+    that group is reused/merged rather than creating a redundant one."""
+    try:
+        parent_id = core.link_players_as_siblings(conn, player_id, other_player_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"parent_id": parent_id}
 
 
 @app.get("/parents", tags=["players"])
@@ -719,6 +737,18 @@ def api_add_evaluation(
 ) -> dict:
     evaluation_id = core.add_evaluation(conn, player_id, body.division_id, body.team_id, body.grade)
     return next(e for e in core.list_evaluations(conn, player_id) if e["id"] == evaluation_id)
+
+
+@app.delete(
+    "/players/{player_id}/evaluations/{evaluation_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["players"]
+)
+def api_delete_evaluation(
+    player_id: int, evaluation_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+):
+    existing = next((e for e in core.list_evaluations(conn, player_id) if e["id"] == evaluation_id), None)
+    if existing is None:
+        not_found("Evaluation not found for this player.")
+    core.delete_evaluation(conn, evaluation_id)
 
 
 class MovePlayerRequest(BaseModel):

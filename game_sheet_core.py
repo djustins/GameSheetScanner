@@ -1923,12 +1923,12 @@ def list_players(conn: PGConnection, include_deleted: bool = False) -> list[dict
     rows = conn.execute(
         f"""SELECT id, first_name, last_name, nickname, birth_date, current_division_id,
                    contact_first_name, contact_last_name, contact_phone, contact_email, deleted_at,
-                   parent_id
+                   parent_id, usa_ball_hockey_id
             FROM players {where} ORDER BY last_name, first_name"""
     ).fetchall()
     cols = ["id", "first_name", "last_name", "nickname", "birth_date", "current_division_id",
             "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "deleted_at",
-            "parent_id"]
+            "parent_id", "usa_ball_hockey_id"]
     players = [dict(zip(cols, r)) for r in rows]
     # "name" is a derived display convenience (not a real column — see
     # first_name/last_name above), kept so the many read-only call sites
@@ -2086,6 +2086,39 @@ def list_siblings(conn: PGConnection, player_id: int) -> list[dict]:
     return [p for p in list_players(conn) if p["parent_id"] == player["parent_id"] and p["id"] != player_id]
 
 
+def link_players_as_siblings(conn: PGConnection, player_id_a: int, player_id_b: int) -> int:
+    """Directly mark two players as siblings, without needing a parent
+    record with actual name/contact info on file first (get_or_create_parent
+    requires at least one of those to match/create one). Reuses whichever
+    of the two already has a parent_id; if neither does, creates a bare
+    parent row (no name/phone/email) to hold the link. If they already have
+    *different* parents on file, player_b's group is merged into player_a's
+    — every one of player_b's existing siblings moves too, not just
+    player_b itself, so two known sibling groups combine into one rather
+    than orphaning player_b's old siblings. Returns the shared parent_id."""
+    if player_id_a == player_id_b:
+        raise ValueError("A player can't be linked as their own sibling.")
+    player_a = get_player(conn, player_id_a)
+    player_b = get_player(conn, player_id_b)
+    if player_a is None or player_b is None:
+        raise ValueError("Player not found.")
+
+    parent_id = player_a.get("parent_id") or player_b.get("parent_id")
+    if parent_id is None:
+        cur = conn.execute("INSERT INTO parents DEFAULT VALUES RETURNING id")
+        parent_id = cur.fetchone()[0]
+        conn.commit()
+
+    old_parent_id = player_b.get("parent_id")
+    if old_parent_id and old_parent_id != parent_id:
+        conn.execute("UPDATE players SET parent_id = %s WHERE parent_id = %s", (parent_id, old_parent_id))
+    else:
+        conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, player_id_b))
+    conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, player_id_a))
+    conn.commit()
+    return parent_id
+
+
 def backfill_player_parents(conn: PGConnection) -> int:
     """One-time (but safe to re-run — skips anyone already linked) pass
     matching every player who has contact info on file but no parent_id
@@ -2111,6 +2144,7 @@ def add_player(
     birth_date: str | None = None, current_division_id: int | None = None,
     contact_first_name: str | None = None, contact_last_name: str | None = None,
     contact_phone: str | None = None, contact_email: str | None = None,
+    usa_ball_hockey_id: str | None = None,
 ) -> int:
     # Auto-links this player to a parent/sibling-group matched (or created)
     # from the contact info given here — see get_or_create_parent(). A
@@ -2121,12 +2155,12 @@ def add_player(
     cur = conn.execute(
         """INSERT INTO players
            (first_name, last_name, nickname, birth_date, current_division_id, contact_first_name,
-            contact_last_name, contact_phone, contact_email, parent_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            contact_last_name, contact_phone, contact_email, parent_id, usa_ball_hockey_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING id""",
         (first_name.strip(), (last_name or "").strip() or None, (nickname or "").strip() or None,
          birth_date, current_division_id, contact_first_name, contact_last_name, contact_phone, contact_email,
-         parent_id),
+         parent_id, usa_ball_hockey_id),
     )
     player_id = cur.fetchone()[0]
     conn.commit()
@@ -2143,7 +2177,7 @@ def update_player(conn: PGConnection, player_id: int, **fields):
     the name already on file rather than losing that context."""
     allowed = {
         "first_name", "last_name", "nickname", "birth_date", "current_division_id",
-        "contact_first_name", "contact_last_name", "contact_phone", "contact_email",
+        "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "usa_ball_hockey_id",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:

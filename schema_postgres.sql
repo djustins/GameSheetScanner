@@ -147,6 +147,11 @@ CREATE TABLE IF NOT EXISTS parents (
 
 ALTER TABLE players ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES parents(id) ON DELETE SET NULL;
 
+-- The player's membership ID with USA Ball Hockey (the sport's national
+-- governing body) -- an identifier from outside this app, kept as free
+-- text (not numeric) since it may include letters or leading zeros.
+ALTER TABLE players ADD COLUMN IF NOT EXISTS usa_ball_hockey_id TEXT;
+
 -- Per-team jersey-number roster row, auto-extracted from game sheets and
 -- used to attribute goals/assists/penalties by number. Optionally linked to
 -- a global player profile once identified.

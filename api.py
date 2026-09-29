@@ -20,20 +20,24 @@ uses (see game_sheet_core.verify_login) — any existing user account works,
 no separate API credential to manage. Every endpoint requires a valid
 login; writes additionally require the same "not read-only" check the
 Streamlit app applies (an admin, or a non-read-only role) — see
-require_writer below. Fine-grained per-page visibility (a role's `pages`
-list) and hide_contact_details aren't enforced here: any authenticated
-user can read any resource through this API. Tighten that if this API
-gets exposed beyond trusted, already-vetted league admins/coaches.
+require_writer below. A role's hide_contact_details is enforced too:
+phone/email fields are blanked in every response for such a role, and
+ignored on writes (see ContactRedactingRoute). Fine-grained per-page
+visibility (a role's `pages` list) isn't: any authenticated user can read
+any resource through this API. Tighten that if this API gets exposed
+beyond trusted, already-vetted league admins/coaches.
 """
 
+import json
 import os
 from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -45,11 +49,64 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("Set the DATABASE_URL environment variable (same one app.py uses).")
 
+# Contact details a "hide contact details" role must never receive (see
+# ContactRedactingRoute). "phone"/"email" are coaches' and parents' own
+# fields; contact_* are a player's registration contact.
+_CONTACT_KEYS = frozenset({"contact_phone", "contact_email", "phone", "email"})
+# The caller's own account (their login email, their tokens) and the
+# admin-only user/role screens aren't other people's contact details.
+_CONTACT_REDACTION_EXEMPT_PREFIXES = ("/me", "/login", "/tokens", "/users", "/roles")
+
+
+def _hides_contacts(user: dict | None) -> bool:
+    return bool(user) and not user["is_admin"] and bool(user["hide_contact_details"])
+
+
+def _redact_contacts(value):
+    if isinstance(value, list):
+        return [_redact_contacts(v) for v in value]
+    if isinstance(value, dict):
+        return {k: (None if k in _CONTACT_KEYS else _redact_contacts(v)) for k, v in value.items()}
+    return value
+
+
+class ContactRedactingRoute(APIRoute):
+    """Enforces a role's hide_contact_details server-side, the way the
+    Streamlit app hides those fields from its UI -- centrally here, so every
+    endpoint (including future ones) is covered rather than each having to
+    remember. Relies on get_current_user having stored the caller on
+    request.state; unauthenticated or non-JSON responses pass through."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def route_handler(request: Request):
+            response = await handler(request)
+            if (
+                _hides_contacts(getattr(request.state, "user", None))
+                and (response.media_type or "").startswith("application/json")
+                and getattr(response, "body", None)
+                and not request.url.path.startswith(_CONTACT_REDACTION_EXEMPT_PREFIXES)
+            ):
+                headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+                return JSONResponse(
+                    _redact_contacts(json.loads(response.body)),
+                    status_code=response.status_code,
+                    headers=headers,
+                )
+            return response
+
+        return route_handler
+
+
 app = FastAPI(
     title="GameSheetScanner API",
     description="Programmatic access to the same league data the Streamlit app manages.",
     version="1.0.0",
 )
+# Must be set before any route is declared below -- each @app.get/... uses
+# the router's route_class at declaration time.
+app.router.route_class = ContactRedactingRoute
 
 # A browser-based frontend (e.g. the React app) runs on a different origin than
 # this API, so it needs explicit CORS allowance — FastAPI has none by default.
@@ -91,6 +148,7 @@ def get_conn():
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
     bearer: HTTPAuthorizationCredentials | None = Depends(bearer_security),
     conn=Depends(get_conn),
@@ -107,6 +165,7 @@ def get_current_user(
                 detail="Invalid or revoked API token.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        request.state.user = user
         return user
     if credentials is not None:
         user = core.verify_login(conn, credentials.username, credentials.password)
@@ -116,6 +175,7 @@ def get_current_user(
                 detail="Invalid email or password.",
                 headers={"WWW-Authenticate": "Basic"},
             )
+        request.state.user = user
         return user
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -140,6 +200,14 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
     if not user["is_admin"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required.")
     return user
+
+
+def _writable_fields(user: dict, body: dict) -> dict:
+    """A PATCH body's set fields, minus contact details a hide-contact role
+    can't see and so mustn't overwrite (they'd only ever be sending back a
+    redacted blank)."""
+    hide = _hides_contacts(user)
+    return {k: v for k, v in body.items() if v is not None and not (hide and k in _CONTACT_KEYS)}
 
 
 def not_found(detail: str = "Not found"):
@@ -578,7 +646,11 @@ def api_list_coaches(
 
 @app.post("/coaches", status_code=status.HTTP_201_CREATED, tags=["coaches"])
 def api_create_coach(body: CoachCreate, conn=Depends(get_conn), user=Depends(require_writer)) -> dict:
-    coach_id = core.add_coach(conn, body.first_name, body.last_name, body.nickname, body.phone, body.email)
+    hide = _hides_contacts(user)
+    coach_id = core.add_coach(
+        conn, body.first_name, body.last_name, body.nickname,
+        None if hide else body.phone, None if hide else body.email,
+    )
     return core.get_coach(conn, coach_id)
 
 
@@ -594,7 +666,7 @@ def api_get_coach(coach_id: int, conn=Depends(get_conn), user=Depends(get_curren
 def api_update_coach(
     coach_id: int, body: CoachUpdate, conn=Depends(get_conn), user=Depends(require_writer)
 ) -> dict:
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    fields = _writable_fields(user, body.model_dump())
     if fields:
         core.update_coach(conn, coach_id, **fields)
     coach = core.get_coach(conn, coach_id)
@@ -692,7 +764,9 @@ def api_list_players(
 def api_create_player(body: PlayerCreate, conn=Depends(get_conn), user=Depends(require_writer)) -> dict:
     player_id = core.add_player(
         conn, body.first_name, body.last_name, body.nickname, body.birth_date, body.current_division_id,
-        body.contact_first_name, body.contact_last_name, body.contact_phone, body.contact_email,
+        body.contact_first_name, body.contact_last_name,
+        None if _hides_contacts(user) else body.contact_phone,
+        None if _hides_contacts(user) else body.contact_email,
         body.usa_ball_hockey_id,
     )
     return core.get_player(conn, player_id)
@@ -710,7 +784,7 @@ def api_get_player(player_id: int, conn=Depends(get_conn), user=Depends(get_curr
 def api_update_player(
     player_id: int, body: PlayerUpdate, conn=Depends(get_conn), user=Depends(require_writer)
 ) -> dict:
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    fields = _writable_fields(user, body.model_dump())
     if fields:
         core.update_player(conn, player_id, **fields)
     player = core.get_player(conn, player_id)

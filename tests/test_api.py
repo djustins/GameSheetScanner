@@ -912,3 +912,31 @@ def test_stats_and_standings_endpoints_title_case_and_sort(conn, admin_auth, div
 
     standings = client.get(f"/divisions/{division_id}/standings", auth=admin_auth).json()
     assert [s["team"] for s in standings] == ["Avalanche", "Wild"]
+
+
+def test_hide_contact_role_gets_contacts_redacted_and_cannot_overwrite_them(conn, admin_auth):
+    role_id = core.add_role(conn, "Coach", pages=list(core.PAGES), hide_contact_details=True)
+    core.add_user(conn, "coach@example.com", "pw-12345678", role_id=role_id)
+    hidden = ("coach@example.com", "pw-12345678")
+    player_id = core.add_player(
+        conn, "Sidney", "Crosby", contact_first_name="Trina", contact_phone="412-555-0100",
+        contact_email="trina@example.com",
+    )
+    core.add_coach(conn, "Jared", "Bednar", phone="303-555-0199", email="jb@example.com")
+
+    player = client.get(f"/players/{player_id}", auth=hidden).json()
+    assert player["contact_phone"] is None and player["contact_email"] is None
+    assert player["contact_first_name"] == "Trina"
+    assert all(c["phone"] is None and c["email"] is None for c in client.get("/coaches", auth=hidden).json())
+    assert all(p["phone"] is None for p in client.get("/parents", auth=hidden).json())
+    # Their own login email isn't someone else's contact detail.
+    assert client.get("/me", auth=hidden).json()["email"] == "coach@example.com"
+
+    # A save echoing back the redacted blank must not wipe the real value.
+    client.patch(f"/players/{player_id}", json={"contact_phone": "", "nickname": "Sid"}, auth=hidden)
+    stored = core.get_player(conn, player_id)
+    assert stored["contact_phone"] == "412-555-0100"
+    assert stored["nickname"] == "Sid"
+
+    # Admins still see everything.
+    assert client.get(f"/players/{player_id}", auth=admin_auth).json()["contact_phone"] == "412-555-0100"

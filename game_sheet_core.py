@@ -3829,18 +3829,60 @@ def player_stats_table(conn: PGConnection, division_id: int) -> list[dict]:
 
 
 def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
+    """Every rostered player in the division, per team: team, coach(es),
+    jersey number, name, birthday, grade and play-with requests. The grade
+    is the player's evaluation for this division, or -- marked "(prev)" --
+    their latest from another division when not yet evaluated here (see
+    get_latest_grades_with_source). Requests list both directions: "->
+    Name" for one this player made, "<- Name" for one made to them."""
     sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
-        f"""SELECT t.name, re.number, re.name FROM roster_entries re
+        f"""SELECT t.id, t.name, re.number, re.name, re.player_id, p.birth_date
+           FROM roster_entries re
            JOIN teams t ON t.id = re.team_id
-           WHERE t.division_id = %s
+           LEFT JOIN players p ON p.id = re.player_id
+           WHERE t.division_id = %s AND t.deleted_at IS NULL
            ORDER BY t.name, {sort_key}, re.number""",
         (division_id,),
     ).fetchall()
-    return [
-        {"Team": display_text(team), "Number": number, "Name": display_text(name)}
-        for team, number, name in rows
-    ]
+    player_ids = [r[4] for r in rows if r[4] is not None]
+    coaches_by_team = list_team_coaches_for_division(conn, division_id)
+    grades = get_latest_grades_with_source(conn, division_id, player_ids)
+
+    requests_by_player: dict[int, list[str]] = {}
+    if player_ids:
+        for made_by, made_to, f1, l1, f2, l2 in conn.execute(
+            """SELECT pr.player_id, pr.requested_player_id,
+                      p1.first_name, p1.last_name, p2.first_name, p2.last_name
+               FROM player_requests pr
+               JOIN players p1 ON p1.id = pr.player_id
+               JOIN players p2 ON p2.id = pr.requested_player_id
+               WHERE pr.player_id = ANY(%s) OR pr.requested_player_id = ANY(%s)
+               ORDER BY pr.created_at""",
+            (player_ids, player_ids),
+        ).fetchall():
+            requests_by_player.setdefault(made_by, []).append(f"-> {full_name(f2, l2)}")
+            requests_by_player.setdefault(made_to, []).append(f"<- {full_name(f1, l1)}")
+
+    table = []
+    for team_id, team, number, name, player_id, birth_date in rows:
+        grade_info = grades.get(player_id) if player_id is not None else None
+        grade = None
+        if grade_info and grade_info["grade"]:
+            grade = grade_info["grade"] + ("" if grade_info["is_current_division"] else " (prev)")
+        table.append({
+            "Team": display_text(team),
+            "Coach": ", ".join(
+                f'{c["name"]} "{c["nickname"]}"' if c["nickname"] else c["name"]
+                for c in coaches_by_team.get(team_id, [])
+            ) or None,
+            "Number": number,
+            "Name": display_text(name),
+            "Birthday": birth_date,
+            "Grade": grade,
+            "Play-with Requests": "; ".join(requests_by_player.get(player_id, [])) or None,
+        })
+    return table
 
 
 def games_table(conn: PGConnection, division_id: int) -> list[dict]:

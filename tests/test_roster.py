@@ -225,3 +225,26 @@ def test_list_player_move_notes_scoped_to_a_division(conn, division_id):
     scoped = core.list_player_move_notes(conn, player_id, division_id)
     assert len(scoped) == 1
     assert scoped[0]["note"] == "Division A move"
+
+
+def test_roster_table_includes_coach_birthday_grade_and_requests(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    coach_id = core.add_coach(conn, "Jared", "Bednar", "Bed")
+    core.assign_coach_to_team(conn, team_id, coach_id)
+    other_division_id = core.add_division(conn, 2025, "Summer", "Penguin")
+
+    sid = core.add_player(conn, "Sidney", "Crosby", birth_date="2019-08-07")
+    wayne = core.add_player(conn, "Wayne", "Gretzky", birth_date="2019-01-26")
+    core.add_roster_entry(conn, team_id, "87", "sidney crosby", player_id=sid)
+    core.add_roster_entry(conn, team_id, "99", "wayne gretzky", player_id=wayne)
+    core.add_evaluation(conn, sid, division_id, team_id, "A")
+    core.add_evaluation(conn, wayne, other_division_id, None, "B")
+    core.add_player_request(conn, sid, wayne)
+
+    rows = {r["Number"]: r for r in core.roster_table(conn, division_id)}
+    assert rows["87"] == {
+        "Team": "Avalanche", "Coach": 'Jared Bednar "Bed"', "Number": "87", "Name": "Sidney Crosby",
+        "Birthday": "2019-08-07", "Grade": "A", "Play-with Requests": "-> Wayne Gretzky",
+    }
+    assert rows["99"]["Grade"] == "B (prev)"
+    assert rows["99"]["Play-with Requests"] == "<- Sidney Crosby"

@@ -4,8 +4,8 @@ import { useAuth } from './AuthContext'
 
 // Mirrors app.py's visible_pages / is_read_only / hide_contact_details: an admin sees
 // every page and all contact details; anyone else only the page keys their
-// role grants (game_sheet_core.PAGES). UI-only -- the API itself doesn't
-// enforce either (see api.py's module docstring).
+// role grants (game_sheet_core.PAGES). The API also enforces read-only and
+// contact hiding itself; page visibility is UI-only (see api.py's docstring).
 export function useAccess() {
   const { user } = useAuth()
   const canView = (pageKey: string) => !!user && (user.is_admin || user.pages.includes(pageKey))

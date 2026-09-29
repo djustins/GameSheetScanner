@@ -1945,14 +1945,15 @@ def get_player(conn: PGConnection, player_id: int) -> dict | None:
 
 
 def list_players_in_division(conn: PGConnection, division_id: int) -> list[dict]:
-    """Every player "in" a division — the union of two groups that don't
-    always overlap: players whose profile's current_division_id points
-    here (signed up, possibly not yet on a team) and players on any of
-    this division's team rosters (which can happen without
-    current_division_id being updated, e.g. drafted straight onto a team
-    without the profile being touched). Each row also carries "teams": the
-    names of any of this division's teams they're rostered on (empty if
-    signed-up-only)."""
+    """Every player "in" a division — the union of everything that records
+    them there: current_division_id pointing here (signed up, possibly not
+    yet on a team), a roster entry on one of its teams, an evaluation, or
+    a position for it. current_division_id alone can't answer this for a
+    past season: it only holds a player's *latest* division, so each new
+    registration would otherwise drop them from every earlier division's
+    list. The per-season records never change, so the history stays
+    complete. Each row also carries "teams": the names of any of this
+    division's teams they're rostered on (empty if not rostered)."""
     id_rows = conn.execute(
         """SELECT DISTINCT p.id FROM players p
            WHERE p.deleted_at IS NULL AND (
@@ -1962,8 +1963,10 @@ def list_players_in_division(conn: PGConnection, division_id: int) -> list[dict]
                    JOIN teams t ON t.id = re.team_id
                    WHERE t.division_id = %s AND re.player_id IS NOT NULL
                )
+               OR p.id IN (SELECT player_id FROM evaluations WHERE division_id = %s)
+               OR p.id IN (SELECT player_id FROM player_positions WHERE division_id = %s)
            )""",
-        (division_id, division_id),
+        (division_id, division_id, division_id, division_id),
     ).fetchall()
     player_ids = [r[0] for r in id_rows]
     if not player_ids:

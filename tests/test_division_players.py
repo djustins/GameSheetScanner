@@ -71,3 +71,13 @@ def test_latest_grade_is_by_season_not_entry_order(conn, division_id):
 
     info = core.get_latest_grades_with_source(conn, division_id, [player_id])[player_id]
     assert (info["grade"], info["division_id"]) == ("A", summer)
+
+
+def test_past_division_keeps_players_graded_there_after_they_move_on(conn, division_id):
+    fall = core.add_division(conn, 2026, "Fall", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.add_evaluation(conn, player_id, division_id, None, "A")
+    core.update_player(conn, player_id, current_division_id=fall)  # re-registers for Fall
+
+    assert player_id in {p["id"] for p in core.list_players_in_division(conn, division_id)}
+    assert player_id in {p["id"] for p in core.list_players_in_division(conn, fall)}

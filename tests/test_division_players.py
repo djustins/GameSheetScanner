@@ -60,3 +60,14 @@ def test_unlinked_roster_entry_does_not_pull_in_a_phantom_player(conn, division_
     team_id = core.add_team(conn, division_id, "Avalanche")
     core.add_roster_entry(conn, team_id, "87", "Sidney Crosby")  # never linked to a profile
     assert core.list_players_in_division(conn, division_id) == []
+
+
+def test_latest_grade_is_by_season_not_entry_order(conn, division_id):
+    summer = core.add_division(conn, 2025, "Summer", "Penguin")
+    spring = core.add_division(conn, 2025, "Spring", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.add_evaluation(conn, player_id, summer, None, "A")
+    core.add_evaluation(conn, player_id, spring, None, "C")  # older season, entered later
+
+    info = core.get_latest_grades_with_source(conn, division_id, [player_id])[player_id]
+    assert (info["grade"], info["division_id"]) == ("A", summer)

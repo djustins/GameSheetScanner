@@ -2357,6 +2357,9 @@ def get_latest_grades_with_source(
     presenting it as if it were evaluated in this one. player_id ->
     {"grade": str, "division_id": int, "is_current_division": bool},
     omitting anyone with no evaluation anywhere. Each entry also has
+    Otherwise-latest means the most recent *season* (year, then spring <
+    summer < fall < winter, as _SEASON_ORDER), not whichever grade was
+    entered into the app last -- a past season imported later mustn't win.
     "same_age_group": whether the grade's division is this division's age
     group -- a grade from a different age group is flagged with an
     asterisk wherever grades are shown (see grade_display)."""
@@ -2367,7 +2370,11 @@ def get_latest_grades_with_source(
                   d.age_group = (SELECT age_group FROM divisions WHERE id = %s)
            FROM evaluations e JOIN divisions d ON d.id = e.division_id
            WHERE e.player_id = ANY(%s)
-           ORDER BY e.player_id, (e.division_id = %s) DESC, e.created_at DESC, e.id DESC""",
+           ORDER BY e.player_id, (e.division_id = %s) DESC,
+                    d.year DESC,
+                    CASE lower(d.season) WHEN 'winter' THEN 3 WHEN 'fall' THEN 2
+                                         WHEN 'summer' THEN 1 WHEN 'spring' THEN 0 ELSE -1 END DESC,
+                    e.created_at DESC, e.id DESC""",
         (division_id, player_ids, division_id),
     ).fetchall()
     return {

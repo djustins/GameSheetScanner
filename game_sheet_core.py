@@ -652,9 +652,10 @@ PAGES = {
     "rosters": "Teams → Team Rosters",
     "teams": "Teams → Teams",
     "players": "All Players",
-    "coaches": "Teams → Coaches",
+    "coaches": "Coaches",
     "divisions": "Divisions",
     "draft": "Teams → Draft",
+    "parents": "All Parents",
 }
 
 
@@ -2119,6 +2120,70 @@ def link_players_as_siblings(conn: PGConnection, player_id_a: int, player_id_b: 
     return parent_id
 
 
+def add_player_request(
+    conn: PGConnection, player_id: int, requested_player_id: int, note: str | None = None
+) -> int:
+    """Record player_id's request to play with requested_player_id next
+    draft/season -- see the player_requests table comment for how this
+    differs from Siblings. Raises ValueError if they're the same player,
+    either doesn't exist, or this exact request already exists (the
+    reverse direction is a distinct, allowed request -- see
+    list_player_requests, which surfaces either direction on both
+    profiles anyway)."""
+    if player_id == requested_player_id:
+        raise ValueError("A player can't send a play-with request to themselves.")
+    if get_player(conn, player_id) is None or get_player(conn, requested_player_id) is None:
+        raise ValueError("Player not found.")
+    existing = conn.execute(
+        "SELECT id FROM player_requests WHERE player_id = %s AND requested_player_id = %s",
+        (player_id, requested_player_id),
+    ).fetchone()
+    if existing:
+        raise ValueError("That request already exists.")
+    cur = conn.execute(
+        "INSERT INTO player_requests (player_id, requested_player_id, note) VALUES (%s, %s, %s) RETURNING id",
+        (player_id, requested_player_id, note),
+    )
+    request_id = cur.fetchone()[0]
+    conn.commit()
+    return request_id
+
+
+def remove_player_request(conn: PGConnection, request_id: int):
+    conn.execute("DELETE FROM player_requests WHERE id = %s", (request_id,))
+    conn.commit()
+
+
+def list_player_requests(conn: PGConnection, player_id: int) -> list[dict]:
+    """Every play-with request touching this player, in either direction,
+    so it shows up on both the requester's and the requested player's
+    profile alike (unlike a plain one-directional log) -- but as a direct
+    pairwise edge (player_requests), not a shared-group relationship the
+    way Siblings is. Each entry: {id, player_id (the *other* player),
+    name, note, direction: "made" if this player sent the request,
+    "received" if the other player did}."""
+    rows = conn.execute(
+        """SELECT pr.id, pr.note, pr.player_id, pr.requested_player_id,
+                  p1.first_name, p1.last_name, p2.first_name, p2.last_name
+           FROM player_requests pr
+           JOIN players p1 ON p1.id = pr.player_id
+           JOIN players p2 ON p2.id = pr.requested_player_id
+           WHERE pr.player_id = %s OR pr.requested_player_id = %s
+           ORDER BY pr.created_at""",
+        (player_id, player_id),
+    ).fetchall()
+    results = []
+    for req_id, note, made_by, made_to, f1, l1, f2, l2 in rows:
+        if made_by == player_id:
+            other_id, other_name, direction = made_to, full_name(f2, l2), "made"
+        else:
+            other_id, other_name, direction = made_by, full_name(f1, l1), "received"
+        results.append({
+            "id": req_id, "player_id": other_id, "name": other_name, "note": note, "direction": direction,
+        })
+    return results
+
+
 def backfill_player_parents(conn: PGConnection) -> int:
     """One-time (but safe to re-run — skips anyone already linked) pass
     matching every player who has contact info on file but no parent_id
@@ -2283,6 +2348,29 @@ def get_season_grades_for_division(conn: PGConnection, division_id: int) -> dict
     return {r[0]: r[1] for r in rows}
 
 
+def get_latest_grades_with_source(
+    conn: PGConnection, division_id: int, player_ids: list[int]
+) -> dict[int, dict]:
+    """Like get_latest_grades, but also reports which division each grade
+    actually came from, so a caller can flag a grade carried over from a
+    different (usually past) division/age-group distinctly rather than
+    presenting it as if it were evaluated in this one. player_id ->
+    {"grade": str, "division_id": int, "is_current_division": bool},
+    omitting anyone with no evaluation anywhere."""
+    if not player_ids:
+        return {}
+    rows = conn.execute(
+        """SELECT DISTINCT ON (player_id) player_id, grade, division_id
+           FROM evaluations WHERE player_id = ANY(%s)
+           ORDER BY player_id, (division_id = %s) DESC, created_at DESC, id DESC""",
+        (player_ids, division_id),
+    ).fetchall()
+    return {
+        r[0]: {"grade": r[1], "division_id": r[2], "is_current_division": r[2] == division_id}
+        for r in rows
+    }
+
+
 def get_latest_grades(conn: PGConnection, division_id: int, player_ids: list[int]) -> dict[int, str]:
     """Each player's latest *available* grade for reference in this
     division: this division's own evaluation if one exists, otherwise
@@ -2293,16 +2381,13 @@ def get_latest_grades(conn: PGConnection, division_id: int, player_ids: list[int
     breakdown); the player form's own Season Grade editor stays scoped to
     exactly the Working Division on purpose (see season_grade_input) —
     this is a read-only display convenience, not what gets edited.
-    player_id -> grade, omitting anyone with no evaluation anywhere."""
-    if not player_ids:
-        return {}
-    rows = conn.execute(
-        """SELECT DISTINCT ON (player_id) player_id, grade
-           FROM evaluations WHERE player_id = ANY(%s)
-           ORDER BY player_id, (division_id = %s) DESC, created_at DESC, id DESC""",
-        (player_ids, division_id),
-    ).fetchall()
-    return {r[0]: r[1] for r in rows}
+    player_id -> grade, omitting anyone with no evaluation anywhere.
+    See get_latest_grades_with_source if you also need to know whether a
+    grade was carried over from a different division."""
+    return {
+        pid: info["grade"]
+        for pid, info in get_latest_grades_with_source(conn, division_id, player_ids).items()
+    }
 
 
 def list_evaluated_player_ids(conn: PGConnection, division_id: int) -> set[int]:
@@ -2816,7 +2901,14 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     Everyone else is assigned greedily, best-skill unit first, always to
     whichever team currently has the lowest total skill (ties broken by
     fewest players so far) — keeping both roster size and aggregate rank
-    as even as possible across teams.
+    as even as possible across teams. Soft placement, tried only for a unit
+    with no hard placement above and skipped (with a warning) if it can't
+    be honored without leaving a team more than one player ahead of the
+    least-loaded one:
+      - A play-with request (see player_requests / list_player_requests) —
+        unlike a sibling, a deliberate but non-family "friend" ask — lands
+        its unit on a requested unit's team if that unit was already
+        placed earlier in this pass.
 
     Re-running this when a previous run exists for this division first
     undoes it (see undo_auto_draft), so re-drafting from scratch is just
@@ -2888,7 +2980,28 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             (existing_team_by_player[pid] for pid in group if pid in existing_team_by_player), None
         )
         seen.update(pool_member_ids)
-        units.append({"player_ids": pool_member_ids, "pinned_team_id": pinned_team_id})
+        units.append({"idx": len(units), "player_ids": pool_member_ids, "pinned_team_id": pinned_team_id})
+
+    # Play-with requests (see player_requests / list_player_requests) are a
+    # *soft* preference, unlike a sibling's hard placement above: only
+    # meaningful when both sides of a request are in this pool, and honored
+    # on placement below only if it doesn't leave a team more than one
+    # player ahead of the current least-loaded one -- an unresolved one
+    # just gets a warning rather than blocking the draft.
+    pool_ids = list(pool_by_id)
+    unit_of_player = {pid: u["idx"] for u in units for pid in u["player_ids"]}
+    request_pairs = [
+        (r[0], r[1]) for r in conn.execute(
+            "SELECT player_id, requested_player_id FROM player_requests "
+            "WHERE player_id = ANY(%s) AND requested_player_id = ANY(%s)",
+            (pool_ids, pool_ids),
+        ).fetchall()
+        if unit_of_player[r[0]] != unit_of_player[r[1]]  # already together (e.g. also siblings)
+    ]
+    requested_units: dict[int, set[int]] = {}
+    for pid_a, pid_b in request_pairs:
+        requested_units.setdefault(unit_of_player[pid_a], set()).add(unit_of_player[pid_b])
+        requested_units.setdefault(unit_of_player[pid_b], set()).add(unit_of_player[pid_a])
 
     # Coach's-kid: pin a unit to a team the coach already coaches.
     coach_team_by_id: dict[int, int] = {}
@@ -2917,8 +3030,22 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         key=lambda u: min(draft_order_key(pid) for pid in u["player_ids"]),
     )
 
+    team_of_unit: dict[int, int] = {}
     for unit in pinned_units + open_units:
-        team_id = unit["pinned_team_id"] or min(team_size, key=lambda t: (team_skill[t], team_size[t], t))
+        requested_team_id = None
+        if unit["pinned_team_id"] is None:
+            # Only redirect to a team that's currently among the least-loaded,
+            # so placing this unit there leaves it at most one unit ahead.
+            min_size = min(team_size.values())
+            for other_idx in requested_units.get(unit["idx"], ()):
+                if other_idx in team_of_unit and team_size[team_of_unit[other_idx]] == min_size:
+                    requested_team_id = team_of_unit[other_idx]
+                    break
+        team_id = (
+            unit["pinned_team_id"] or requested_team_id
+            or min(team_size, key=lambda t: (team_skill[t], team_size[t], t))
+        )
+        team_of_unit[unit["idx"]] = team_id
         for pid in unit["player_ids"]:
             assignments[pid] = team_id
         team_size[team_id] += len(unit["player_ids"])
@@ -2939,9 +3066,16 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         )
         roster_entry_ids.append(roster_entry_id)
 
+    warnings: list[str] = []
+    for pid_a, pid_b in request_pairs:
+        if assignments.get(pid_a) != assignments.get(pid_b):
+            warnings.append(
+                f"Could not honor play-with request between {pool_by_id[pid_a]['name']} and "
+                f"{pool_by_id[pid_b]['name']} — teams were already balanced."
+            )
+
     # Coach-follows-kid: a coach with no team yet in this division whose
     # child just got auto-drafted is assigned to that child's team.
-    warnings: list[str] = []
     coach_assignments = []
     for coach_id in coach_ids_with_children(conn):
         if coach_id in coach_team_by_id:

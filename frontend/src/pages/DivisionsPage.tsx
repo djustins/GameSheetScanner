@@ -8,7 +8,6 @@ import {
   NumberInput,
   Select,
   Stack,
-  Table,
   Tabs,
   Text,
   TextInput,
@@ -28,29 +27,27 @@ import {
 } from '../api/divisions'
 import { createTeam } from '../api/teams'
 import { getAgeGroups } from '../api/meta'
-import type { Player } from '../api/types'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { CoachCarryoverPanel } from '../components/CoachCarryoverPanel'
-import { ExperienceBadge } from '../components/ExperienceBadge'
+import { DivisionPlayersTable } from '../components/DivisionPlayersTable'
 import { ImportPlayersPanel } from '../components/ImportPlayersPanel'
-import { PlayerDetailDrawer } from '../components/PlayerDetailDrawer'
 import { RecycleBinModal } from '../components/RecycleBinModal'
 import { SchedulePanel } from '../components/SchedulePanel'
 import { TeamsOverviewTable } from '../components/TeamsOverviewTable'
 import { divisionSeasonLabel } from '../utils/format'
-import { gradeBreakdown } from '../utils/grades'
 
 const SEASONS = ['Spring', 'Summer', 'Fall', 'Winter']
 
 export function DivisionsPage() {
   const { user } = useAuth()
+  const { readOnly } = useAccess()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [divisionId, setDivisionId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [recycleBinOpen, setRecycleBinOpen] = useState(false)
-  const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null)
   const [newTeamName, setNewTeamName] = useState('')
 
   const { data: divisions, isLoading } = useQuery({ queryKey: ['divisions'], queryFn: listDivisions })
@@ -120,9 +117,11 @@ export function DivisionsPage() {
       <Group justify="space-between">
         <Title order={2}>Divisions</Title>
         <Group>
-          <Button variant="subtle" onClick={() => setRecycleBinOpen(true)}>
-            Recycle Bin
-          </Button>
+          {!readOnly && (
+            <Button variant="subtle" onClick={() => setRecycleBinOpen(true)}>
+              Recycle Bin
+            </Button>
+          )}
           {user?.is_admin && <Button onClick={() => setCreateOpen(true)}>New Division</Button>}
         </Group>
       </Group>
@@ -175,40 +174,7 @@ export function DivisionsPage() {
           </Tabs.List>
 
           <Tabs.Panel value="players" pt="md">
-            <Text size="sm" c="dimmed" mb="xs">
-              {players?.length ?? 0} player(s)
-              {players && players.length > 0 && (() => {
-                const { gradedCount, breakdown } = gradeBreakdown(players.map((p) => p.grade))
-                return ` · ${gradedCount} graded${gradedCount > 0 ? ` · ${breakdown}` : ''}`
-              })()}
-            </Text>
-            <Table striped highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Name</Table.Th>
-                  <Table.Th>Teams</Table.Th>
-                  <Table.Th>Grade</Table.Th>
-                  <Table.Th>Note</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {(players ?? []).map((p) => (
-                  <Table.Tr key={p.id} style={{ cursor: 'pointer' }} onClick={() => setSelectedPlayer(p)}>
-                    <Table.Td>{p.name}</Table.Td>
-                    <Table.Td>{p.teams.join(', ') || '—'}</Table.Td>
-                    <Table.Td>{p.grade ?? '—'}</Table.Td>
-                    <Table.Td>
-                      <ExperienceBadge note={p.note} />
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-            {players?.length === 0 && (
-              <Text c="dimmed" size="sm" mt="sm">
-                No players in this division yet.
-              </Text>
-            )}
+            <DivisionPlayersTable divisionId={Number(divisionId)} />
           </Tabs.Panel>
 
           <Tabs.Panel value="teams" pt="md">
@@ -236,7 +202,10 @@ export function DivisionsPage() {
           </Tabs.Panel>
 
           <Tabs.Panel value="coaches" pt="md">
-            <CoachCarryoverPanel divisionId={Number(divisionId)} teams={teams ?? []} divisionPlayers={players ?? []} />
+            <ReadOnlyNotice />
+            <Writable>
+              <CoachCarryoverPanel divisionId={Number(divisionId)} teams={teams ?? []} divisionPlayers={players ?? []} />
+            </Writable>
           </Tabs.Panel>
 
           <Tabs.Panel value="schedule" pt="md">
@@ -244,12 +213,13 @@ export function DivisionsPage() {
           </Tabs.Panel>
 
           <Tabs.Panel value="import" pt="md">
-            <ImportPlayersPanel divisionId={Number(divisionId)} />
+            <ReadOnlyNotice />
+            <Writable>
+              <ImportPlayersPanel divisionId={Number(divisionId)} />
+            </Writable>
           </Tabs.Panel>
         </Tabs>
       )}
-
-      <PlayerDetailDrawer player={selectedPlayer} onClose={() => setSelectedPlayer(null)} />
 
       <RecycleBinModal opened={recycleBinOpen} onClose={() => setRecycleBinOpen(false)} />
 

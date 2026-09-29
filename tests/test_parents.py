@@ -121,3 +121,39 @@ def test_backfill_player_parents_links_existing_players_and_is_idempotent(conn):
     assert player["parent_id"] is not None
 
     assert core.backfill_player_parents(conn) == 0
+
+
+def test_player_requests_show_on_both_profiles_and_can_be_removed(conn):
+    p1 = core.add_player(conn, "Sidney", "Crosby")
+    p2 = core.add_player(conn, "Wayne", "Gretzky")
+    request_id = core.add_player_request(conn, p1, p2, "best friends")
+
+    made = core.list_player_requests(conn, p1)
+    assert made == [{"id": request_id, "player_id": p2, "name": "Wayne Gretzky", "note": "best friends", "direction": "made"}]
+    received = core.list_player_requests(conn, p2)
+    assert received[0]["player_id"] == p1
+    assert received[0]["direction"] == "received"
+
+    core.remove_player_request(conn, request_id)
+    assert core.list_player_requests(conn, p1) == []
+    assert core.list_player_requests(conn, p2) == []
+
+
+def test_add_player_request_rejects_self_and_duplicates(conn):
+    p1 = core.add_player(conn, "Sidney", "Crosby")
+    p2 = core.add_player(conn, "Wayne", "Gretzky")
+    for args in ((p1, p1), (p1, 999999)):
+        try:
+            core.add_player_request(conn, *args)
+            assert False, "expected ValueError"
+        except ValueError:
+            pass
+    core.add_player_request(conn, p1, p2)
+    try:
+        core.add_player_request(conn, p1, p2)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "already exists" in str(e)
+    # The reverse direction is a distinct request.
+    core.add_player_request(conn, p2, p1)
+    assert len(core.list_player_requests(conn, p1)) == 2

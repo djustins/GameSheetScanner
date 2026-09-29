@@ -209,3 +209,42 @@ def test_re_running_auto_draft_undoes_the_previous_run_first(conn, division_id):
     # No duplicate roster rows from the first run left behind.
     total_rostered = sum(len(core.list_roster(conn, t["id"])) for t in core.list_teams(conn, division_id))
     assert total_rostered == 6
+
+
+def _teams_by_name(conn, *team_ids):
+    return {t: {r["name"] for r in core.list_roster(conn, t)} for t in team_ids}
+
+
+def test_auto_draft_honors_play_with_request_when_balanced(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    a = _add_player(conn, division_id, "Alpha", "Test", grade="A")
+    _add_player(conn, division_id, "Bravo", "Test", grade="B")
+    c = _add_player(conn, division_id, "Charlie", "Test", grade="C")
+    _add_player(conn, division_id, "Delta", "Test", grade="D")
+    # Without the request, Charlie would join the weaker-so-far team (Bravo's).
+    core.add_player_request(conn, c, a)
+
+    result = core.auto_draft(conn, division_id)
+    assert result["warnings"] == []
+    assert _teams_by_name(conn, team_a, team_b) == {
+        team_a: {"Alpha Test", "Charlie Test"},
+        team_b: {"Bravo Test", "Delta Test"},
+    }
+
+
+def test_auto_draft_skips_play_with_request_that_would_unbalance_teams(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    _add_player(conn, division_id, "Alpha", "Test", grade="A")
+    b = _add_player(conn, division_id, "Bravo", "Test", grade="B")
+    _add_player(conn, division_id, "Charlie", "Test", grade="C")
+    d = _add_player(conn, division_id, "Delta", "Test", grade="D")
+    # Bravo's team already has Charlie by the time Delta is placed, so
+    # honoring this would leave it 3 vs 1.
+    core.add_player_request(conn, d, b)
+
+    result = core.auto_draft(conn, division_id)
+    assert len(core.list_roster(conn, team_a)) == 2
+    assert len(core.list_roster(conn, team_b)) == 2
+    assert any("Delta Test" in w and "Bravo Test" in w for w in result["warnings"])

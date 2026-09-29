@@ -73,6 +73,7 @@ export function ImportScoresheetsPanel({ divisionId }: { divisionId: number }) {
     onSuccess: (result, { item }) => {
       updateItem(item.id, { status: 'done' })
       queryClient.invalidateQueries({ queryKey: ['games', divisionId] })
+      queryClient.invalidateQueries({ queryKey: ['schedule', divisionId] })
       const msg = item.replaceTargetId
         ? `Replaced game_id=${result.id} with "${item.label}".`
         : `Saved "${item.label}" as game_id=${result.id}.` + (result.already_existed ? ' (Game already existed — stats were re-inserted.)' : '')

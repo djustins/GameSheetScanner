@@ -3,47 +3,76 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { listDivisions } from '../api/divisions'
 import { useAuth } from '../auth/AuthContext'
+import { useAccess } from '../auth/access'
 
-const PAGE_GUIDES = [
+interface PageGuide {
+  to: string
+  title: string
+  description: string
+  // Page keys (game_sheet_core.PAGES) granting access; omitted = always open.
+  pages?: string[]
+}
+
+const PAGE_GUIDES: PageGuide[] = [
   {
     to: '/games',
     title: 'Games',
     description:
-      'Import Scoresheets (upload and extract with Claude) and Manage Games — everything about the working division\'s games.',
+      "Schedule & Results, Import Scoresheets (upload and extract with Claude), and Manage Games — everything about the Working Division's games.",
+    pages: ['schedule', 'process', 'edit'],
   },
   {
     to: '/stats-standings',
     title: 'Stats & Standings',
-    description: 'Live standings and every player\'s stats, both scoped to a division you pick.',
+    description: "Live standings and every player's stats for the Working Division.",
+    pages: ['standings', 'stats'],
   },
   {
-    to: '/divisions',
-    title: 'Divisions',
-    description: 'Create/delete divisions, manage teams and players within one, coach carryover, schedule, and export.',
-  },
-  {
-    to: '/coaches',
-    title: 'Coaches',
-    description: 'Coach profiles, their registered children, and teams coached — global across every division.',
+    to: '/team-rosters',
+    title: 'Team Rosters',
+    description:
+      "Each team's roster, positions, grades and coaches in the Working Division, plus everyone registered in it.",
+    pages: ['rosters', 'teams'],
   },
   {
     to: '/draft',
     title: 'Draft',
     description: 'A live snake-order draft, or auto-draft the whole pool at once.',
+    pages: ['draft'],
+  },
+  {
+    to: '/divisions',
+    title: 'Divisions',
+    description: 'Create/delete divisions, manage teams and players within one, coach carryover, schedule, and export.',
+    pages: ['divisions'],
   },
   {
     to: '/players',
     title: 'All Players',
     description: 'Every player registered in the system, with season history, evaluations, and parent/sibling links.',
+    pages: ['players'],
+  },
+  {
+    to: '/coaches',
+    title: 'All Coaches',
+    description: 'Coach profiles, their registered children, and teams coached — global across every division.',
+    pages: ['coaches'],
+  },
+  {
+    to: '/parents',
+    title: 'All Parents',
+    description: 'Every parent/guardian on file and their children, matched automatically from contact info.',
+    pages: ['parents'],
   },
 ]
 
 export function HomePage() {
   const { user } = useAuth()
+  const { canViewAny } = useAccess()
   const navigate = useNavigate()
   const { data: divisions } = useQuery({ queryKey: ['divisions'], queryFn: listDivisions })
 
-  const guides = user?.is_admin
+  const guides: PageGuide[] = user?.is_admin
     ? [...PAGE_GUIDES, { to: '/admin/users', title: 'User Management (admins only)', description: 'Create accounts and control who can see which pages, using named roles instead of picking pages one by one.' }]
     : PAGE_GUIDES
 
@@ -63,8 +92,9 @@ export function HomePage() {
         </Alert>
       ) : (
         <Alert color="blue">
-          👉 <strong>Start here:</strong> pick a division on the <strong>Divisions</strong>, <strong>Games</strong>,
-          or <strong>Stats & Standings</strong> page — each has its own division picker at the top.
+          👉 <strong>Start here:</strong> choose your <strong>Working Division</strong> in the sidebar — Team
+          Rosters, Games, Stats & Standings and Draft all show that division. It&apos;s shared with the Streamlit
+          app, which picks it up the next time it&apos;s opened.
         </Alert>
       )}
 
@@ -88,14 +118,27 @@ export function HomePage() {
         Page guide
       </Title>
       <Stack gap="xs">
-        {guides.map((g) => (
-          <Card key={g.to} withBorder shadow="none" style={{ cursor: 'pointer' }} onClick={() => navigate(g.to)}>
-            <Text fw={700}>{g.title}</Text>
-            <Text size="sm" c="dimmed">
-              {g.description}
-            </Text>
-          </Card>
-        ))}
+        {guides.map((g) => {
+          const locked = g.pages != null && !canViewAny(g.pages)
+          return (
+            <Card
+              key={g.to}
+              withBorder
+              shadow="none"
+              style={{ cursor: locked ? 'default' : 'pointer', opacity: locked ? 0.55 : 1 }}
+              onClick={locked ? undefined : () => navigate(g.to)}
+            >
+              <Text fw={700}>
+                {locked ? '🔒 ' : ''}
+                {g.title}
+              </Text>
+              <Text size="sm" c="dimmed">
+                {g.description}
+                {locked ? " — your role doesn't include this page; ask an admin if you need it." : ''}
+              </Text>
+            </Card>
+          )
+        })}
       </Stack>
     </Stack>
   )

@@ -1,16 +1,31 @@
-import { AppShell, Burger, Group, NavLink, Text, Title } from '@mantine/core'
+import { AppShell, Burger, Group, NavLink, Select, Text, Title } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import { useAccess } from '../auth/access'
+import { useWorkingDivision } from '../context/WorkingDivisionContext'
+import { divisionSeasonLabel } from '../utils/format'
 
-const NAV_ITEMS = [
+interface NavItem {
+  to: string
+  label: string
+  // Page keys (game_sheet_core.PAGES) granting access; omitted = always shown.
+  pages?: string[]
+}
+
+const GLOBAL_NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Home' },
-  { to: '/divisions', label: 'Divisions' },
-  { to: '/players', label: 'All Players' },
-  { to: '/games', label: 'Games' },
-  { to: '/stats-standings', label: 'Stats & Standings' },
-  { to: '/coaches', label: 'Coaches' },
-  { to: '/draft', label: 'Draft' },
+  { to: '/divisions', label: 'Divisions', pages: ['divisions'] },
+  { to: '/players', label: 'All Players', pages: ['players'] },
+  { to: '/coaches', label: 'All Coaches', pages: ['coaches'] },
+  { to: '/parents', label: 'All Parents', pages: ['parents'] },
+]
+
+const SCOPED_NAV_ITEMS: NavItem[] = [
+  { to: '/team-rosters', label: 'Team Rosters', pages: ['rosters', 'teams'] },
+  { to: '/games', label: 'Games', pages: ['schedule', 'process', 'edit'] },
+  { to: '/stats-standings', label: 'Stats & Standings', pages: ['standings', 'stats'] },
+  { to: '/draft', label: 'Draft', pages: ['draft'] },
 ]
 
 export function AppLayout() {
@@ -18,12 +33,24 @@ export function AppLayout() {
   const { user, logout } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
-  const navItems = user?.is_admin ? [...NAV_ITEMS, { to: '/admin/users', label: 'User Management' }] : NAV_ITEMS
+  const { workingDivisionId, setWorkingDivisionId, divisions, loading } = useWorkingDivision()
+
+  const { canViewAny } = useAccess()
+  const allowed = (item: NavItem) => !item.pages || canViewAny(item.pages)
+
+  const globalItems = (
+    user?.is_admin ? [...GLOBAL_NAV_ITEMS, { to: '/admin/users', label: 'User Management' }] : GLOBAL_NAV_ITEMS
+  ).filter(allowed)
+  const scopedItems = SCOPED_NAV_ITEMS.filter(allowed)
+
+  function isActive(to: string) {
+    return to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
+  }
 
   return (
     <AppShell
       header={{ height: 60 }}
-      navbar={{ width: 220, breakpoint: 'sm', collapsed: { mobile: !opened } }}
+      navbar={{ width: 240, breakpoint: 'sm', collapsed: { mobile: !opened } }}
       padding="md"
     >
       <AppShell.Header>
@@ -46,13 +73,27 @@ export function AppLayout() {
         </Group>
       </AppShell.Header>
       <AppShell.Navbar p="md">
-        {navItems.map((item) => (
-          <NavLink
-            key={item.to}
-            label={item.label}
-            active={item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)}
-            onClick={() => navigate(item.to)}
-          />
+        <Select
+          label="Working Division"
+          placeholder={divisions.length === 0 ? 'No divisions yet' : 'Choose a division'}
+          data={divisions.map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))}
+          value={workingDivisionId != null ? String(workingDivisionId) : null}
+          onChange={(v) => setWorkingDivisionId(v ? Number(v) : null)}
+          disabled={loading || divisions.length === 0}
+          searchable
+          mb="md"
+          size="sm"
+        />
+        {globalItems.map((item) => (
+          <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
+        ))}
+        {scopedItems.length > 0 && (
+          <Text size="xs" c="dimmed" mt="md" mb={4} tt="uppercase" fw={700}>
+            Working Division
+          </Text>
+        )}
+        {scopedItems.map((item) => (
+          <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
         ))}
       </AppShell.Navbar>
       <AppShell.Main>

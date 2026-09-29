@@ -1,5 +1,5 @@
 import { apiFetch } from './client'
-import type { Evaluation, Player, PlayerHistoryEntry } from './types'
+import type { Evaluation, Player, PlayerHistoryEntry, PlayerMoveNote, PlayerRequest } from './types'
 
 export function listPlayers(includeDeleted = false): Promise<Player[]> {
   return apiFetch<Player[]>(`/players?include_deleted=${includeDeleted}`)
@@ -40,6 +40,25 @@ export function getPlayerHistory(playerId: number): Promise<PlayerHistoryEntry[]
 
 export function getSiblings(playerId: number): Promise<Player[]> {
   return apiFetch<Player[]>(`/players/${playerId}/siblings`)
+}
+
+export function listPlayerRequests(playerId: number): Promise<PlayerRequest[]> {
+  return apiFetch<PlayerRequest[]>(`/players/${playerId}/requests`)
+}
+
+export function addPlayerRequest(playerId: number, requestedPlayerId: number, note?: string): Promise<PlayerRequest> {
+  return apiFetch<PlayerRequest>(`/players/${playerId}/requests/${requestedPlayerId}`, {
+    method: 'POST',
+    body: JSON.stringify({ note: note || null }),
+  })
+}
+
+export function removePlayerRequest(playerId: number, requestId: number): Promise<void> {
+  return apiFetch<void>(`/players/${playerId}/requests/${requestId}`, { method: 'DELETE' })
+}
+
+export function getMoveNotes(playerId: number, divisionId: number): Promise<PlayerMoveNote[]> {
+  return apiFetch<PlayerMoveNote[]>(`/players/${playerId}/move-notes?division_id=${divisionId}`)
 }
 
 export function getPosition(playerId: number, divisionId: number, teamId: number): Promise<{ position: string | null }> {

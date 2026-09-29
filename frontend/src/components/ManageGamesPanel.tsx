@@ -21,7 +21,11 @@ export function ManageGamesPanel({ divisionId }: { divisionId: number }) {
 
   const onError = (err: unknown) =>
     notifications.show({ color: 'red', message: err instanceof ApiError ? err.message : 'Something went wrong.' })
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['games', divisionId] })
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['games', divisionId] })
+    // Schedule & Results derives each row's result from stored games.
+    queryClient.invalidateQueries({ queryKey: ['schedule', divisionId] })
+  }
 
   const addMutation = useMutation({
     mutationFn: (data: GameData) => createGame(data, '(manual entry)', divisionId),

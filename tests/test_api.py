@@ -58,6 +58,14 @@ def test_me_reflects_the_logged_in_user(conn, admin_auth):
     assert body["is_admin"] is True
 
 
+def test_me_reports_role_pages_and_contact_hiding(conn):
+    role_id = core.add_role(conn, "Scorekeeper", pages=["schedule", "standings"], hide_contact_details=True)
+    core.add_user(conn, "scorekeeper@example.com", "pw-12345678", role_id=role_id)
+    body = client.get("/me", auth=("scorekeeper@example.com", "pw-12345678")).json()
+    assert sorted(body["pages"]) == ["schedule", "standings"]
+    assert body["hide_contact_details"] is True
+
+
 def test_login_returns_a_working_token(conn, admin_auth):
     response = client.post("/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
     assert response.status_code == 200
@@ -263,6 +271,24 @@ def test_division_players_endpoint_includes_grade_and_note(conn, admin_auth, div
     assert len(players) == 1
     assert players[0]["id"] == player_id
     assert players[0]["grade"] == "A"
+
+
+def test_division_players_endpoint_flags_carryover_grade(conn, admin_auth, division_id):
+    other_division_id = core.add_division(conn, 2025, "Summer", "Penguin")
+    player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.add_evaluation(conn, player_id, other_division_id, None, "B")
+
+    response = client.get(f"/divisions/{division_id}/players", auth=admin_auth)
+    assert response.status_code == 200
+    players = response.json()
+    assert players[0]["grade"] == "B"
+    assert players[0]["grade_is_carryover"] is True
+
+    core.add_evaluation(conn, player_id, division_id, None, "A")
+    response = client.get(f"/divisions/{division_id}/players", auth=admin_auth)
+    players = response.json()
+    assert players[0]["grade"] == "A"
+    assert players[0]["grade_is_carryover"] is False
 
 
 def test_division_season_grades_endpoint(conn, admin_auth, division_id):
@@ -833,3 +859,56 @@ def test_extract_game_sheet_requires_writer(conn, readonly_auth):
         auth=readonly_auth,
     )
     assert response.status_code == 403
+
+
+def test_working_division_setting(conn, admin_auth, division_id):
+    response = client.get("/settings/working-division", auth=admin_auth)
+    assert response.status_code == 200
+    assert response.json()["division_id"] == division_id
+
+    other_division_id = core.add_division(conn, 2025, "Fall", "Penguin")
+    updated = client.put(
+        "/settings/working-division", json={"division_id": other_division_id}, auth=admin_auth
+    )
+    assert updated.status_code == 200
+    assert updated.json()["division_id"] == other_division_id
+
+    fetched_again = client.get("/settings/working-division", auth=admin_auth)
+    assert fetched_again.json()["division_id"] == other_division_id
+
+
+def test_player_requests_endpoints(conn, admin_auth, readonly_auth):
+    p1 = core.add_player(conn, "Sidney", "Crosby")
+    p2 = core.add_player(conn, "Wayne", "Gretzky")
+
+    assert client.post(f"/players/{p1}/requests/{p2}", json={}, auth=readonly_auth).status_code == 403
+
+    created = client.post(f"/players/{p1}/requests/{p2}", json={"note": "carpool"}, auth=admin_auth)
+    assert created.status_code == 201
+    assert created.json()["player_id"] == p2
+    assert created.json()["direction"] == "made"
+
+    duplicate = client.post(f"/players/{p1}/requests/{p2}", json={}, auth=admin_auth)
+    assert duplicate.status_code == 409
+
+    received = client.get(f"/players/{p2}/requests", auth=admin_auth).json()
+    assert received[0]["direction"] == "received"
+
+    request_id = created.json()["id"]
+    assert client.delete(f"/players/{p1}/requests/{request_id}", auth=admin_auth).status_code == 204
+    assert client.get(f"/players/{p1}/requests", auth=admin_auth).json() == []
+    assert client.delete(f"/players/{p1}/requests/{request_id}", auth=admin_auth).status_code == 404
+
+
+def test_stats_and_standings_endpoints_title_case_and_sort(conn, admin_auth, division_id):
+    from test_stats import _game_with_stats
+    _game_with_stats(conn, division_id)
+
+    stats = client.get(f"/divisions/{division_id}/stats", auth=admin_auth).json()
+    assert {s["team"] for s in stats} == {"Avalanche", "Wild"}
+    points = [s["points"] for s in stats]
+    assert points == sorted(points, reverse=True)
+    assert stats[0]["number"] == "9"  # 2G 1A leads
+
+    standings = client.get(f"/divisions/{division_id}/standings", auth=admin_auth).json()
+    assert [s["team"] for s in standings] == ["Avalanche", "Wild"]

@@ -23,23 +23,40 @@ import {
   updateCoach,
 } from '../api/coaches'
 import { listPlayers } from '../api/players'
-import { listDivisions } from '../api/divisions'
+import { listDivisionPlayers, listDivisions } from '../api/divisions'
 import type { Coach } from '../api/types'
 import { ApiError } from '../api/client'
 import { divisionLabel } from '../utils/format'
+import { useWorkingDivision } from '../context/WorkingDivisionContext'
+import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 
 export function CoachesPage() {
   const queryClient = useQueryClient()
+  const { hideContactDetails, readOnly } = useAccess()
+  const { workingDivisionId } = useWorkingDivision()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [newFirst, setNewFirst] = useState('')
   const [newLast, setNewLast] = useState('')
+  const [newNickname, setNewNickname] = useState('')
+  const [newPhone, setNewPhone] = useState('')
+  const [newEmail, setNewEmail] = useState('')
 
   const { data: coaches } = useQuery({ queryKey: ['coaches'], queryFn: () => listCoaches() })
   const { data: allCoaches } = useQuery({ queryKey: ['coaches', 'all'], queryFn: () => listCoaches(true) })
   const deletedCoaches = (allCoaches ?? []).filter((c) => c.deleted_at)
   const { data: divisions } = useQuery({ queryKey: ['divisions'], queryFn: listDivisions })
-  const { data: players } = useQuery({ queryKey: ['players'], queryFn: () => listPlayers() })
+  const { data: allPlayers } = useQuery({
+    queryKey: ['players'],
+    queryFn: () => listPlayers(),
+    enabled: workingDivisionId == null,
+  })
+  const { data: divisionPlayers } = useQuery({
+    queryKey: ['division-players', workingDivisionId],
+    queryFn: () => listDivisionPlayers(workingDivisionId!),
+    enabled: workingDivisionId != null,
+  })
+  const players = workingDivisionId != null ? divisionPlayers : allPlayers
 
   const coach = coaches?.find((c) => String(c.id) === selectedId);
 
@@ -58,13 +75,22 @@ export function CoachesPage() {
     notifications.show({ color: 'red', message: err instanceof ApiError ? err.message : 'Something went wrong.' })
 
   const createMutation = useMutation({
-    mutationFn: () => createCoach({ first_name: newFirst.trim(), last_name: newLast.trim() || null }),
+    mutationFn: () =>
+      createCoach({
+        first_name: newFirst.trim(),
+        last_name: newLast.trim() || null,
+        nickname: newNickname.trim() || null,
+        ...(hideContactDetails ? {} : { phone: newPhone.trim() || null, email: newEmail.trim() || null }),
+      }),
     onSuccess: (created) => {
       queryClient.invalidateQueries({ queryKey: ['coaches'] })
       setSelectedId(String(created.id))
       setCreateOpen(false)
       setNewFirst('')
       setNewLast('')
+      setNewNickname('')
+      setNewPhone('')
+      setNewEmail('')
     },
     onError,
   })
@@ -115,12 +141,13 @@ export function CoachesPage() {
     <Stack>
       <Group justify="space-between">
         <Title order={2}>Coaches</Title>
-        <Button onClick={() => setCreateOpen(true)}>Add Coach</Button>
+        {!readOnly && <Button onClick={() => setCreateOpen(true)}>Add Coach</Button>}
       </Group>
       <Text size="sm" c="dimmed">
         Coach profiles are global — the same coach keeps one profile across every division/season they
         coach in.
       </Text>
+      <ReadOnlyNotice />
 
       <Select
         label="Select a coach"
@@ -132,6 +159,7 @@ export function CoachesPage() {
       />
 
       {coach && (
+        <Writable>
         <Stack mt="md" gap="lg">
           <Group grow>
             <TextInput
@@ -150,18 +178,24 @@ export function CoachesPage() {
               onBlur={(e) => e.currentTarget.value !== (coach.nickname ?? '') && updateMutation.mutate({ nickname: e.currentTarget.value })}
             />
           </Group>
-          <Group grow>
-            <TextInput
-              label="Phone"
-              defaultValue={coach.phone ?? ''}
-              onBlur={(e) => e.currentTarget.value !== (coach.phone ?? '') && updateMutation.mutate({ phone: e.currentTarget.value })}
-            />
-            <TextInput
-              label="Email"
-              defaultValue={coach.email ?? ''}
-              onBlur={(e) => e.currentTarget.value !== (coach.email ?? '') && updateMutation.mutate({ email: e.currentTarget.value })}
-            />
-          </Group>
+          {hideContactDetails ? (
+            <Text size="sm" c="dimmed">
+              🔒 Phone/email are hidden for your role.
+            </Text>
+          ) : (
+            <Group grow>
+              <TextInput
+                label="Phone"
+                defaultValue={coach.phone ?? ''}
+                onBlur={(e) => e.currentTarget.value !== (coach.phone ?? '') && updateMutation.mutate({ phone: e.currentTarget.value })}
+              />
+              <TextInput
+                label="Email"
+                defaultValue={coach.email ?? ''}
+                onBlur={(e) => e.currentTarget.value !== (coach.email ?? '') && updateMutation.mutate({ email: e.currentTarget.value })}
+              />
+            </Group>
+          )}
 
           <div>
             <Title order={5}>Children registered</Title>
@@ -186,6 +220,11 @@ export function CoachesPage() {
                 No registered children linked yet.
               </Text>
             )}
+            {workingDivisionId == null && (
+              <Text size="xs" c="dimmed" mt="xs">
+                Pick a Working Division from the sidebar to filter this list to players registered in it.
+              </Text>
+            )}
             <Group mt="xs">
               <Select
                 placeholder="Link a registered player as this coach's child"
@@ -194,6 +233,7 @@ export function CoachesPage() {
                 onChange={setLinkPlayerId}
                 searchable
                 flex={1}
+                nothingFoundMessage={workingDivisionId != null ? 'No registered players in the Working Division.' : undefined}
               />
               <Button
                 size="xs"
@@ -228,9 +268,10 @@ export function CoachesPage() {
             </Button>
           </Group>
         </Stack>
+        </Writable>
       )}
 
-      {deletedCoaches.length > 0 && (
+      {!readOnly && deletedCoaches.length > 0 && (
         <>
           <Title order={5} mt="md">
             Deleted Coaches ({deletedCoaches.length})
@@ -252,6 +293,17 @@ export function CoachesPage() {
         <Stack>
           <TextInput label="First name" value={newFirst} onChange={(e) => setNewFirst(e.currentTarget.value)} required />
           <TextInput label="Last name" value={newLast} onChange={(e) => setNewLast(e.currentTarget.value)} />
+          <TextInput label="Nickname" value={newNickname} onChange={(e) => setNewNickname(e.currentTarget.value)} />
+          {hideContactDetails ? (
+            <Text size="xs" c="dimmed">
+              🔒 Phone/email are hidden for your role.
+            </Text>
+          ) : (
+            <Group grow>
+              <TextInput label="Phone" value={newPhone} onChange={(e) => setNewPhone(e.currentTarget.value)} />
+              <TextInput label="Email" value={newEmail} onChange={(e) => setNewEmail(e.currentTarget.value)} />
+            </Group>
+          )}
           <Button disabled={!newFirst.trim()} loading={createMutation.isPending} onClick={() => createMutation.mutate()}>
             Add coach
           </Button>

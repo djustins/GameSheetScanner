@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Alert, Button, Group, MultiSelect, Select, Stack, Text, TextInput, Title } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   autoDraft,
   deleteDraft,
@@ -14,45 +14,50 @@ import {
   undoAutoDraft,
   undoLastPick,
 } from '../api/draft'
-import { listDivisionTeams, listDivisions } from '../api/divisions'
+import { listDivisionTeams } from '../api/divisions'
 import { listTeamCoaches } from '../api/teams'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
+import { useWorkingDivision } from '../context/WorkingDivisionContext'
 
 export function DraftPage() {
   const { user } = useAuth()
+  const { readOnly } = useAccess()
+  const { workingDivisionId } = useWorkingDivision()
   const queryClient = useQueryClient()
-  const [divisionId, setDivisionId] = useState<string | null>(null)
   const [orderPick, setOrderPick] = useState<string[]>([])
   const [pickSearch, setPickSearch] = useState('')
   const [pickPlayerId, setPickPlayerId] = useState<string | null>(null)
+  // Kept on the page (not just a toast) since warnings -- e.g. a skipped
+  // play-with request -- can be several and worth reading carefully.
+  const [autoDraftResult, setAutoDraftResult] = useState<{ divisionId: number; message: string; warnings: string[] } | null>(null)
 
-  const { data: divisions } = useQuery({ queryKey: ['divisions'], queryFn: listDivisions })
-  const divId = Number(divisionId)
+  const divId = workingDivisionId ?? 0
 
   const { data: draft } = useQuery({
     queryKey: ['draft', divId],
     queryFn: () => getDraft(divId),
-    enabled: !!divisionId,
+    enabled: workingDivisionId != null,
     refetchInterval: 5000,
   })
 
   const { data: teams } = useQuery({
     queryKey: ['division-teams', divId],
     queryFn: () => listDivisionTeams(divId),
-    enabled: !!divisionId,
+    enabled: workingDivisionId != null,
   })
 
   const { data: pool } = useQuery({
     queryKey: ['draft-pool', divId],
     queryFn: () => getDraftPool(divId),
-    enabled: !!divisionId && !draft,
+    enabled: workingDivisionId != null && !draft,
   })
 
   const { data: autoDraftRun } = useQuery({
     queryKey: ['auto-draft-run', divId],
     queryFn: () => getAutoDraftRun(divId),
-    enabled: !!divisionId && !draft,
+    enabled: workingDivisionId != null && !draft,
   })
 
   const { data: currentTeamCoaches } = useQuery({
@@ -75,10 +80,10 @@ export function DraftPage() {
     mutationFn: () => autoDraft(divId),
     onSuccess: (result) => {
       invalidateDraft()
-      const msg = `Auto-drafted ${result.assigned} player(s) across ${result.teams} teams.`
-      notifications.show({
-        color: result.warnings.length ? 'yellow' : 'green',
-        message: result.warnings.length ? `${msg} Warnings: ${result.warnings.join('; ')}` : msg,
+      setAutoDraftResult({
+        divisionId: divId,
+        message: `Auto-drafted ${result.assigned} player(s) across ${result.teams} teams.`,
+        warnings: result.warnings,
       })
     },
     onError,
@@ -127,14 +132,31 @@ export function DraftPage() {
     enabled: !!draft,
   })
 
-  const divisionOptions = (divisions ?? []).map((d) => ({
-    value: String(d.id),
-    label: `${d.year} ${d.season} — ${d.age_group}`,
-  }))
-
   const missingTeams = (teams ?? []).filter((t) => !orderPick.includes(String(t.id)))
 
+  const teamCoachQueries = useQueries({
+    queries: (teams ?? []).map((t) => ({
+      queryKey: ['team-coaches', t.id],
+      queryFn: () => listTeamCoaches(t.id),
+    })),
+  })
+  const teamLabel = (teamId: number, name: string) => {
+    const idx = (teams ?? []).findIndex((t) => t.id === teamId)
+    const coaches = teamCoachQueries[idx]?.data ?? []
+    return coaches.length ? `${name} (${coaches.map((c) => c.name).join(', ')})` : name
+  }
+
+  function randomizeOrder() {
+    const ids = (teams ?? []).map((t) => String(t.id))
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[ids[i], ids[j]] = [ids[j], ids[i]]
+    }
+    setOrderPick(ids)
+  }
+
   const canPick =
+    !readOnly &&
     !!draft?.current_team_id &&
     (user?.is_admin || (user?.coach_id != null && (currentTeamCoaches ?? []).some((c) => c.id === user.coach_id)))
 
@@ -148,17 +170,31 @@ export function DraftPage() {
       <Text size="sm" c="dimmed">
         A live, snake-order draft of a division&apos;s registered-but-unrostered players onto its teams.
       </Text>
+      <ReadOnlyNotice />
 
-      <Select
-        label="Division"
-        placeholder="Choose a division"
-        data={divisionOptions}
-        value={divisionId}
-        onChange={setDivisionId}
-        searchable
-      />
+      {workingDivisionId == null && <Alert color="yellow">Pick a Working Division from the sidebar first.</Alert>}
 
-      {divisionId && !draft && (
+      {autoDraftResult && autoDraftResult.divisionId === divId && (
+        <Alert
+          color={autoDraftResult.warnings.length ? 'yellow' : 'green'}
+          title={autoDraftResult.message}
+          withCloseButton
+          onClose={() => setAutoDraftResult(null)}
+        >
+          {autoDraftResult.warnings.length > 0 && (
+            <Stack gap={2}>
+              {autoDraftResult.warnings.map((w, i) => (
+                <Text size="sm" key={i}>
+                  • {w}
+                </Text>
+              ))}
+            </Stack>
+          )}
+        </Alert>
+      )}
+
+      {workingDivisionId != null && !draft && (
+        <Writable>
         <Stack mt="md">
           <Text size="sm">{pool?.length ?? 0} player(s) currently eligible for this division&apos;s pool.</Text>
 
@@ -182,9 +218,12 @@ export function DraftPage() {
 
               {(pool?.length ?? 0) > 0 && (
                 <Stack>
+                  <Button variant="subtle" size="xs" w="fit-content" onClick={randomizeOrder}>
+                    🔀 Randomize order
+                  </Button>
                   <MultiSelect
                     label="Draft order — pick teams in the order they should draft (round 1; later rounds snake back)"
-                    data={(teams ?? []).map((t) => ({ value: String(t.id), label: t.name }))}
+                    data={(teams ?? []).map((t) => ({ value: String(t.id), label: teamLabel(t.id, t.name) }))}
                     value={orderPick}
                     onChange={setOrderPick}
                   />
@@ -205,6 +244,7 @@ export function DraftPage() {
             </>
           )}
         </Stack>
+        </Writable>
       )}
 
       {draft && (

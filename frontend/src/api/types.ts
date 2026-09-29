@@ -44,6 +44,7 @@ export interface Player {
 export interface DivisionPlayer extends Player {
   teams: string[]
   grade: string | null
+  grade_is_carryover: boolean
   note: string | null
 }
 
@@ -313,6 +314,23 @@ export interface Evaluation {
   team_name: string | null
   grade: string
   created_at: string
+}
+
+export interface PlayerMoveNote {
+  id: number
+  division_id: number
+  from_team: string | null
+  to_team: string | null
+  note: string | null
+  created_at: string
+}
+
+export interface PlayerRequest {
+  id: number
+  player_id: number
+  name: string
+  note: string | null
+  direction: 'made' | 'received'
 }
 
 export interface PlayerImportCandidate {

@@ -7,6 +7,7 @@ export interface CurrentUser {
   read_only: boolean
   coach_id: number | null
   pages: string[]
+  hide_contact_details: boolean
 }
 
 export interface LoginResponse {

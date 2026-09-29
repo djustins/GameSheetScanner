@@ -213,6 +213,25 @@ CREATE TABLE IF NOT EXISTS coach_children (
     PRIMARY KEY (coach_id, player_id)
 );
 
+-- A player's request to play with another specific player next
+-- draft/season — a deliberate, one-directional "friend request", unlike
+-- Siblings (players.parent_id): a sibling link is a symmetric family
+-- relationship, usually auto-matched from shared contact info, and always
+-- a *hard* placement in auto_draft; a play-with request is entered by
+-- hand and treated as a *soft* preference there (honored when it doesn't
+-- unbalance teams, skipped with a warning otherwise). Shown on both
+-- players' profiles regardless of who made it (see
+-- game_sheet_core.list_player_requests) rather than only the requester's.
+CREATE TABLE IF NOT EXISTS player_requests (
+    id                   SERIAL PRIMARY KEY,
+    player_id            INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    requested_player_id  INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    note                 TEXT,
+    created_at           TEXT DEFAULT CURRENT_TIMESTAMP,
+    CHECK (player_id != requested_player_id),
+    UNIQUE (player_id, requested_player_id)
+);
+
 -- A single evaluation of a player for a given division/team.
 CREATE TABLE IF NOT EXISTS evaluations (
     id           SERIAL PRIMARY KEY,

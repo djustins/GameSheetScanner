@@ -1,45 +1,58 @@
 import { useState } from 'react'
-import { Select, Stack, Tabs, Title } from '@mantine/core'
-import { useQuery } from '@tanstack/react-query'
-import { listDivisions } from '../api/divisions'
+import { Alert, Stack, Tabs, Title } from '@mantine/core'
 import { ImportScoresheetsPanel } from '../components/ImportScoresheetsPanel'
 import { ManageGamesPanel } from '../components/ManageGamesPanel'
-import { divisionSeasonLabel } from '../utils/format'
+import { ScheduleResultsPanel } from '../components/ScheduleResultsPanel'
+import { useWorkingDivision } from '../context/WorkingDivisionContext'
+import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 
 export function GamesPage() {
-  const [divisionId, setDivisionId] = useState<string | null>(null)
-  const { data: divisions, isLoading } = useQuery({ queryKey: ['divisions'], queryFn: listDivisions })
-
-  const divisionOptions = (divisions ?? []).map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))
+  const { workingDivisionId } = useWorkingDivision()
+  const { canView } = useAccess()
+  // Tab values match game_sheet_core.PAGES keys, so each is gated directly.
+  const visibleTabs = ['schedule', 'process', 'edit'].filter(canView)
+  const [tab, setTab] = useState<string | null>(visibleTabs[0] ?? null)
 
   return (
     <Stack>
       <Title order={2}>Games</Title>
-      <Select
-        label="Division"
-        placeholder="Choose a division"
-        data={divisionOptions}
-        value={divisionId}
-        onChange={setDivisionId}
-        disabled={isLoading}
-        searchable
-        clearable
-      />
 
-      {divisionId && (
-        <Tabs defaultValue="import">
+      {workingDivisionId == null ? (
+        <Alert color="yellow">Pick a Working Division from the sidebar first.</Alert>
+      ) : (
+        <Tabs value={tab} onChange={setTab}>
           <Tabs.List>
-            <Tabs.Tab value="import">Import Scoresheets</Tabs.Tab>
-            <Tabs.Tab value="manage">Manage Games</Tabs.Tab>
+            {canView('schedule') && <Tabs.Tab value="schedule">Schedule &amp; Results</Tabs.Tab>}
+            {canView('process') && <Tabs.Tab value="process">Import Scoresheets</Tabs.Tab>}
+            {canView('edit') && <Tabs.Tab value="edit">Manage Games</Tabs.Tab>}
           </Tabs.List>
 
-          <Tabs.Panel value="import" pt="md">
-            <ImportScoresheetsPanel divisionId={Number(divisionId)} />
-          </Tabs.Panel>
+          {canView('schedule') && (
+            <Tabs.Panel value="schedule" pt="md">
+              <ScheduleResultsPanel
+                divisionId={workingDivisionId}
+                onImportScoresheets={canView('process') ? () => setTab('process') : undefined}
+              />
+            </Tabs.Panel>
+          )}
 
-          <Tabs.Panel value="manage" pt="md">
-            <ManageGamesPanel divisionId={Number(divisionId)} />
-          </Tabs.Panel>
+          {canView('process') && (
+            <Tabs.Panel value="process" pt="md">
+              <ReadOnlyNotice />
+              <Writable>
+                <ImportScoresheetsPanel divisionId={workingDivisionId} />
+              </Writable>
+            </Tabs.Panel>
+          )}
+
+          {canView('edit') && (
+            <Tabs.Panel value="edit" pt="md">
+              <ReadOnlyNotice />
+              <Writable>
+                <ManageGamesPanel divisionId={workingDivisionId} />
+              </Writable>
+            </Tabs.Panel>
+          )}
         </Tabs>
       )}
     </Stack>

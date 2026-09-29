@@ -9,6 +9,7 @@ import '@mantine/notifications/styles.css'
 import './index.css'
 import App from './App.tsx'
 import { AuthProvider } from './auth/AuthContext'
+import { WorkingDivisionProvider } from './context/WorkingDivisionContext'
 
 const queryClient = new QueryClient()
 
@@ -19,7 +20,9 @@ createRoot(document.getElementById('root')!).render(
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <AuthProvider>
-            <App />
+            <WorkingDivisionProvider>
+              <App />
+            </WorkingDivisionProvider>
           </AuthProvider>
         </BrowserRouter>
       </QueryClientProvider>

@@ -1,49 +1,71 @@
+import { lazy, Suspense } from 'react'
 import { Route, Routes } from 'react-router-dom'
+import { Center, Loader } from '@mantine/core'
 import { LoginPage } from './pages/LoginPage'
-import { HomePage } from './pages/HomePage'
-import { DivisionsPage } from './pages/DivisionsPage'
-import { PlayersPage } from './pages/PlayersPage'
-import { StatsStandingsPage } from './pages/StatsStandingsPage'
-import { TeamRosterPage } from './pages/TeamRosterPage'
-import { CoachesPage } from './pages/CoachesPage'
-import { DraftPage } from './pages/DraftPage'
-import { UserManagementPage } from './pages/UserManagementPage'
-import { GamesPage } from './pages/GamesPage'
-import { ApiTokensPage } from './pages/ApiTokensPage'
 import { ProtectedRoute } from './auth/ProtectedRoute'
 import { AdminRoute } from './auth/AdminRoute'
+import { PageAccess } from './auth/access'
 import { AppLayout } from './layout/AppLayout'
+
+const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })))
+const DivisionsPage = lazy(() => import('./pages/DivisionsPage').then((m) => ({ default: m.DivisionsPage })))
+const PlayersPage = lazy(() => import('./pages/PlayersPage').then((m) => ({ default: m.PlayersPage })))
+const StatsStandingsPage = lazy(() =>
+  import('./pages/StatsStandingsPage').then((m) => ({ default: m.StatsStandingsPage }))
+)
+const TeamRosterPage = lazy(() => import('./pages/TeamRosterPage').then((m) => ({ default: m.TeamRosterPage })))
+const TeamRostersPage = lazy(() => import('./pages/TeamRostersPage').then((m) => ({ default: m.TeamRostersPage })))
+const CoachesPage = lazy(() => import('./pages/CoachesPage').then((m) => ({ default: m.CoachesPage })))
+const AllParentsPage = lazy(() => import('./pages/AllParentsPage').then((m) => ({ default: m.AllParentsPage })))
+const DraftPage = lazy(() => import('./pages/DraftPage').then((m) => ({ default: m.DraftPage })))
+const UserManagementPage = lazy(() =>
+  import('./pages/UserManagementPage').then((m) => ({ default: m.UserManagementPage }))
+)
+const GamesPage = lazy(() => import('./pages/GamesPage').then((m) => ({ default: m.GamesPage })))
+const ApiTokensPage = lazy(() => import('./pages/ApiTokensPage').then((m) => ({ default: m.ApiTokensPage })))
+
+function PageFallback() {
+  return (
+    <Center mih="60vh">
+      <Loader />
+    </Center>
+  )
+}
 
 function App() {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route
-        element={
-          <ProtectedRoute>
-            <AppLayout />
-          </ProtectedRoute>
-        }
-      >
-        <Route path="/" element={<HomePage />} />
-        <Route path="/divisions" element={<DivisionsPage />} />
-        <Route path="/players" element={<PlayersPage />} />
-        <Route path="/stats-standings" element={<StatsStandingsPage />} />
-        <Route path="/teams/:teamId" element={<TeamRosterPage />} />
-        <Route path="/coaches" element={<CoachesPage />} />
-        <Route path="/draft" element={<DraftPage />} />
-        <Route path="/games" element={<GamesPage />} />
-        <Route path="/tokens" element={<ApiTokensPage />} />
+    <Suspense fallback={<PageFallback />}>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
         <Route
-          path="/admin/users"
           element={
-            <AdminRoute>
-              <UserManagementPage />
-            </AdminRoute>
+            <ProtectedRoute>
+              <AppLayout />
+            </ProtectedRoute>
           }
-        />
-      </Route>
-    </Routes>
+        >
+          <Route path="/" element={<HomePage />} />
+          <Route path="/divisions" element={<PageAccess pages={['divisions']}><DivisionsPage /></PageAccess>} />
+          <Route path="/players" element={<PageAccess pages={['players']}><PlayersPage /></PageAccess>} />
+          <Route path="/stats-standings" element={<PageAccess pages={['standings', 'stats']}><StatsStandingsPage /></PageAccess>} />
+          <Route path="/teams/:teamId" element={<PageAccess pages={['rosters']}><TeamRosterPage /></PageAccess>} />
+          <Route path="/team-rosters" element={<PageAccess pages={['rosters', 'teams']}><TeamRostersPage /></PageAccess>} />
+          <Route path="/coaches" element={<PageAccess pages={['coaches']}><CoachesPage /></PageAccess>} />
+          <Route path="/parents" element={<PageAccess pages={['parents']}><AllParentsPage /></PageAccess>} />
+          <Route path="/draft" element={<PageAccess pages={['draft']}><DraftPage /></PageAccess>} />
+          <Route path="/games" element={<PageAccess pages={['schedule', 'process', 'edit']}><GamesPage /></PageAccess>} />
+          <Route path="/tokens" element={<ApiTokensPage />} />
+          <Route
+            path="/admin/users"
+            element={
+              <AdminRoute>
+                <UserManagementPage />
+              </AdminRoute>
+            }
+          />
+        </Route>
+      </Routes>
+    </Suspense>
   )
 }
 

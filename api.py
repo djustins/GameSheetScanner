@@ -155,6 +155,7 @@ def _public_user(user: dict) -> dict:
     return {
         "email": user["email"], "display_name": user["display_name"], "is_admin": user["is_admin"],
         "read_only": user["read_only"], "coach_id": user["coach_id"], "pages": user["pages"],
+        "hide_contact_details": user["hide_contact_details"],
     }
 
 
@@ -278,10 +279,12 @@ def api_division_players(division_id: int, conn=Depends(get_conn), user=Depends(
     person) -- a purely statistical bucket, not someone worth listing at
     the division level. They still appear in GET /teams/{id}/roster."""
     players = [p for p in core.list_players_in_division(conn, division_id) if p["name"].strip().lower() != "sub"]
-    grades = core.get_latest_grades(conn, division_id, [p["id"] for p in players])
+    grades = core.get_latest_grades_with_source(conn, division_id, [p["id"] for p in players])
     notes = core.player_experience_notes(conn, division_id, [p["id"] for p in players])
     for p in players:
-        p["grade"] = grades.get(p["id"])
+        grade_info = grades.get(p["id"])
+        p["grade"] = grade_info["grade"] if grade_info else None
+        p["grade_is_carryover"] = bool(grade_info) and not grade_info["is_current_division"]
         p["note"] = notes.get(p["id"])
     return players
 
@@ -384,12 +387,21 @@ def api_division_games(division_id: int, conn=Depends(get_conn), user=Depends(ge
 
 @app.get("/divisions/{division_id}/standings", tags=["divisions"])
 def api_division_standings(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
-    return core.get_standings(conn, division_id)
+    # core leaves team names in their stored (lowercased) form here -- the
+    # Streamlit app title-cases them itself at display time.
+    standings = core.get_standings(conn, division_id)
+    for s in standings:
+        s["team"] = core.display_text(s["team"])
+    return standings
 
 
 @app.get("/divisions/{division_id}/stats", tags=["divisions"])
 def api_division_stats(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
-    return core.get_player_stats(conn, division_id)
+    stats = core.get_player_stats(conn, division_id)
+    for s in stats:
+        s["team"] = core.display_text(s["team"])
+        s["name"] = core.display_text(s["name"])
+    return sorted(stats, key=lambda s: (-s["points"], -s["goals"]))
 
 
 @app.get("/divisions/{division_id}/season-grades", tags=["divisions"])
@@ -735,6 +747,43 @@ def api_link_siblings(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     return {"parent_id": parent_id}
+
+
+class PlayerRequestCreate(BaseModel):
+    note: str | None = None
+
+
+@app.get("/players/{player_id}/requests", tags=["players"])
+def api_player_requests(player_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    return core.list_player_requests(conn, player_id)
+
+
+@app.post("/players/{player_id}/requests/{requested_player_id}", status_code=status.HTTP_201_CREATED, tags=["players"])
+def api_add_player_request(
+    player_id: int, requested_player_id: int, body: PlayerRequestCreate = PlayerRequestCreate(),
+    conn=Depends(get_conn), user=Depends(require_writer),
+) -> dict:
+    """A play-with request for next draft/season -- a deliberate, non-
+    family "friend" ask, distinct from siblings (see core.add_player_request
+    for exactly how auto_draft treats it differently: a soft preference,
+    not a hard placement)."""
+    try:
+        request_id = core.add_player_request(conn, player_id, requested_player_id, body.note)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return next(r for r in core.list_player_requests(conn, player_id) if r["id"] == request_id)
+
+
+@app.delete(
+    "/players/{player_id}/requests/{request_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["players"]
+)
+def api_remove_player_request(
+    player_id: int, request_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+):
+    existing = next((r for r in core.list_player_requests(conn, player_id) if r["id"] == request_id), None)
+    if existing is None:
+        not_found("Request not found for this player.")
+    core.remove_player_request(conn, request_id)
 
 
 @app.get("/parents", tags=["players"])
@@ -1217,3 +1266,31 @@ def api_restore_user(user_id: int, conn=Depends(get_conn), user=Depends(require_
 @app.get("/age-groups", tags=["meta"])
 def api_age_groups(user: dict = Depends(get_current_user)) -> dict[str, str]:
     return core.AGE_GROUPS
+
+
+@app.get("/settings/working-division", tags=["meta"])
+def api_get_working_division(conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    """The app-wide "Working Division" (game_sheet_core.get_setting) --
+    shared with the Streamlit app's sidebar selector via the same
+    app_settings row, so switching it in either app carries over to the
+    other. Falls back to the first division (by list_divisions' own
+    year/season/age_group ordering) if unset or no longer valid."""
+    divisions = core.list_divisions(conn)
+    valid_ids = {d["id"] for d in divisions}
+    saved = core.get_setting(conn, "working_division_id")
+    saved_id = int(saved) if saved and saved.isdigit() else None
+    if saved_id not in valid_ids:
+        saved_id = divisions[0]["id"] if divisions else None
+    return {"division_id": saved_id}
+
+
+class WorkingDivisionUpdate(BaseModel):
+    division_id: int | None = None
+
+
+@app.put("/settings/working-division", tags=["meta"])
+def api_set_working_division(
+    body: WorkingDivisionUpdate, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> dict:
+    core.set_setting(conn, "working_division_id", str(body.division_id) if body.division_id is not None else "")
+    return {"division_id": body.division_id}

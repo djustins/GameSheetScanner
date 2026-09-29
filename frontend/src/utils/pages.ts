@@ -7,7 +7,8 @@ export const PAGES: Record<string, string> = {
   rosters: 'Teams → Team Rosters',
   teams: 'Teams → Teams',
   players: 'All Players',
-  coaches: 'Teams → Coaches',
+  coaches: 'Coaches',
   divisions: 'Divisions',
   draft: 'Teams → Draft',
+  parents: 'All Parents',
 }

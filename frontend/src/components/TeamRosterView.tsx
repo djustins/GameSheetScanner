@@ -1,0 +1,419 @@
+import { useState } from 'react'
+import { ActionIcon, Button, Group, Modal, Select, Stack, Table, Text, TextInput, Title } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
+import { IconArrowsExchange, IconLink, IconPencil, IconTrash } from '@tabler/icons-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { getPlayerStats, listDivisionTeams } from '../api/divisions'
+import {
+  createPlayer,
+  getMoveNotes,
+  getPosition,
+  getSeasonGrade,
+  listPlayers,
+  setPosition as apiSetPosition,
+  setSeasonGrade as apiSetSeasonGrade,
+} from '../api/players'
+import { addRosterEntry, listRoster, movePlayer, removeRosterEntry, updateRosterEntry } from '../api/teams'
+import type { RosterEntry } from '../api/types'
+import { ApiError } from '../api/client'
+import { useAuth } from '../auth/AuthContext'
+import { CoachManager } from './CoachManager'
+import { ReadOnlyNotice, Writable } from '../auth/access'
+
+const POSITION_OPTIONS = ['', 'Forward', 'Defense', 'Forward or Defense', 'Goalie']
+
+function PositionCell({ playerId, divisionId, teamId }: { playerId: number; divisionId: number; teamId: number }) {
+  const queryClient = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['position', playerId, divisionId, teamId],
+    queryFn: () => getPosition(playerId, divisionId, teamId),
+  })
+  const mutation = useMutation({
+    mutationFn: (position: string) => apiSetPosition(playerId, { division_id: divisionId, team_id: teamId, position }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ['position', playerId, divisionId, teamId] }),
+  })
+  return (
+    <Select
+      size="xs"
+      data={POSITION_OPTIONS.map((p) => ({ value: p, label: p || '—' }))}
+      value={data?.position ?? ''}
+      onChange={(v) => v != null && mutation.mutate(v)}
+      allowDeselect={false}
+    />
+  )
+}
+
+function GradeCell({ playerId, divisionId, teamId }: { playerId: number; divisionId: number; teamId: number }) {
+  const queryClient = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['season-grade', playerId, divisionId],
+    queryFn: () => getSeasonGrade(playerId, divisionId),
+  })
+  const [value, setValue] = useState<string | null>(null)
+  const mutation = useMutation({
+    mutationFn: (grade: string) => apiSetSeasonGrade(playerId, { division_id: divisionId, team_id: teamId, grade }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['season-grade', playerId, divisionId] })
+      setValue(null)
+    },
+  })
+  return (
+    <TextInput
+      size="xs"
+      w={70}
+      value={value ?? data?.grade ?? ''}
+      onChange={(e) => setValue(e.currentTarget.value)}
+      onBlur={() => value != null && value !== (data?.grade ?? '') && mutation.mutate(value)}
+    />
+  )
+}
+
+export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisionId: number }) {
+  const { user } = useAuth()
+  const queryClient = useQueryClient()
+
+  const [addNumber, setAddNumber] = useState('')
+  const [addName, setAddName] = useState('')
+  const [editEntry, setEditEntry] = useState<RosterEntry | null>(null)
+  const [editNumber, setEditNumber] = useState('')
+  const [editName, setEditName] = useState('')
+  const [moveEntry, setMoveEntry] = useState<RosterEntry | null>(null)
+  const [moveTeamId, setMoveTeamId] = useState<string | null>(null)
+  const [moveNote, setMoveNote] = useState('')
+  const [linkEntry, setLinkEntry] = useState<RosterEntry | null>(null)
+  const [linkPlayerId, setLinkPlayerId] = useState<string | null>(null)
+  const [newFirst, setNewFirst] = useState('')
+  const [newLast, setNewLast] = useState('')
+
+  const { data: teams } = useQuery({
+    queryKey: ['division-teams', divisionId],
+    queryFn: () => listDivisionTeams(divisionId),
+    enabled: !!divisionId,
+  })
+  const team = teams?.find((t) => t.id === teamId)
+
+  const { data: roster, isLoading } = useQuery({
+    queryKey: ['roster', teamId],
+    queryFn: () => listRoster(teamId),
+  })
+
+  const { data: divisionStats } = useQuery({
+    queryKey: ['stats', divisionId],
+    queryFn: () => getPlayerStats(divisionId),
+    enabled: !!divisionId,
+  })
+  const statsForTeam = (divisionStats ?? []).filter((s) => s.team_id === teamId)
+
+  const { data: allPlayers } = useQuery({
+    queryKey: ['players'],
+    queryFn: () => listPlayers(),
+    enabled: linkEntry != null,
+  })
+  const linkablePlayers = (allPlayers ?? []).filter((p) => p.name.trim().toLowerCase() !== 'sub')
+
+  const { data: moveNotes } = useQuery({
+    queryKey: ['move-notes', moveEntry?.player_id, divisionId],
+    queryFn: () => getMoveNotes(moveEntry!.player_id!, divisionId),
+    enabled: !!user?.is_admin && moveEntry?.player_id != null,
+  })
+
+  const onError = (err: unknown) =>
+    notifications.show({ color: 'red', message: err instanceof ApiError ? err.message : 'Something went wrong.' })
+  const invalidateRoster = () => queryClient.invalidateQueries({ queryKey: ['roster', teamId] })
+
+  const addMutation = useMutation({
+    mutationFn: () => addRosterEntry(teamId, { number: addNumber.trim(), name: addName.trim() }),
+    onSuccess: () => {
+      invalidateRoster()
+      setAddNumber('')
+      setAddName('')
+    },
+    onError,
+  })
+
+  const editMutation = useMutation({
+    mutationFn: () =>
+      updateRosterEntry(teamId, editEntry!.id, { number: editNumber.trim(), name: editName.trim() }),
+    onSuccess: () => {
+      invalidateRoster()
+      setEditEntry(null)
+    },
+    onError,
+  })
+
+  const removeMutation = useMutation({
+    mutationFn: (entryId: number) => removeRosterEntry(teamId, entryId),
+    onSuccess: invalidateRoster,
+    onError,
+  })
+
+  const closeLink = () => {
+    setLinkEntry(null)
+    setLinkPlayerId(null)
+    setNewFirst('')
+    setNewLast('')
+  }
+
+  // Link an unlinked roster entry (e.g. a jersey number read off a scanned
+  // sheet) to an existing player, or to a brand-new one created here.
+  const linkMutation = useMutation({
+    mutationFn: async (mode: 'existing' | 'new') => {
+      let playerId = Number(linkPlayerId)
+      if (mode === 'new') {
+        const created = await createPlayer({
+          first_name: newFirst.trim(),
+          last_name: newLast.trim() || null,
+          current_division_id: divisionId,
+        })
+        playerId = created.id
+      }
+      return updateRosterEntry(teamId, linkEntry!.id, { player_id: playerId })
+    },
+    onSuccess: () => {
+      invalidateRoster()
+      queryClient.invalidateQueries({ queryKey: ['players'] })
+      queryClient.invalidateQueries({ queryKey: ['stats', divisionId] })
+      closeLink()
+    },
+    onError,
+  })
+
+  const moveMutation = useMutation({
+    mutationFn: () =>
+      movePlayer(moveEntry!.player_id!, {
+        division_id: divisionId,
+        new_team_id: Number(moveTeamId),
+        note: moveNote.trim() || undefined,
+      }),
+    onSuccess: () => {
+      invalidateRoster()
+      queryClient.invalidateQueries({ queryKey: ['move-notes'] })
+      setMoveEntry(null)
+      setMoveTeamId(null)
+      setMoveNote('')
+    },
+    onError,
+  })
+
+  return (
+    <Writable>
+    <Stack>
+      <ReadOnlyNotice />
+      <Title order={4}>Roster</Title>
+      <Table striped highlightOnHover>
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th>#</Table.Th>
+            <Table.Th>Name</Table.Th>
+            <Table.Th>Position</Table.Th>
+            <Table.Th>Grade</Table.Th>
+            <Table.Th />
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {(roster ?? []).map((entry) => (
+            <Table.Tr key={entry.id}>
+              <Table.Td>{entry.number}</Table.Td>
+              <Table.Td>{entry.name}</Table.Td>
+              <Table.Td>
+                {entry.player_id ? (
+                  <PositionCell playerId={entry.player_id} divisionId={divisionId} teamId={teamId} />
+                ) : (
+                  <Button
+                    size="compact-xs"
+                    variant="light"
+                    leftSection={<IconLink size={14} />}
+                    onClick={() => {
+                      const [first, ...rest] = entry.name.split(' ')
+                      setNewFirst(first ?? '')
+                      setNewLast(rest.join(' '))
+                      setLinkEntry(entry)
+                    }}
+                  >
+                    Link player
+                  </Button>
+                )}
+              </Table.Td>
+              <Table.Td>
+                {entry.player_id ? (
+                  <GradeCell playerId={entry.player_id} divisionId={divisionId} teamId={teamId} />
+                ) : (
+                  '—'
+                )}
+              </Table.Td>
+              <Table.Td>
+                <Group gap={4}>
+                  <ActionIcon
+                    variant="subtle"
+                    onClick={() => {
+                      setEditEntry(entry)
+                      setEditNumber(entry.number)
+                      setEditName(entry.name)
+                    }}
+                  >
+                    <IconPencil size={16} />
+                  </ActionIcon>
+                  {entry.player_id && (
+                    <ActionIcon variant="subtle" onClick={() => setMoveEntry(entry)}>
+                      <IconArrowsExchange size={16} />
+                    </ActionIcon>
+                  )}
+                  <ActionIcon color="red" variant="subtle" onClick={() => removeMutation.mutate(entry.id)}>
+                    <IconTrash size={16} />
+                  </ActionIcon>
+                </Group>
+              </Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+      {!isLoading && roster?.length === 0 && (
+        <Text c="dimmed" size="sm">
+          No players on this roster yet.
+        </Text>
+      )}
+
+      <Group>
+        <TextInput placeholder="Number" value={addNumber} onChange={(e) => setAddNumber(e.currentTarget.value)} w={100} />
+        <TextInput placeholder="Name" value={addName} onChange={(e) => setAddName(e.currentTarget.value)} flex={1} />
+        <Button
+          disabled={!addNumber.trim() || !addName.trim()}
+          loading={addMutation.isPending}
+          onClick={() => addMutation.mutate()}
+        >
+          Add Player
+        </Button>
+      </Group>
+
+      <Title order={4} mt="md">
+        Coaches
+      </Title>
+      <CoachManager teamId={teamId} />
+
+      <Title order={4} mt="md">
+        Player Stats
+      </Title>
+      {statsForTeam.length === 0 ? (
+        <Text size="sm" c="dimmed">
+          No stats recorded yet for this team.
+        </Text>
+      ) : (
+        <Table striped highlightOnHover>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>#</Table.Th>
+              <Table.Th>Name</Table.Th>
+              <Table.Th>G</Table.Th>
+              <Table.Th>A</Table.Th>
+              <Table.Th>PTS</Table.Th>
+              <Table.Th>PIM</Table.Th>
+              <Table.Th>SO Made</Table.Th>
+              <Table.Th>SO Missed</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {statsForTeam.map((s, i) => (
+              <Table.Tr key={i}>
+                <Table.Td>{s.number}</Table.Td>
+                <Table.Td>{s.name}</Table.Td>
+                <Table.Td>{s.goals}</Table.Td>
+                <Table.Td>{s.assists}</Table.Td>
+                <Table.Td>{s.points}</Table.Td>
+                <Table.Td>{s.penalties}</Table.Td>
+                <Table.Td>{s.shootout_goals}</Table.Td>
+                <Table.Td>{s.shootout_misses}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      )}
+
+      <Modal opened={editEntry != null} onClose={() => setEditEntry(null)} title="Edit roster entry">
+        <Stack>
+          <TextInput label="Number" value={editNumber} onChange={(e) => setEditNumber(e.currentTarget.value)} />
+          <TextInput label="Name" value={editName} onChange={(e) => setEditName(e.currentTarget.value)} />
+          <Button loading={editMutation.isPending} onClick={() => editMutation.mutate()}>
+            Save
+          </Button>
+        </Stack>
+      </Modal>
+
+      <Modal opened={moveEntry != null} onClose={() => setMoveEntry(null)} title={`Move ${moveEntry?.name}`}>
+        <Stack>
+          <Select
+            label="Team"
+            data={(teams ?? []).filter((t) => t.id !== teamId).map((t) => ({ value: String(t.id), label: t.name }))}
+            value={moveTeamId}
+            onChange={setMoveTeamId}
+          />
+          {user?.is_admin && (
+            <TextInput
+              label="Reason (admin only — coaches won't see this)"
+              value={moveNote}
+              onChange={(e) => setMoveNote(e.currentTarget.value)}
+            />
+          )}
+          <Button disabled={!moveTeamId} loading={moveMutation.isPending} onClick={() => moveMutation.mutate()}>
+            Move
+          </Button>
+          {user?.is_admin && moveNotes && moveNotes.length > 0 && (
+            <div>
+              <Text size="xs" c="dimmed" mb={4}>
+                Move history (admin only)
+              </Text>
+              {moveNotes.map((m) => (
+                <Text key={m.id} size="sm">
+                  {m.from_team ?? '?'} → {m.to_team ?? '?'}: {m.note || '(no reason given)'}
+                </Text>
+              ))}
+            </div>
+          )}
+        </Stack>
+      </Modal>
+
+      <Modal opened={linkEntry != null} onClose={closeLink} title={`Link ${team?.name ?? ''} #${linkEntry?.number ?? ''}`}>
+        <Stack>
+          <Text size="sm" c="dimmed">
+            &quot;{linkEntry?.name}&quot; isn&apos;t linked to a player profile yet. Pick the existing player it is, or
+            create a new profile.
+          </Text>
+          <Group align="flex-end">
+            <Select
+              label="Existing player"
+              placeholder="Search by name"
+              data={linkablePlayers.map((p) => ({ value: String(p.id), label: p.name }))}
+              value={linkPlayerId}
+              onChange={setLinkPlayerId}
+              searchable
+              flex={1}
+            />
+            <Button
+              disabled={!linkPlayerId}
+              loading={linkMutation.isPending && linkMutation.variables === 'existing'}
+              onClick={() => linkMutation.mutate('existing')}
+            >
+              Link
+            </Button>
+          </Group>
+          <Text size="xs" c="dimmed" ta="center">
+            — or —
+          </Text>
+          <Group align="flex-end" grow>
+            <TextInput label="First name" value={newFirst} onChange={(e) => setNewFirst(e.currentTarget.value)} />
+            <TextInput label="Last name" value={newLast} onChange={(e) => setNewLast(e.currentTarget.value)} />
+          </Group>
+          <Button
+            variant="light"
+            disabled={!newFirst.trim()}
+            loading={linkMutation.isPending && linkMutation.variables === 'new'}
+            onClick={() => linkMutation.mutate('new')}
+          >
+            Create new player &amp; link
+          </Button>
+        </Stack>
+      </Modal>
+    </Stack>
+    </Writable>
+  )
+}

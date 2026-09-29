@@ -246,5 +246,5 @@ def test_roster_table_includes_coach_birthday_grade_and_requests(conn, division_
         "Team": "Avalanche", "Coach": 'Jared Bednar "Bed"', "Number": "87", "Name": "Sidney Crosby",
         "Birthday": "2019-08-07", "Grade": "A", "Play-with Requests": "-> Wayne Gretzky",
     }
-    assert rows["99"]["Grade"] == "B (prev)"
+    assert rows["99"]["Grade"] == "B"  # same age group (Penguin): no asterisk
     assert rows["99"]["Play-with Requests"] == "<- Sidney Crosby"

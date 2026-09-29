@@ -352,7 +352,7 @@ def api_division_players(division_id: int, conn=Depends(get_conn), user=Depends(
     for p in players:
         grade_info = grades.get(p["id"])
         p["grade"] = grade_info["grade"] if grade_info else None
-        p["grade_is_carryover"] = bool(grade_info) and not grade_info["is_current_division"]
+        p["grade_is_carryover"] = bool(grade_info) and not grade_info["same_age_group"]
         p["note"] = notes.get(p["id"])
     return players
 

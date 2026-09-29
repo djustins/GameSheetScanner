@@ -627,7 +627,7 @@ def game_form_error(merged: dict) -> str | None:
 
 def season_grade_input(
     conn, player_id: int, division_id: int, team_id: int | None, key: str,
-    prefetched=_UNSET, **text_input_kwargs,
+    prefetched=_UNSET, fallback_grade: str | None = None, **text_input_kwargs,
 ):
     """A "Season Grade" text input backed by core.set_season_grade, usable
     both from the Player Panel and the Team Rosters grid. Both render on
@@ -642,12 +642,19 @@ def season_grade_input(
     `prefetched`, if given (even None/""), skips the individual
     get_season_grade() round trip — pass it when the caller already batch-
     fetched grades for a whole roster (core.get_season_grades_for_division)
-    to avoid one query per row."""
+    to avoid one query per row.
+
+    `fallback_grade` -- the player's latest grade from an earlier division
+    (see core.get_latest_grades) -- is shown as placeholder text when there's
+    no grade for this division yet. Deliberately not the value: saving would
+    otherwise copy an old grade into this division."""
     current_grade = (core.get_season_grade(conn, player_id, division_id) if prefetched is _UNSET else prefetched) or ""
     synced_key = f"{key}__synced"
     if st.session_state.get(synced_key) != current_grade:
         st.session_state[key] = current_grade
         st.session_state[synced_key] = current_grade
+    if fallback_grade and not current_grade:
+        text_input_kwargs.setdefault("placeholder", fallback_grade)
     new_grade = st.text_input("Season Grade", key=key, **text_input_kwargs)
     if new_grade.strip() != current_grade:
         core.set_season_grade(conn, player_id, division_id, team_id, new_grade)
@@ -763,7 +770,7 @@ def render_division_players_table(
         )
         grades_by_player = {pid: info["grade"] for pid, info in grades_detail.items()}
         carryover_player_ids = {
-            pid for pid, info in grades_detail.items() if not info["is_current_division"]
+            pid for pid, info in grades_detail.items() if not info["same_age_group"]
         }
 
     tiered_grades = [
@@ -777,7 +784,7 @@ def render_division_players_table(
             f"{tier}: {tiered_grades.count(tier)}" for tier in GRADE_TIERS if tier in tiered_grades
         ))
     if carryover_player_ids:
-        summary_bits.append("* carried over from a different division")
+        summary_bits.append("* grade from a different age group")
     st.caption(" · ".join(summary_bits))
 
     experience_notes = core.player_experience_notes(conn, division_id, [p["id"] for p in division_players])
@@ -1794,6 +1801,9 @@ def render_player_panel(
             season_grade_input(
                 conn, player_id, working_division_id, None, key=f"{key_prefix}_season_grade_{player_id}",
                 prefetched=current_working_grade,
+                fallback_grade=core.grade_display(
+                    core.get_latest_grades_with_source(conn, working_division_id, [player_id]).get(player_id)
+                ),
                 help="This player's grade for the current Working Division — editing it here updates "
                      "their most recent evaluation for that division instead of adding a new one to its "
                      "history. Use New Grade instead to start a fresh evaluation.",
@@ -2402,7 +2412,7 @@ def render_divisions_dialog():
                     # below so it doesn't read as an in-division evaluation.
                     carryover_grade_player_ids = {
                         pid for pid, info in division_grades_detail.items()
-                        if not info["is_current_division"]
+                        if not info["same_age_group"]
                     }
 
                     st.subheader("Teams")
@@ -4137,6 +4147,9 @@ with tab_teams_group:
                             # feel sluggish, since every tab's body runs every rerun.
                             positions_by_player = core.get_positions_for_team(conn, working_division_id, roster_team_id)
                             grades_by_player = core.get_season_grades_for_division(conn, working_division_id)
+                            latest_grades_by_player = core.get_latest_grades_with_source(
+                                conn, working_division_id, [e["player_id"] for e in roster_rows if e["player_id"]]
+                            )
 
                             detail_cols = st.columns([1, 3, 1.5, 1.5, 0.8])
                             detail_cols[0].markdown("**Number**")
@@ -4171,6 +4184,9 @@ with tab_teams_group:
                                             conn, entry["player_id"], working_division_id, roster_team_id,
                                             key=f"roster_season_grade_{roster_team_id}_{entry['id']}",
                                             prefetched=grades_by_player.get(entry["player_id"]),
+                                            fallback_grade=core.grade_display(
+                                                latest_grades_by_player.get(entry["player_id"])
+                                            ),
                                             label_visibility="collapsed", disabled=is_read_only,
                                         )
                                     with row_cols[4]:
@@ -4311,9 +4327,20 @@ with tab_teams_group:
                 if not all_division_teams:
                     st.write("No teams yet in this division — add one in the Divisions button.")
                 else:
-                    # Batch-fetched once for every team in this division, instead
-                    # of one get_season_grade() round trip per player.
-                    grades_by_player = core.get_season_grades_for_division(conn, teams_division_id)
+                    # Each player's latest available grade: this division's if
+                    # evaluated here, otherwise their most recent from any earlier
+                    # division (see get_latest_grades) -- batch-fetched once.
+                    rosters_by_team = {t["id"]: core.list_roster(conn, t["id"]) for t in all_division_teams}
+                    teams_grades_detail = core.get_latest_grades_with_source(
+                        conn, teams_division_id,
+                        [e["player_id"] for r in rosters_by_team.values() for e in r if e["player_id"]],
+                    )
+                    grades_by_player = {pid: info["grade"] for pid, info in teams_grades_detail.items()}
+                    other_age_group_ids = {
+                        pid for pid, info in teams_grades_detail.items() if not info["same_age_group"]
+                    }
+                    if other_age_group_ids:
+                        st.caption(r"\* grade(s) from a different age group")
                     # Standings rows are keyed by the stored (normalized) team name.
                     standings_by_team = {
                         s["team"]: s for s in core.get_standings(conn, teams_division_id)
@@ -4354,7 +4381,7 @@ with tab_teams_group:
                             team_coaches = core.list_team_coaches(conn, t["id"])
                             c3.write(", ".join(coach_label(tc) for tc in team_coaches) if team_coaches else "—")
 
-                            roster = core.list_roster(conn, t["id"])
+                            roster = rosters_by_team[t["id"]]
                             if not roster:
                                 c4.write("No players yet")
                                 c5.write("—")
@@ -4362,14 +4389,19 @@ with tab_teams_group:
                                 continue
 
                             tiered_grades = []
+                            other_age_group_count = 0
                             for entry in roster:
                                 if entry["player_id"] is None:
                                     continue
                                 grade = grades_by_player.get(entry["player_id"])
                                 if grade and grade.strip().upper() in GRADE_TIERS:
                                     tiered_grades.append(grade.strip().upper())
+                                    other_age_group_count += entry["player_id"] in other_age_group_ids
 
-                            c4.write(f"{len(roster)} added · {len(tiered_grades)} graded")
+                            c4.write(
+                                f"{len(roster)} added · {len(tiered_grades)} graded"
+                                + (f" ({other_age_group_count}" + r"\*)" if other_age_group_count else "")
+                            )
                             if tiered_grades:
                                 avg = sum(GRADE_VALUES[g] for g in tiered_grades) / len(tiered_grades)
                                 c5.write(f"**{avg:.1f}**/{max(GRADE_VALUES.values())}")

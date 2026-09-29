@@ -2356,19 +2356,35 @@ def get_latest_grades_with_source(
     different (usually past) division/age-group distinctly rather than
     presenting it as if it were evaluated in this one. player_id ->
     {"grade": str, "division_id": int, "is_current_division": bool},
-    omitting anyone with no evaluation anywhere."""
+    omitting anyone with no evaluation anywhere. Each entry also has
+    "same_age_group": whether the grade's division is this division's age
+    group -- a grade from a different age group is flagged with an
+    asterisk wherever grades are shown (see grade_display)."""
     if not player_ids:
         return {}
     rows = conn.execute(
-        """SELECT DISTINCT ON (player_id) player_id, grade, division_id
-           FROM evaluations WHERE player_id = ANY(%s)
-           ORDER BY player_id, (division_id = %s) DESC, created_at DESC, id DESC""",
-        (player_ids, division_id),
+        """SELECT DISTINCT ON (e.player_id) e.player_id, e.grade, e.division_id,
+                  d.age_group = (SELECT age_group FROM divisions WHERE id = %s)
+           FROM evaluations e JOIN divisions d ON d.id = e.division_id
+           WHERE e.player_id = ANY(%s)
+           ORDER BY e.player_id, (e.division_id = %s) DESC, e.created_at DESC, e.id DESC""",
+        (division_id, player_ids, division_id),
     ).fetchall()
     return {
-        r[0]: {"grade": r[1], "division_id": r[2], "is_current_division": r[2] == division_id}
+        r[0]: {
+            "grade": r[1], "division_id": r[2], "is_current_division": r[2] == division_id,
+            "same_age_group": bool(r[3]),
+        }
         for r in rows
     }
+
+
+def grade_display(grade_info: dict | None) -> str | None:
+    """A get_latest_grades_with_source entry as shown to people: the grade,
+    with a trailing "*" when it came from a different age group."""
+    if not grade_info or not grade_info["grade"]:
+        return None
+    return grade_info["grade"] + ("" if grade_info["same_age_group"] else "*")
 
 
 def get_latest_grades(conn: PGConnection, division_id: int, player_ids: list[int]) -> dict[int, str]:
@@ -2927,7 +2943,10 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         raise ValueError("No eligible players in this division's pool.")
 
     pool_by_id = {p["id"]: p for p in pool}
-    grades = get_season_grades_for_division(conn, division_id)
+    # Latest available grade: this division's, else the player's most
+    # recent from an earlier one -- so a returning player isn't ranked as
+    # "New" just because they haven't been re-evaluated yet.
+    grades = get_latest_grades(conn, division_id, list(pool_by_id))
 
     def tier_rank_of(player_id: int) -> int:
         tier = (grades.get(player_id) or "").strip().upper()
@@ -3831,9 +3850,8 @@ def player_stats_table(conn: PGConnection, division_id: int) -> list[dict]:
 def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
     """Every rostered player in the division, per team: team, coach(es),
     jersey number, name, birthday, grade and play-with requests. The grade
-    is the player's evaluation for this division, or -- marked "(prev)" --
-    their latest from another division when not yet evaluated here (see
-    get_latest_grades_with_source). Requests list both directions: "->
+    is the player's latest available (this division's, else their most
+    recent), marked "*" when from a different age group (grade_display). Requests list both directions: "->
     Name" for one this player made, "<- Name" for one made to them."""
     sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
@@ -3867,9 +3885,7 @@ def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
     table = []
     for team_id, team, number, name, player_id, birth_date in rows:
         grade_info = grades.get(player_id) if player_id is not None else None
-        grade = None
-        if grade_info and grade_info["grade"]:
-            grade = grade_info["grade"] + ("" if grade_info["is_current_division"] else " (prev)")
+        grade = grade_display(grade_info)
         table.append({
             "Team": display_text(team),
             "Coach": ", ".join(

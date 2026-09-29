@@ -546,6 +546,60 @@ def _apply_schema(conn: _ConnWrapper):
     conn.commit()
 
 
+def _apply_evaluation_audit(conn: _ConnWrapper):
+    """A database-level audit trail for evaluations: every UPDATE or DELETE
+    (from either app, the API, a one-off script, or a cascade -- e.g. a
+    purged division or player) copies the row's previous values into
+    evaluations_audit first, so a grade can never be silently lost again.
+    Set up here rather than in schema_postgres.sql because _apply_schema
+    splits on ';', which a function body contains. Idempotent."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS evaluations_audit (
+            audit_id      SERIAL PRIMARY KEY,
+            action        TEXT NOT NULL,              -- UPDATE | DELETE
+            changed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            evaluation_id INTEGER NOT NULL,
+            player_id     INTEGER,
+            division_id   INTEGER,
+            team_id       INTEGER,
+            grade         TEXT,                       -- the value before the change
+            new_grade     TEXT,                       -- after, for an UPDATE
+            created_at    TEXT
+        )""")
+    conn.execute("""
+        CREATE OR REPLACE FUNCTION evaluations_audit_fn() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO evaluations_audit
+                (action, evaluation_id, player_id, division_id, team_id, grade, new_grade, created_at)
+            VALUES (TG_OP, OLD.id, OLD.player_id, OLD.division_id, OLD.team_id, OLD.grade,
+                    CASE WHEN TG_OP = 'UPDATE' THEN NEW.grade END, OLD.created_at);
+            RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql""")
+    conn.execute("DROP TRIGGER IF EXISTS evaluations_audit_trg ON evaluations")
+    conn.execute(
+        "CREATE TRIGGER evaluations_audit_trg AFTER UPDATE OR DELETE ON evaluations "
+        "FOR EACH ROW EXECUTE FUNCTION evaluations_audit_fn()"
+    )
+    conn.commit()
+
+
+def list_evaluation_audit(conn: PGConnection, player_id: int | None = None) -> list[dict]:
+    """Erased or overwritten evaluations, newest first (see
+    _apply_evaluation_audit), optionally for one player."""
+    where = "WHERE a.player_id = %s" if player_id is not None else ""
+    rows = conn.execute(
+        f"""SELECT a.audit_id, a.action, a.changed_at, a.evaluation_id, a.player_id,
+                   p.first_name, p.last_name, a.division_id, a.grade, a.new_grade, a.created_at
+            FROM evaluations_audit a LEFT JOIN players p ON p.id = a.player_id
+            {where} ORDER BY a.changed_at DESC, a.audit_id DESC""",
+        (player_id,) if player_id is not None else (),
+    ).fetchall()
+    cols = ["audit_id", "action", "changed_at", "evaluation_id", "player_id", "first_name", "last_name",
+            "division_id", "grade", "new_grade", "created_at"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
 def full_name(first_name: str | None, last_name: str | None) -> str:
     """Display name from first/last, e.g. for players/coaches — skips a
     missing last name rather than leaving a trailing space."""
@@ -601,6 +655,7 @@ def init_db(dsn: str) -> _ConnWrapper:
     divisions (see purge_expired_divisions)."""
     conn = _ConnWrapper(psycopg2.connect(dsn))
     _apply_schema(conn)
+    _apply_evaluation_audit(conn)
     _migrate_legacy_names(conn)
     backfill_player_parents(conn)
     purge_expired_divisions(conn)

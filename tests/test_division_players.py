@@ -81,3 +81,13 @@ def test_past_division_keeps_players_graded_there_after_they_move_on(conn, divis
 
     assert player_id in {p["id"] for p in core.list_players_in_division(conn, division_id)}
     assert player_id in {p["id"] for p in core.list_players_in_division(conn, fall)}
+
+
+def test_deleted_or_overwritten_evaluations_are_kept_in_the_audit_log(conn, division_id):
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    core.set_season_grade(conn, player_id, division_id, None, "B")
+    core.set_season_grade(conn, player_id, division_id, None, "A")  # overwrite
+    core.set_season_grade(conn, player_id, division_id, None, "")  # clear -> delete
+
+    log = core.list_evaluation_audit(conn, player_id)
+    assert [(e["action"], e["grade"], e["new_grade"]) for e in log] == [("DELETE", "A", None), ("UPDATE", "B", "A")]

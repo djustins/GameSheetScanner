@@ -26,9 +26,12 @@ import { coachLabel, divisionLabel, divisionSeasonLabel } from '../utils/format'
 interface Props {
   player: Player | null
   onClose: () => void
+  // The list the player was opened from, for Previous/Next (optional).
+  navList?: Player[]
+  onNavigate?: (player: Player) => void
 }
 
-export function PlayerDetailDrawer({ player, onClose }: Props) {
+export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Props) {
   const { user } = useAuth()
   const { hideContactDetails } = useAccess()
   const queryClient = useQueryClient()
@@ -164,8 +167,30 @@ export function PlayerDetailDrawer({ player, onClose }: Props) {
 
   return (
     <Drawer opened={player != null} onClose={onClose} title={player?.name} position="right" size="xl">
+      {player && navList && onNavigate && (() => {
+        const idx = navList.findIndex((p) => p.id === player.id)
+        return idx >= 0 ? (
+          <Group justify="space-between" mb="sm">
+            <Button size="xs" variant="subtle" disabled={idx === 0} onClick={() => onNavigate(navList[idx - 1])}>
+              ◀ Previous
+            </Button>
+            <Text size="xs" c="dimmed">
+              {idx + 1} of {navList.length}
+            </Text>
+            <Button
+              size="xs"
+              variant="subtle"
+              disabled={idx === navList.length - 1}
+              onClick={() => onNavigate(navList[idx + 1])}
+            >
+              Next ▶
+            </Button>
+          </Group>
+        ) : null
+      })()}
       {player && (
-        <Writable>
+        // Keyed so uncontrolled (defaultValue) inputs reset on Previous/Next.
+        <Writable key={player.id}>
         <Stack>
           <ReadOnlyNotice />
           <div>

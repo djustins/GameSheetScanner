@@ -63,7 +63,12 @@ export function DivisionPlayersTable({ divisionId }: { divisionId: number }) {
         </Text>
       )}
 
-      <PlayerDetailDrawer player={selectedPlayer} onClose={() => setSelectedPlayer(null)} />
+      <PlayerDetailDrawer
+        player={selectedPlayer}
+        onClose={() => setSelectedPlayer(null)}
+        navList={players ?? []}
+        onNavigate={setSelectedPlayer}
+      />
     </>
   )
 }

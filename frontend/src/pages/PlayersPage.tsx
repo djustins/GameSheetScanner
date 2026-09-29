@@ -204,7 +204,12 @@ export function PlayersPage() {
         </>
       )}
 
-      <PlayerDetailDrawer player={selectedPlayer} onClose={() => setSelectedPlayer(null)} />
+      <PlayerDetailDrawer
+        player={selectedPlayer}
+        onClose={() => setSelectedPlayer(null)}
+        navList={filtered}
+        onNavigate={setSelectedPlayer}
+      />
 
       <Modal opened={createOpen} onClose={() => setCreateOpen(false)} title="New Player" size="lg">
         <Stack>

@@ -3355,6 +3355,7 @@ GAMES_SUBPAGES = {
 }
 STATS_STANDINGS_PAGE_KEYS = ["standings", "stats"]
 TEAMS_SUBPAGES = {
+    "🏒 Teams": "teams",
     "🧑 Players": "teams",
     "👥 Team Rosters": "rosters",
     "🎯 Draft": "draft",
@@ -4286,8 +4287,8 @@ with tab_teams_group:
         else:
             st.header("Teams")
             st.caption(
-                "Every team in a division at a glance: coach(es), whether players have been added, and "
-                "whether they've been graded — with an average rating and A/B/C/D breakdown once they have."
+                "Every team in a division at a glance: coach(es), roster size, how many are graded (with "
+                "an average rating and A/B/C/D breakdown), and its record so far."
             )
 
             teams_divisions = core.list_divisions(conn)
@@ -4313,20 +4314,40 @@ with tab_teams_group:
                     # Batch-fetched once for every team in this division, instead
                     # of one get_season_grade() round trip per player.
                     grades_by_player = core.get_season_grades_for_division(conn, teams_division_id)
+                    # Standings rows are keyed by the stored (normalized) team name.
+                    standings_by_team = {
+                        s["team"]: s for s in core.get_standings(conn, teams_division_id)
+                    }
 
-                    col_widths = [1.8, 1, 2.3, 1.8, 1.3, 2.8]
-                    head1, head2, head3, head4, head5, head6 = st.columns(col_widths)
+                    col_widths = [1.6, 0.8, 2.1, 1.6, 1.1, 2.2, 1.8, 1.2]
+                    head1, head2, head3, head4, head5, head6, head7, head8 = st.columns(col_widths)
                     head1.markdown("**Team**")
                     head2.markdown("**Color**")
                     head3.markdown("**Coach(es)**")
                     head4.markdown("**Players**")
                     head5.markdown("**Avg**")
                     head6.markdown("**Breakdown**")
+                    head7.markdown("**Record (W-L-OTW-OTL)**")
+                    head8.markdown("**PTS · GF-GA**")
 
                     for team_idx, t in enumerate(all_division_teams):
                         with highlighted_row(None, row_key=f"teams_tab_row_{t['id']}", index=team_idx):
-                            c1, c2, c3, c4, c5, c6 = st.columns(col_widths)
+                            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(col_widths)
                             c1.write(t["name"])
+                            team_standing = standings_by_team.get(core.normalize_text(t["name"]))
+                            if team_standing:
+                                c7.write(
+                                    f"{team_standing['wins']}-{team_standing['losses']}-"
+                                    f"{team_standing['ot_wins']}-{team_standing['ot_losses']}"
+                                    + (f" ({team_standing['ties']} T)" if team_standing["ties"] else "")
+                                )
+                                c8.write(
+                                    f"**{team_standing['points']}** · "
+                                    f"{team_standing['goals_for']}-{team_standing['goals_against']}"
+                                )
+                            else:
+                                c7.write("No games yet")
+                                c8.write("—")
                             with c2:
                                 render_color_swatch(t["color"])
 

@@ -274,15 +274,22 @@ def test_division_players_endpoint_includes_grade_and_note(conn, admin_auth, div
 
 
 def test_division_players_endpoint_flags_carryover_grade(conn, admin_auth, division_id):
-    other_division_id = core.add_division(conn, 2025, "Summer", "Penguin")
+    # Flagged only when the carried-over grade is from a different age group.
+    same_age_division_id = core.add_division(conn, 2025, "Summer", "Penguin")
+    younger_division_id = core.add_division(conn, 2024, "Summer", "Chipmunk")
     player_id = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
-    core.add_evaluation(conn, player_id, other_division_id, None, "B")
+    core.add_evaluation(conn, player_id, younger_division_id, None, "C")
 
     response = client.get(f"/divisions/{division_id}/players", auth=admin_auth)
     assert response.status_code == 200
     players = response.json()
-    assert players[0]["grade"] == "B"
+    assert players[0]["grade"] == "C"
     assert players[0]["grade_is_carryover"] is True
+
+    core.add_evaluation(conn, player_id, same_age_division_id, None, "B")
+    players = client.get(f"/divisions/{division_id}/players", auth=admin_auth).json()
+    assert players[0]["grade"] == "B"
+    assert players[0]["grade_is_carryover"] is False
 
     core.add_evaluation(conn, player_id, division_id, None, "A")
     response = client.get(f"/divisions/{division_id}/players", auth=admin_auth)

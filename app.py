@@ -3380,6 +3380,7 @@ TEAMS_SUBPAGES = {
     "🏒 Teams": "teams",
     "🧑 Players": "teams",
     "👥 Team Rosters": "rosters",
+    "📝 Evals": "teams",
     "🎯 Draft": "draft",
 }
 
@@ -4274,6 +4275,69 @@ with tab_teams_group:
                         st.dataframe(
                             zebra_style(stats_df), width="stretch", hide_index=True,
                             height=(len(team_stats) + 1) * 35 + 3,
+                        )
+
+    elif teams_subpage == "📝 Evals":
+        if "teams" not in visible_pages:
+            st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+        elif working_division_id is None:
+            st.warning("No division selected. Add one in the Divisions button first.")
+        else:
+            st.header("Evals")
+            st.caption(
+                "Only the evaluations recorded for the Working Division — no grades carried over from other "
+                "seasons. Change the Working Division in the sidebar to see another season's."
+            )
+            division_evals = core.list_division_evaluations(conn, working_division_id)
+            evals_team_names = sorted({e["team_name"] for e in division_evals if e["team_name"]})
+            evals_team_filter = st.selectbox(
+                "Team", options=["All Teams"] + evals_team_names + (["No team"] if any(
+                    not e["team_name"] for e in division_evals) else []),
+                key="evals_team_filter",
+            )
+            shown_evals = [
+                e for e in division_evals
+                if evals_team_filter == "All Teams"
+                or (e["team_name"] or "No team") == evals_team_filter
+            ]
+            if not shown_evals:
+                st.write("No evaluations recorded for this season yet.")
+            else:
+                shown_tiers = [
+                    e["grade"].strip().upper() for e in shown_evals
+                    if e["grade"] and e["grade"].strip().upper() in GRADE_TIERS
+                ]
+                st.caption(
+                    f"{len(shown_evals)} evaluation(s) · {len({e['player_id'] for e in shown_evals})} player(s)"
+                    + (" · " + ", ".join(
+                        f"{tier}: {shown_tiers.count(tier)}" for tier in GRADE_TIERS if tier in shown_tiers
+                    ) if shown_tiers else "")
+                )
+                st.dataframe(
+                    zebra_style(pd.DataFrame([
+                        {
+                            "Team": e["team_name"] or "—", "#": e["number"] or "—", "Player": e["name"],
+                            "Grade": e["grade"], "Entered": (e["created_at"] or "")[:10],
+                        }
+                        for e in shown_evals
+                    ])),
+                    width="stretch", hide_index=True,
+                )
+
+            if evals_team_filter == "All Teams":
+                evaluated_ids = {e["player_id"] for e in division_evals}
+                ungraded = [
+                    p for p in core.list_players_in_division(conn, working_division_id)
+                    if p["id"] not in evaluated_ids and p["name"].strip().lower() != "sub"
+                ]
+                if ungraded:
+                    with st.expander(f"Not yet evaluated this season ({len(ungraded)})"):
+                        st.dataframe(
+                            zebra_style(pd.DataFrame([
+                                {"Player": p["name"], "Team(s)": ", ".join(p["teams"]) or "—"}
+                                for p in sorted(ungraded, key=lambda p: p["name"])
+                            ])),
+                            width="stretch", hide_index=True,
                         )
 
     elif teams_subpage == "🎯 Draft":

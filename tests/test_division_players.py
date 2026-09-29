@@ -95,3 +95,15 @@ def test_deleted_or_overwritten_evaluations_are_kept_in_the_audit_log(conn, divi
 
     log = core.list_evaluation_audit(conn, player_id)
     assert [(e["action"], e["grade"], e["new_grade"]) for e in log] == [("DELETE", "A", None), ("UPDATE", "B", "A")]
+
+
+def test_list_division_evaluations_is_only_this_division(conn, division_id):
+    other = core.add_division(conn, 2025, "Summer", "Penguin")
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    sid = core.add_player(conn, "Sidney", "Crosby")
+    core.add_roster_entry(conn, team_id, "87", "sidney crosby", player_id=sid)
+    core.add_evaluation(conn, sid, division_id, None, "A")
+    core.add_evaluation(conn, sid, other, None, "C")
+
+    evals = core.list_division_evaluations(conn, division_id)
+    assert [(e["name"], e["grade"], e["team_name"], e["number"]) for e in evals] == [("Sidney Crosby", "A", "Avalanche", "87")]

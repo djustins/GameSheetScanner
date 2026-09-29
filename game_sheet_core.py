@@ -3568,6 +3568,37 @@ def add_evaluation(conn: PGConnection, player_id: int, division_id: int, team_id
     return evaluation_id
 
 
+def list_division_evaluations(conn: PGConnection, division_id: int) -> list[dict]:
+    """Every evaluation recorded for exactly this division -- no carried-over
+    grades from other seasons -- one row per evaluation, with the player,
+    their team in this division (the evaluation's own team, else the team
+    they're rostered on here) and jersey number. Sorted by team, then name.
+    Deleted players are left out."""
+    rows = conn.execute(
+        """SELECT e.id, e.player_id, p.first_name, p.last_name, e.grade, e.created_at,
+                  COALESCE(et.name, rt.name) AS team_name, re.number
+           FROM evaluations e
+           JOIN players p ON p.id = e.player_id AND p.deleted_at IS NULL
+           LEFT JOIN teams et ON et.id = e.team_id
+           LEFT JOIN LATERAL (
+               SELECT re.team_id, re.number FROM roster_entries re
+               JOIN teams t ON t.id = re.team_id AND t.division_id = e.division_id
+               WHERE re.player_id = e.player_id LIMIT 1
+           ) re ON TRUE
+           LEFT JOIN teams rt ON rt.id = re.team_id
+           WHERE e.division_id = %s
+           ORDER BY team_name NULLS LAST, p.last_name, p.first_name, e.created_at""",
+        (division_id,),
+    ).fetchall()
+    return [
+        {
+            "id": r[0], "player_id": r[1], "name": full_name(r[2], r[3]), "grade": r[4],
+            "created_at": r[5], "team_name": display_text(r[6]) if r[6] else None, "number": r[7],
+        }
+        for r in rows
+    ]
+
+
 def list_evaluations(conn: PGConnection, player_id: int) -> list[dict]:
     rows = conn.execute(
         """SELECT e.id, d.year, d.season, d.age_group, t.name, e.grade, e.created_at

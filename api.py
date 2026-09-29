@@ -919,8 +919,10 @@ def api_add_evaluation(
     "/players/{player_id}/evaluations/{evaluation_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["players"]
 )
 def api_delete_evaluation(
-    player_id: int, evaluation_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+    player_id: int, evaluation_id: int, conn=Depends(get_conn), user=Depends(require_admin)
 ):
+    """Admin-only: the one way an evaluation can be removed (a grade input
+    never erases one -- see core.set_season_grade). Audit-logged."""
     existing = next((e for e in core.list_evaluations(conn, player_id) if e["id"] == evaluation_id), None)
     if existing is None:
         not_found("Evaluation not found for this player.")

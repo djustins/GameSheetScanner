@@ -1879,9 +1879,21 @@ def render_player_panel(
                         team_part = f" — {ev['team_name']}" if ev["team_name"] else ""
                         st.write(f"{ev['year']} {ev['season']} {ev['age_group']}{team_part}: **{ev['grade']}**")
                     with evcol2:
-                        if st.button("✕", key=f"{key_prefix}_delete_eval_{ev['id']}", disabled=is_read_only):
-                            core.delete_evaluation(conn, ev["id"])
-                            st.rerun()
+                        # Admin-only and confirmed: removing an evaluation is the
+                        # one way a grade can go away (and it's audit-logged).
+                        confirm_key = f"{key_prefix}_confirm_delete_eval_{ev['id']}"
+                        if user["is_admin"]:
+                            if st.session_state.get(confirm_key):
+                                if st.button("Confirm delete", key=f"{confirm_key}_yes", type="primary"):
+                                    core.delete_evaluation(conn, ev["id"])
+                                    st.session_state.pop(confirm_key, None)
+                                    st.rerun()
+                                if st.button("Keep", key=f"{confirm_key}_no"):
+                                    st.session_state.pop(confirm_key, None)
+                                    st.rerun()
+                            elif st.button("✕", key=f"{key_prefix}_delete_eval_{ev['id']}", help="Delete this evaluation"):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
             else:
                 st.caption("No evaluations yet.")
 

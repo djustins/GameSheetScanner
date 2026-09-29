@@ -3608,19 +3608,20 @@ def set_season_grade(conn: PGConnection, player_id: int, division_id: int, team_
     """Set a player's Season Grade for a division: updates that player's
     most recent evaluation there in place rather than growing a new history
     row every time, since a quick roster-grid edit isn't a new evaluation
-    event the way the Evaluations popover's "Add evaluation" is. Clearing
-    the grade deletes that row rather than leaving an empty one behind."""
+    event the way the Evaluations popover's "Add evaluation" is.
+
+    A blank grade is ignored: a grade input may set or change a grade but
+    never erase one (an accidentally cleared box used to delete the
+    evaluation outright). Removing an evaluation is only ever the explicit,
+    audited delete_evaluation. Any overwrite is kept in evaluations_audit."""
     grade = grade.strip()
+    if not grade:
+        return
     existing_id = conn.execute(
         """SELECT id FROM evaluations WHERE player_id = %s AND division_id = %s
            ORDER BY created_at DESC, id DESC LIMIT 1""",
         (player_id, division_id),
     ).fetchone()
-    if not grade:
-        if existing_id:
-            conn.execute("DELETE FROM evaluations WHERE id = %s", (existing_id[0],))
-            conn.commit()
-        return
     if existing_id:
         conn.execute(
             "UPDATE evaluations SET grade = %s, team_id = %s WHERE id = %s", (grade, team_id, existing_id[0])

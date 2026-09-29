@@ -337,9 +337,19 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
                       </Text>
                       <Badge variant="light">{e.grade}</Badge>
                     </Group>
-                    <Button size="compact-xs" variant="subtle" color="red" onClick={() => deleteEvalMutation.mutate(e.id)}>
+                    {user?.is_admin && (
+                    <Button
+                      size="compact-xs"
+                      variant="subtle"
+                      color="red"
+                      onClick={() =>
+                        confirm(`Delete the ${e.year} ${e.season} grade "${e.grade}"? This removes it from the player's history.`) &&
+                        deleteEvalMutation.mutate(e.id)
+                      }
+                    >
                       Delete
                     </Button>
+                    )}
                   </Group>
                 ))}
               </Stack>

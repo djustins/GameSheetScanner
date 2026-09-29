@@ -87,7 +87,11 @@ def test_deleted_or_overwritten_evaluations_are_kept_in_the_audit_log(conn, divi
     player_id = core.add_player(conn, "Sidney", "Crosby")
     core.set_season_grade(conn, player_id, division_id, None, "B")
     core.set_season_grade(conn, player_id, division_id, None, "A")  # overwrite
-    core.set_season_grade(conn, player_id, division_id, None, "")  # clear -> delete
+    core.set_season_grade(conn, player_id, division_id, None, "")  # a blank input never erases
+    assert core.get_season_grade(conn, player_id, division_id) == "A"
+
+    evaluation_id = core.list_evaluations(conn, player_id)[0]["id"]
+    core.delete_evaluation(conn, evaluation_id)  # the only way to remove one -- and it's logged
 
     log = core.list_evaluation_audit(conn, player_id)
     assert [(e["action"], e["grade"], e["new_grade"]) for e in log] == [("DELETE", "A", None), ("UPDATE", "B", "A")]

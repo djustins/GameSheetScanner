@@ -32,6 +32,8 @@ export interface Player {
   name: string
   birth_date: string | null
   current_division_id: number | null
+  // Every division they're registered in this season, main division first.
+  division_ids: number[]
   contact_first_name: string | null
   contact_last_name: string | null
   contact_phone: string | null

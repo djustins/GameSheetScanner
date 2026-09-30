@@ -1653,6 +1653,22 @@ def render_player_panel(
         format_func=lambda i: "(none)" if i is None else division_name_by_id[i],
         index=current_idx, key=f"{key_prefix}_division_{player_id}", disabled=is_read_only,
     )
+    # A player can play in two age groups at once, but only within one
+    # season -- so the choices are the main division's same-season ones.
+    season_of = {d["id"]: (d["year"], (d["season"] or "").lower()) for d in core.list_divisions(conn)}
+    same_season_ids = [
+        d for d in division_name_by_id
+        if edit_division is not None and d != edit_division and season_of.get(d) == season_of.get(edit_division)
+    ]
+    other_registered_ids = [d for d in player["division_ids"] if d != player["current_division_id"]]
+    edit_other_divisions = st.multiselect(
+        "Also registered in", options=same_season_ids,
+        default=[d for d in other_registered_ids if d in same_season_ids],
+        format_func=lambda i: division_name_by_id[i],
+        key=f"{key_prefix}_other_divisions_{player_id}_{edit_division}",
+        disabled=is_read_only or not same_season_ids,
+        help="Another age group this player also plays in this season.",
+    )
     if player["current_division_id"] is not None:
         current_team_entries = [
             h for h in core.player_division_history(conn, player_id) if h["division_id"] == player["current_division_id"]
@@ -1880,6 +1896,11 @@ def render_player_panel(
                 save_fields["contact_phone"] = edit_cph.strip() or None
                 save_fields["contact_email"] = edit_cem.strip() or None
             core.update_player(conn, player_id, **save_fields)
+            if edit_division is not None:
+                for division_id in set(other_registered_ids) - set(edit_other_divisions) - {edit_division}:
+                    core.unregister_player_from_division(conn, player_id, division_id)
+                for division_id in edit_other_divisions:
+                    core.register_player_in_division(conn, player_id, division_id)
             st.success("Saved.")
             st.rerun()
     with delete_col:
@@ -3139,7 +3160,7 @@ def render_all_players_dialog():
                     if needle in p["name"].lower() or needle in (p["nickname"] or "").lower()
                 ]
             if division_filter is not None:
-                filtered_players = [p for p in filtered_players if p["current_division_id"] == division_filter]
+                filtered_players = [p for p in filtered_players if division_filter in p["division_ids"]]
             if eval_filter:
                 # Intersection, not union — only players evaluated in every
                 # selected division, not just any one of them.

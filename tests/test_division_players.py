@@ -107,3 +107,71 @@ def test_list_division_evaluations_is_only_this_division(conn, division_id):
 
     evals = core.list_division_evaluations(conn, division_id)
     assert [(e["name"], e["grade"], e["team_name"], e["number"]) for e in evals] == [("Sidney Crosby", "A", "Avalanche", "87")]
+
+
+def test_player_can_be_registered_in_two_age_groups_in_the_same_season(conn, division_id):
+    beaver = core.add_division(conn, 2026, "Summer", "Beaver")
+    player_id = core.add_player(conn, "Bradley", "Matthews", current_division_id=division_id)
+    core.register_player_in_division(conn, player_id, beaver)
+
+    player = core.get_player(conn, player_id)
+    assert player["current_division_id"] == division_id  # main division unchanged
+    assert player["division_ids"] == [division_id, beaver]
+    for d in (division_id, beaver):
+        assert [p["id"] for p in core.draft_pool(conn, d)] == [player_id]
+        assert [p["id"] for p in core.list_players_in_division(conn, d)] == [player_id]
+
+
+def test_registering_in_another_season_replaces_old_registrations(conn, division_id):
+    beaver = core.add_division(conn, 2026, "Summer", "Beaver")
+    fall = core.add_division(conn, 2026, "Fall", "Penguin")
+    player_id = core.add_player(conn, "Bradley", "Matthews", current_division_id=division_id)
+    core.register_player_in_division(conn, player_id, beaver)
+
+    core.register_player_in_division(conn, player_id, fall)
+    player = core.get_player(conn, player_id)
+    assert player["division_ids"] == [fall]
+    assert player["current_division_id"] == fall
+    assert core.draft_pool(conn, beaver) == []
+
+
+def test_changing_main_division_keeps_the_other_age_group(conn, division_id):
+    beaver = core.add_division(conn, 2026, "Summer", "Beaver")
+    freshman = core.add_division(conn, 2026, "Summer", "Freshman")
+    player_id = core.add_player(conn, "Theodore", "Davis", current_division_id=division_id)
+    core.register_player_in_division(conn, player_id, beaver)
+
+    core.update_player(conn, player_id, current_division_id=freshman)  # move Penguin -> Freshman
+    player = core.get_player(conn, player_id)
+    assert player["current_division_id"] == freshman
+    assert sorted(player["division_ids"]) == sorted([freshman, beaver])
+
+    core.unregister_player_from_division(conn, player_id, freshman)
+    player = core.get_player(conn, player_id)
+    assert player["current_division_id"] == beaver and player["division_ids"] == [beaver]
+
+    core.update_player(conn, player_id, current_division_id=None)
+    player = core.get_player(conn, player_id)
+    assert player["current_division_id"] is None and player["division_ids"] == []
+
+
+def test_importing_into_a_second_age_group_adds_rather_than_moves(conn, division_id):
+    beaver = core.add_division(conn, 2026, "Summer", "Beaver")
+    player_id = core.add_player(conn, "Brooks", "Karpuszka", current_division_id=division_id)
+    columns = core.detect_player_import_columns(["Player Name"])
+    plan = core.build_player_import_plan(conn, beaver, [{"Player Name": "Brooks Karpuszka"}], columns)
+    core.apply_player_import_plan(conn, beaver, plan)
+
+    player = core.get_player(conn, player_id)
+    assert player["current_division_id"] == division_id
+    assert player["division_ids"] == [division_id, beaver]
+
+
+def test_remove_all_players_from_division_keeps_their_other_registration(conn, division_id):
+    beaver = core.add_division(conn, 2026, "Summer", "Beaver")
+    player_id = core.add_player(conn, "Bradley", "Matthews", current_division_id=division_id)
+    core.register_player_in_division(conn, player_id, beaver)
+
+    core.remove_all_players_from_division(conn, division_id)
+    player = core.get_player(conn, player_id)
+    assert player["current_division_id"] == beaver and player["division_ids"] == [beaver]

@@ -793,6 +793,29 @@ def api_update_player(
     return player
 
 
+@app.put("/players/{player_id}/divisions/{division_id}", tags=["players"])
+def api_register_player_in_division(
+    player_id: int, division_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    """Also register a player in another age group this season -- see
+    core.register_player_in_division (a division from another season
+    replaces their registrations instead)."""
+    if core.get_player(conn, player_id) is None:
+        not_found("Player not found.")
+    core.register_player_in_division(conn, player_id, division_id)
+    return core.get_player(conn, player_id)
+
+
+@app.delete("/players/{player_id}/divisions/{division_id}", tags=["players"])
+def api_unregister_player_from_division(
+    player_id: int, division_id: int, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    if core.get_player(conn, player_id) is None:
+        not_found("Player not found.")
+    core.unregister_player_from_division(conn, player_id, division_id)
+    return core.get_player(conn, player_id)
+
+
 @app.delete("/players/{player_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["players"])
 def api_delete_player(player_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
     core.soft_delete_player(conn, player_id)

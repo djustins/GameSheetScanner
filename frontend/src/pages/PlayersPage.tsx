@@ -99,7 +99,7 @@ export function PlayersPage() {
   const filtered = realPlayers.filter((p) => {
     const q = search.trim().toLowerCase()
     if (q && !p.name.toLowerCase().includes(q) && !(p.nickname ?? '').toLowerCase().includes(q)) return false
-    if (divisionFilter && p.current_division_id !== Number(divisionFilter)) return false
+    if (divisionFilter && !p.division_ids.includes(Number(divisionFilter))) return false
     // Intersection, not union: evaluated in every selected division.
     if (!evalLoading && !evalSets.every((s) => s!.has(p.id))) return false
     return true
@@ -174,7 +174,9 @@ export function PlayersPage() {
               </Table.Td>
               <Table.Td>{p.birth_date ?? '—'}</Table.Td>
               <Table.Td>
-                {p.current_division_id != null ? (divisionLabelById.get(p.current_division_id) ?? '—') : '—'}
+                {p.division_ids.length > 0
+                  ? p.division_ids.map((id) => divisionLabelById.get(id) ?? '—').join(', ')
+                  : '—'}
               </Table.Td>
             </Table.Tr>
           ))}

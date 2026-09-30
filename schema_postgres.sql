@@ -236,6 +236,20 @@ CREATE TABLE IF NOT EXISTS player_requests (
 -- always on the same team in auto_draft, balance or not.
 ALTER TABLE player_requests ADD COLUMN IF NOT EXISTS hard BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Every division a player is currently registered in. Usually one, but a
+-- player can play in two age groups at once -- always within the same
+-- season (game_sheet_core.register_player_in_division drops registrations
+-- from any other season). players.current_division_id stays as the
+-- player's main division and is always one of these.
+CREATE TABLE IF NOT EXISTS player_divisions (
+    player_id    INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    division_id  INTEGER NOT NULL REFERENCES divisions(id) ON DELETE CASCADE,
+    PRIMARY KEY (player_id, division_id)
+);
+INSERT INTO player_divisions (player_id, division_id)
+    SELECT id, current_division_id FROM players WHERE current_division_id IS NOT NULL
+    ON CONFLICT DO NOTHING;
+
 -- A single evaluation of a player for a given division/team.
 CREATE TABLE IF NOT EXISTS evaluations (
     id           SERIAL PRIMARY KEY,

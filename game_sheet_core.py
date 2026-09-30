@@ -1724,8 +1724,8 @@ def purge_expired_divisions(conn: PGConnection, days: int = 30):
 
 def remove_all_players_from_division(conn: PGConnection, division_id: int) -> int:
     """Strips every player's link to this division -- e.g. to undo a bad
-    import before trying again. Clears current_division_id wherever it
-    points here, and deletes this division's roster entries (on its
+    import before trying again. Removes every registration here (a player
+    registered in another age group too keeps that one), and deletes this division's roster entries (on its
     teams), evaluations, positions, and move notes -- but never touches
     the player record itself, so a player who's also registered or
     rostered in some *other* division keeps that history untouched.
@@ -1742,8 +1742,12 @@ def remove_all_players_from_division(conn: PGConnection, division_id: int) -> in
     conn.execute("DELETE FROM evaluations WHERE division_id = %s", (division_id,))
     conn.execute("DELETE FROM player_positions WHERE division_id = %s", (division_id,))
     conn.execute("DELETE FROM player_move_notes WHERE division_id = %s", (division_id,))
-    conn.execute("UPDATE players SET current_division_id = NULL WHERE current_division_id = %s", (division_id,))
+    registered_ids = [r[0] for r in conn.execute(
+        "DELETE FROM player_divisions WHERE division_id = %s RETURNING player_id", (division_id,)
+    ).fetchall()]
     conn.commit()
+    for player_id in registered_ids:
+        _refresh_main_division(conn, player_id)
     return len(player_ids)
 
 
@@ -2018,11 +2022,19 @@ def list_players(conn: PGConnection, include_deleted: bool = False) -> list[dict
             "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "deleted_at",
             "parent_id", "usa_ball_hockey_id"]
     players = [dict(zip(cols, r)) for r in rows]
+    division_ids: dict[int, list[int]] = {}
+    for player_id, division_id in conn.execute(
+        "SELECT player_id, division_id FROM player_divisions ORDER BY division_id"
+    ).fetchall():
+        division_ids.setdefault(player_id, []).append(division_id)
     # "name" is a derived display convenience (not a real column — see
     # first_name/last_name above), kept so the many read-only call sites
     # that just want "the player's name" don't need to know about the split.
+    # "division_ids": every division they're registered in (see
+    # player_divisions), main division (current_division_id) first.
     for p in players:
         p["name"] = full_name(p["first_name"], p["last_name"])
+        p["division_ids"] = sorted(division_ids.get(p["id"], []), key=lambda d: d != p["current_division_id"])
     return players
 
 
@@ -2033,18 +2045,18 @@ def get_player(conn: PGConnection, player_id: int) -> dict | None:
 
 def list_players_in_division(conn: PGConnection, division_id: int) -> list[dict]:
     """Every player "in" a division — the union of everything that records
-    them there: current_division_id pointing here (signed up, possibly not
+    them there: a registration (player_divisions -- signed up, possibly not
     yet on a team), a roster entry on one of its teams, an evaluation, or
-    a position for it. current_division_id alone can't answer this for a
-    past season: it only holds a player's *latest* division, so each new
-    registration would otherwise drop them from every earlier division's
-    list. The per-season records never change, so the history stays
-    complete. Each row also carries "teams": the names of any of this
+    a position for it. Registrations alone can't answer this for a past
+    season: they only hold a player's *current* season, so each new
+    season's registration would otherwise drop them from every earlier
+    division's list. The per-season records never change, so the history
+    stays complete. Each row also carries "teams": the names of any of this
     division's teams they're rostered on (empty if not rostered)."""
     id_rows = conn.execute(
         """SELECT DISTINCT p.id FROM players p
            WHERE p.deleted_at IS NULL AND (
-               p.current_division_id = %s
+               p.id IN (SELECT player_id FROM player_divisions WHERE division_id = %s)
                OR p.id IN (
                    SELECT re.player_id FROM roster_entries re
                    JOIN teams t ON t.id = re.team_id
@@ -2369,7 +2381,76 @@ def add_player(
     )
     player_id = cur.fetchone()[0]
     conn.commit()
+    if current_division_id is not None:
+        register_player_in_division(conn, player_id, current_division_id)
     return player_id
+
+
+def _refresh_main_division(conn: PGConnection, player_id: int, prefer: int | None = None):
+    """Keeps players.current_division_id one of the player's registrations
+    (player_divisions): `prefer` if given, else the current one if still
+    registered, else any remaining registration, else None."""
+    registered = [r[0] for r in conn.execute(
+        "SELECT division_id FROM player_divisions WHERE player_id = %s ORDER BY division_id", (player_id,)
+    ).fetchall()]
+    current = conn.execute("SELECT current_division_id FROM players WHERE id = %s", (player_id,)).fetchone()
+    current = current[0] if current else None
+    if prefer in registered:
+        main = prefer
+    elif current in registered:
+        main = current
+    else:
+        main = registered[0] if registered else None
+    if main != current:
+        conn.execute("UPDATE players SET current_division_id = %s WHERE id = %s", (main, player_id))
+    conn.commit()
+
+
+def register_player_in_division(conn: PGConnection, player_id: int, division_id: int, main: bool = False):
+    """Registers a player in a division, alongside any other age group they
+    play in *this season*. Registrations from any other season are dropped
+    first -- a player is never registered in, say, Fall and Spring at once.
+    The first registration (or `main=True`) becomes their main division."""
+    conn.execute(
+        """DELETE FROM player_divisions pd USING divisions d, divisions target
+           WHERE pd.division_id = d.id AND target.id = %s AND pd.player_id = %s
+             AND (d.year, lower(d.season)) <> (target.year, lower(target.season))""",
+        (division_id, player_id),
+    )
+    conn.execute(
+        "INSERT INTO player_divisions (player_id, division_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (player_id, division_id),
+    )
+    conn.commit()
+    _refresh_main_division(conn, player_id, prefer=division_id if main else None)
+
+
+def unregister_player_from_division(conn: PGConnection, player_id: int, division_id: int):
+    """Removes one division registration; if it was the player's main
+    division, another of their registrations (if any) takes over."""
+    conn.execute(
+        "DELETE FROM player_divisions WHERE player_id = %s AND division_id = %s", (player_id, division_id)
+    )
+    conn.commit()
+    _refresh_main_division(conn, player_id)
+
+
+def _set_main_division(conn: PGConnection, player_id: int, division_id: int | None):
+    """What setting a player's (main) division means now that a player can
+    be registered in several: None unregisters them everywhere; otherwise
+    their old main division is swapped for this one (a move, as before),
+    keeping any other same-season age group they're also registered in."""
+    if division_id is None:
+        conn.execute("DELETE FROM player_divisions WHERE player_id = %s", (player_id,))
+        conn.commit()
+        _refresh_main_division(conn, player_id)
+        return
+    current = conn.execute("SELECT current_division_id FROM players WHERE id = %s", (player_id,)).fetchone()
+    if current and current[0] is not None and current[0] != division_id:
+        conn.execute(
+            "DELETE FROM player_divisions WHERE player_id = %s AND division_id = %s", (player_id, current[0])
+        )
+    register_player_in_division(conn, player_id, division_id, main=True)
 
 
 def update_player(conn: PGConnection, player_id: int, **fields):
@@ -2379,12 +2460,18 @@ def update_player(conn: PGConnection, player_id: int, **fields):
     Touching any contact_* field re-derives parent_id too (merged with
     whichever contact fields aren't part of this update), so editing just
     the phone number, say, still matches/creates the right parent using
-    the name already on file rather than losing that context."""
+    the name already on file rather than losing that context.
+
+    current_division_id sets the player's main division -- see
+    _set_main_division; register_player_in_division adds a second age
+    group instead."""
     allowed = {
         "first_name", "last_name", "nickname", "birth_date", "current_division_id",
         "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "usa_ball_hockey_id",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
+    if "current_division_id" in updates:
+        _set_main_division(conn, player_id, updates.pop("current_division_id"))
     if not updates:
         return
     contact_fields = ("contact_first_name", "contact_last_name", "contact_phone", "contact_email")
@@ -2593,11 +2680,11 @@ def list_draft_order(conn: PGConnection, draft_id: int) -> list[dict]:
 
 def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
     """Players eligible to be drafted: registered for this division
-    (current_division_id) and not already on any of its teams' rosters."""
+    (player_divisions) and not already on any of its teams' rosters."""
     rows = conn.execute(
         """SELECT p.id, p.first_name, p.last_name, p.nickname, p.birth_date
-           FROM players p
-           WHERE p.current_division_id = %s AND p.deleted_at IS NULL
+           FROM players p JOIN player_divisions pd ON pd.player_id = p.id AND pd.division_id = %s
+           WHERE p.deleted_at IS NULL
              AND p.id NOT IN (
                  SELECT re.player_id FROM roster_entries re
                  JOIN teams t ON t.id = re.team_id
@@ -2927,8 +3014,15 @@ def list_coach_children(conn: PGConnection, coach_id: int) -> list[dict]:
     ).fetchall()
     cols = ["id", "first_name", "last_name", "nickname", "current_division_id"]
     children = [dict(zip(cols, r)) for r in rows]
+    division_ids: dict[int, list[int]] = {}
+    for player_id, division_id in conn.execute(
+        "SELECT player_id, division_id FROM player_divisions WHERE player_id = ANY(%s)",
+        ([c["id"] for c in children],),
+    ).fetchall():
+        division_ids.setdefault(player_id, []).append(division_id)
     for c in children:
         c["name"] = full_name(c["first_name"], c["last_name"])
+        c["division_ids"] = division_ids.get(c["id"], [])
     return children
 
 
@@ -2957,7 +3051,7 @@ def find_coach_children_in_division(conn: PGConnection, coach_id: int, division_
     """This coach's registered child(ren) currently in this division —
     the explicit coach_children link if one exists there; otherwise a
     best-effort fallback that looks for a player registered in this
-    division (current_division_id) whose contact name matches the
+    division (player_divisions) whose contact name matches the
     coach's own name and, if found, links them (see link_coach_child) so
     the match becomes an explicit, authoritative one from here on. This
     mirrors get_or_create_parent's contact-based auto-matching, just
@@ -2967,7 +3061,7 @@ def find_coach_children_in_division(conn: PGConnection, coach_id: int, division_
     wrongly treated as unrelated just because nobody's linked them yet.
     Still returns [] (never guesses) when no name matches, so the
     caller can prompt to link one manually instead."""
-    explicit = [c for c in list_coach_children(conn, coach_id) if c["current_division_id"] == division_id]
+    explicit = [c for c in list_coach_children(conn, coach_id) if division_id in c["division_ids"]]
     if explicit:
         return explicit
 
@@ -3119,7 +3213,10 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         return (tier_rank_of(player_id), birth_date)
 
     division_players = conn.execute(
-        "SELECT id, parent_id FROM players WHERE current_division_id = %s AND deleted_at IS NULL", (division_id,)
+        """SELECT p.id, p.parent_id FROM players p
+           JOIN player_divisions pd ON pd.player_id = p.id AND pd.division_id = %s
+           WHERE p.deleted_at IS NULL""",
+        (division_id,),
     ).fetchall()
     parent_of = {r[0]: r[1] for r in division_players if r[1] is not None}
     siblings_by_parent: dict[int, list[int]] = {}
@@ -3701,7 +3798,7 @@ def _resolve_import_names(
                 )
             for candidates in found:
                 matches = [m for m in candidates if m["id"] != player_id]
-                in_division = [m for m in matches if m["current_division_id"] == division_id]
+                in_division = [m for m in matches if division_id in m["division_ids"]]
                 if len(in_division) == 1 or len(matches) == 1:
                     if link(conn, player_id, (in_division or matches)[0]["id"], text):
                         added += 1
@@ -3750,10 +3847,13 @@ def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[di
             player_id = entry.get("resolved_player_id") or entry["matched_player_id"]
             update_player(
                 conn, player_id, first_name=entry["first_name"] or entry["name"], last_name=entry["last_name"],
-                birth_date=entry["birth_date"], current_division_id=division_id,
+                birth_date=entry["birth_date"],
                 contact_first_name=entry["contact_first_name"], contact_last_name=entry["contact_last_name"],
                 contact_phone=entry["contact_phone"], contact_email=entry["contact_email"],
             )
+            # Adds this division alongside any other age group they're in
+            # this season, rather than moving them out of it.
+            register_player_in_division(conn, player_id, division_id)
             updated += 1
         else:
             skipped += 1
@@ -3871,14 +3971,16 @@ def list_division_requests(conn: PGConnection, division_id: int) -> list[dict]:
     out."""
     rows = conn.execute(
         """SELECT pr.id, pr.hard, pr.note,
-                  p1.id, p1.first_name, p1.last_name, p1.current_division_id = %s,
-                  p2.id, p2.first_name, p2.last_name, p2.current_division_id = %s
+                  p1.id, p1.first_name, p1.last_name, pd1.player_id IS NOT NULL,
+                  p2.id, p2.first_name, p2.last_name, pd2.player_id IS NOT NULL
            FROM player_requests pr
            JOIN players p1 ON p1.id = pr.player_id AND p1.deleted_at IS NULL
            JOIN players p2 ON p2.id = pr.requested_player_id AND p2.deleted_at IS NULL
-           WHERE p1.current_division_id = %s OR p2.current_division_id = %s
+           LEFT JOIN player_divisions pd1 ON pd1.player_id = p1.id AND pd1.division_id = %s
+           LEFT JOIN player_divisions pd2 ON pd2.player_id = p2.id AND pd2.division_id = %s
+           WHERE pd1.player_id IS NOT NULL OR pd2.player_id IS NOT NULL
            ORDER BY pr.created_at, pr.id""",
-        (division_id, division_id, division_id, division_id),
+        (division_id, division_id),
     ).fetchall()
     team_of = {
         r[0]: display_text(r[1]) for r in conn.execute(

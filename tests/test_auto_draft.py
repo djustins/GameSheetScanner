@@ -474,3 +474,35 @@ def test_auto_draft_warns_when_a_hard_link_forces_an_avoid_pair_together(conn, d
 
     result = core.auto_draft(conn, division_id)
     assert any("Bravo Test and Charlie Test (do not play with)" in w for w in result["warnings"])
+
+
+def _swap_scenario(conn, division_id, d1_born, d2_born, a_born="2015-01-01", b_born="2015-01-01"):
+    """A -> team 1, B -> team 2, Dee1 -> team 2, Dee2 -> team 1 by balance;
+    Dee2 asks to play with B, which placement alone can't honor."""
+    core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    _add_player(conn, division_id, "Alpha", "Test", grade="A", birth_date=a_born)
+    b = _add_player(conn, division_id, "Bravo", "Test", grade="B", birth_date=b_born)
+    _add_player(conn, division_id, "Dee1", "Test", grade="D", birth_date=d1_born)
+    d2 = _add_player(conn, division_id, "Dee2", "Test", grade="D", birth_date=d2_born)
+    core.add_player_request(conn, d2, b)
+    result = core.auto_draft(conn, division_id)
+    team_of = {r["player_id"]: r["team_id"] for r in core.auto_draft_table(conn, division_id)}
+    return result, team_of, b, d2
+
+
+def test_auto_draft_swaps_same_grade_players_to_join_a_request(conn, division_id):
+    result, team_of, b, d2 = _swap_scenario(conn, division_id, "2015-01-01", "2015-01-01")
+    assert team_of[d2] == team_of[b]
+    assert sorted(list(team_of.values()).count(t) for t in set(team_of.values())) == [2, 2]
+    assert not any("Could not honor" in w for w in result["warnings"])
+
+
+def test_auto_draft_skips_a_swap_that_would_spread_team_ages_over_a_year(conn, division_id):
+    # Swapping Dee1 (born 2014) and Dee2 (2016) would leave one team
+    # averaging 2014 and the other 2016 -- a two-year gap.
+    result, team_of, b, d2 = _swap_scenario(
+        conn, division_id, "2014-01-01", "2016-01-01", a_born="2014-01-01", b_born="2016-01-01",
+    )
+    assert team_of[d2] != team_of[b]
+    assert any("Dee2 Test" in w and "Bravo Test" in w for w in result["warnings"])

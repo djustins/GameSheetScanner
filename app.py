@@ -666,7 +666,8 @@ POSITION_OPTIONS = ["", "Forward", "Defense", "Forward or Defense", "Goalie"]
 
 
 def position_input(
-    conn, player_id: int, division_id: int, team_id: int, key: str, prefetched=_UNSET, **selectbox_kwargs,
+    conn, player_id: int, division_id: int, team_id: int, key: str, prefetched=_UNSET, registered: str | None = None,
+    **selectbox_kwargs,
 ):
     """A "Position" dropdown backed by core.set_position, for one specific
     player+team+division. Mirrors season_grade_input's session_state resync
@@ -674,18 +675,28 @@ def position_input(
     Panel, Team Rosters grid) within the same script run. `prefetched`
     mirrors season_grade_input's — pass core.get_positions_for_team()'s
     result to skip the individual get_position() round trip in a roster
-    loop."""
-    current_position = (core.get_position(conn, player_id, division_id, team_id) if prefetched is _UNSET else prefetched) or ""
+    loop.
+
+    With no position set on this team yet, it shows `registered` -- the
+    position they asked for at registration (see
+    core.list_registration_positions) -- so e.g. a registered goalie reads
+    as Goalie right after the draft. Picking another saves it for this
+    team; picking "(none)" clears the registered one too."""
+    team_position = (core.get_position(conn, player_id, division_id, team_id) if prefetched is _UNSET else prefetched) or ""
+    current_position = team_position or (registered or "").strip()
     synced_key = f"{key}__synced"
     if st.session_state.get(synced_key) != current_position:
         st.session_state[key] = current_position
         st.session_state[synced_key] = current_position
+    options = POSITION_OPTIONS + ([current_position] if current_position not in POSITION_OPTIONS else [])
     new_position = st.selectbox(
-        "Position", options=POSITION_OPTIONS, format_func=lambda p: "(none)" if p == "" else p,
+        "Position", options=options, format_func=lambda p: "(none)" if p == "" else p,
         key=key, **selectbox_kwargs,
     )
     if new_position.strip() != current_position:
         core.set_position(conn, player_id, division_id, team_id, new_position)
+        if not new_position.strip() and not team_position:
+            core.set_registration_position(conn, player_id, division_id, None)
         st.session_state[synced_key] = new_position.strip()
         st.rerun()
 
@@ -1861,6 +1872,7 @@ def render_player_panel(
             position_input(
                 conn, player_id, player["current_division_id"], h["team_id"],
                 key=f"{key_prefix}_position_{player_id}_{h['team_id']}",
+                registered=core.list_registration_positions(conn, player_id).get(player["current_division_id"]),
                 help=f"Position on {h['team_name']} for this division." if len(current_team_entries) > 1 else None,
                 disabled=is_read_only,
             )
@@ -4415,6 +4427,9 @@ with tab_teams_group:
                             # enough to make every interaction anywhere in the app
                             # feel sluggish, since every tab's body runs every rerun.
                             positions_by_player = core.get_positions_for_team(conn, working_division_id, roster_team_id)
+                            registered_positions = core.get_registration_positions_for_division(
+                                conn, working_division_id
+                            )
                             grades_by_player = core.get_season_grades_for_division(conn, working_division_id)
                             latest_grades_by_player = core.get_latest_grades_with_source(
                                 conn, working_division_id, [e["player_id"] for e in roster_rows if e["player_id"]]
@@ -4446,6 +4461,7 @@ with tab_teams_group:
                                             conn, entry["player_id"], working_division_id, roster_team_id,
                                             key=f"roster_position_{roster_team_id}_{entry['id']}",
                                             prefetched=positions_by_player.get(entry["player_id"]),
+                                            registered=registered_positions.get(entry["player_id"]),
                                             label_visibility="collapsed", disabled=is_read_only,
                                         )
                                     with row_cols[3]:
@@ -4758,7 +4774,10 @@ with tab_teams_group:
                         pid for pid, info in teams_grades_detail.items() if not info["same_age_group"]
                     }
                     if other_age_group_ids:
-                        st.caption(r"\* grade(s) from a different age group")
+                        st.caption(
+                            r"\* move-up grade (from a different age group) — shown as is, but weighted as a D "
+                            "in the average, the way Auto-Draft and trades weight it"
+                        )
                     # Standings rows are keyed by the stored (normalized) team name.
                     standings_by_team = {
                         s["team"]: s for s in core.get_standings(conn, teams_division_id)
@@ -4824,25 +4843,37 @@ with tab_teams_group:
                                    if 0 < dated_count < len(roster_birth_dates) else "")
                             )
 
-                            tiered_grades = []
-                            other_age_group_count = 0
+                            # A grade from a different age group (a move-up, "*") is listed
+                            # as itself (e.g. A*) but weighted as a D in the average -- the
+                            # way auto-draft and trades weight the player.
+                            own_grades = []
+                            move_up_grades = []
                             for entry in roster:
                                 if entry["player_id"] is None:
                                     continue
                                 grade = grades_by_player.get(entry["player_id"])
                                 if grade and grade.strip().upper() in GRADE_TIERS:
-                                    tiered_grades.append(grade.strip().upper())
-                                    other_age_group_count += entry["player_id"] in other_age_group_ids
+                                    if entry["player_id"] in other_age_group_ids:
+                                        move_up_grades.append(grade.strip().upper())
+                                    else:
+                                        own_grades.append(grade.strip().upper())
+                            weighted = own_grades + ["D"] * len(move_up_grades)
 
                             c4.write(
-                                f"{len(roster)} added · {len(tiered_grades)} graded"
-                                + (f" ({other_age_group_count}" + r"\*)" if other_age_group_count else "")
+                                f"{len(roster)} added · {len(weighted)} graded"
+                                + (f" ({len(move_up_grades)}" + r"\*)" if move_up_grades else "")
                             )
-                            if tiered_grades:
-                                avg = sum(GRADE_VALUES[g] for g in tiered_grades) / len(tiered_grades)
+                            if weighted:
+                                avg = sum(GRADE_VALUES[g] for g in weighted) / len(weighted)
                                 c5.write(f"**{avg:.1f}**/{max(GRADE_VALUES.values())}")
                                 breakdown = ", ".join(
-                                    f"{tier}: {tiered_grades.count(tier)}" for tier in GRADE_TIERS if tier in tiered_grades
+                                    part
+                                    for tier in GRADE_TIERS
+                                    for part in (
+                                        f"{tier}: {own_grades.count(tier)}" if tier in own_grades else None,
+                                        f"{tier}\\*: {move_up_grades.count(tier)}" if tier in move_up_grades else None,
+                                    )
+                                    if part
                                 )
                             else:
                                 c5.write("—")

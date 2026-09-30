@@ -1947,7 +1947,9 @@ def move_player_to_team(
 ) -> None:
     """Moves a rostered player to a different team within the same
     division — e.g. rebalancing after the draft. Their jersey number stays
-    as-is on the new team (editable afterward like any other roster row).
+    as-is on the new team (editable afterward like any other roster row),
+    unless it's already taken there -- then they get the next free
+    placeholder number.
     A no-op if they're already on new_team_id.
 
     A given `note` is recorded in player_move_notes as this move's reason
@@ -1972,7 +1974,21 @@ def move_player_to_team(
     roster_entry_id, from_team_id = entry
     if from_team_id == new_team_id:
         return
-    conn.execute("UPDATE roster_entries SET team_id = %s WHERE id = %s", (new_team_id, roster_entry_id))
+    # A jersey number is unique per team: if theirs is taken on the new
+    # team (e.g. both have an auto-draft "AUTO7"), they get the next free
+    # placeholder -- AUTO<n> for an auto-draft number, else TBD<n>.
+    number = conn.execute("SELECT number FROM roster_entries WHERE id = %s", (roster_entry_id,)).fetchone()[0]
+    taken = {r[0] for r in conn.execute("SELECT number FROM roster_entries WHERE team_id = %s", (new_team_id,)).fetchall()}
+    if number in taken:
+        prefix = "AUTO" if re.fullmatch(r"AUTO\d+", number or "") else "TBD"
+        n = 1
+        while f"{prefix}{n}" in taken:
+            n += 1
+        number = f"{prefix}{n}"
+    # Team and number together: the new number is only free on the new team.
+    conn.execute(
+        "UPDATE roster_entries SET team_id = %s, number = %s WHERE id = %s", (new_team_id, number, roster_entry_id)
+    )
     if note and note.strip():
         conn.execute(
             "INSERT INTO player_move_notes (player_id, division_id, from_team_id, to_team_id, note) "
@@ -2590,6 +2606,17 @@ def list_registration_positions(conn: PGConnection, player_id: int) -> dict[int,
     return dict(conn.execute(
         "SELECT division_id, position FROM player_divisions WHERE player_id = %s", (player_id,)
     ).fetchall())
+
+
+def get_registration_positions_for_division(conn: PGConnection, division_id: int) -> dict[int, str]:
+    """player_id -> the position they registered with in this division, for
+    everyone registered here who gave one -- one query, for roster grids."""
+    return {
+        r[0]: r[1] for r in conn.execute(
+            "SELECT player_id, position FROM player_divisions WHERE division_id = %s AND position IS NOT NULL",
+            (division_id,),
+        ).fetchall()
+    }
 
 
 def is_goalie(position: str | None) -> bool:
@@ -3275,6 +3302,89 @@ _AUTO_DRAFT_REQUEST_SKILL_SLACK = 2
 _AUTO_DRAFT_NO_GOALIE_BONUS = 2
 
 
+# After placement, auto_draft swaps same-grade players to reunite split soft
+# play-with requests -- as long as the gap between the youngest and oldest
+# team's average age stays within this (or, if it's already wider, doesn't
+# grow).
+_AUTO_DRAFT_SWAP_AGE_GAP_DAYS = 365
+
+
+def _swap_to_join_requests(
+    assignments: dict[int, int], existing_team_by_player: dict[int, int], pool_by_id: dict[int, dict],
+    units: list[dict], unit_of_player: dict[int, int], goalie_ids: set[int], coach_kid_ids: set[int],
+    tier_rank_of, request_pairs: list[tuple[int, int]], avoid_pairs: list[tuple[int, int]], conn: PGConnection,
+) -> None:
+    """Post-pass for auto_draft (updates `assignments` in place): for each
+    soft request whose two players ended up on different teams, look for a
+    one-for-one swap of same-grade players that puts them together -- so
+    every team's size, skill and goalies are unchanged -- and make the one
+    that keeps team ages most even, if the average-age gap between teams
+    stays within _AUTO_DRAFT_SWAP_AGE_GAP_DAYS. Only players placed on
+    their own are swapped: never goalies, siblings or hard-request groups,
+    coach's kids, or anyone already rostered. A swap never splits a pair
+    that's together or puts a "do not play with" pair together."""
+    def team(pid: int) -> int | None:
+        return assignments.get(pid) or existing_team_by_player.get(pid)
+
+    birth: dict[int, int] = {}
+    for pid, birth_date in [(p, pool_by_id[p]["birth_date"]) for p in pool_by_id] + conn.execute(
+        "SELECT id, birth_date FROM players WHERE id = ANY(%s)", (list(existing_team_by_player),)
+    ).fetchall():
+        try:
+            birth[pid] = date.fromisoformat(normalize_date(birth_date) or "").toordinal()
+        except ValueError:
+            pass
+
+    def age_gap() -> float:
+        by_team: dict[int, list[int]] = {}
+        for pid in set(assignments) | set(existing_team_by_player):
+            if pid in birth and team(pid) is not None:
+                by_team.setdefault(team(pid), []).append(birth[pid])
+        averages = [sum(v) / len(v) for v in by_team.values()]
+        return max(averages) - min(averages) if len(averages) > 1 else 0.0
+
+    movable = {
+        pid for pid in assignments
+        if len(units[unit_of_player[pid]]["player_ids"]) == 1 and units[unit_of_player[pid]]["pinned_team_id"] is None
+        and pid not in goalie_ids and pid not in coach_kid_ids
+    }
+
+    def breaks_something(moved: set[int]) -> bool:
+        together_before = {pair: before for pair, before in pairs_state.items() if moved & set(pair)}
+        for (a, b), was_together in together_before.items():
+            if was_together and team(a) != team(b):
+                return True
+        return any(team(a) == team(b) for a, b in avoid_pairs if moved & {a, b})
+
+    improved = True
+    while improved:
+        improved = False
+        pairs_state = {(a, b): team(a) == team(b) for a, b in request_pairs}
+        for a, b in request_pairs:
+            if team(a) == team(b):
+                continue
+            gap_now = age_gap()
+            best = None
+            for mover, stay in ((a, b), (b, a)):
+                if mover not in movable:
+                    continue
+                src, dest = team(mover), team(stay)
+                for partner in [p for p in movable if assignments[p] == dest]:
+                    if tier_rank_of(partner) != tier_rank_of(mover):
+                        continue
+                    assignments[mover], assignments[partner] = dest, src
+                    gap = age_gap()
+                    ok = not breaks_something({mover, partner}) and gap <= max(_AUTO_DRAFT_SWAP_AGE_GAP_DAYS, gap_now)
+                    assignments[mover], assignments[partner] = src, dest
+                    if ok and (best is None or gap < best[0]):
+                        best = (gap, mover, partner, src, dest)
+            if best:
+                _, mover, partner, src, dest = best
+                assignments[mover], assignments[partner] = dest, src
+                improved = True
+                break
+
+
 def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
     """The division's auto-draft run still available to undo — None once
     undone (undo_auto_draft deletes the row) or if auto_draft has never
@@ -3405,6 +3515,10 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     player_divisions.position) go one per team: a unit with a goalie only
     goes to a team with the fewest goalies so far, so every team gets one
     before any gets a second (a warning lists teams left without one).
+    Finally, same-grade one-for-one swaps reunite split soft requests
+    while the average-age gap between teams stays within a year (see
+    _swap_to_join_requests) -- sizes, skill and goalies don't change.
+
     Goalies are placed first; a team left without one then counts as
     _AUTO_DRAFT_NO_GOALIE_BONUS skill points weaker for the rest of the
     draft, so it gets slightly better skaters to make up for it.
@@ -3662,6 +3776,12 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         team_size[team_id] += len(unit["player_ids"])
         team_skill[team_id] += sum(skill_of(pid) for pid in unit["player_ids"])
         team_goalies[team_id] += unit_goalies
+
+    _swap_to_join_requests(
+        assignments, existing_team_by_player, pool_by_id, units, unit_of_player, goalie_ids,
+        {r[0] for r in conn.execute("SELECT player_id FROM coach_children").fetchall()},
+        tier_rank_of, request_pairs, avoid_pairs, conn,
+    )
 
     # Number each team's new players after whatever's already on its
     # roster, same "placeholder jersey number" convention as

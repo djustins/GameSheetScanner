@@ -98,3 +98,18 @@ def test_trade_refuses_to_put_a_do_not_play_with_pair_together(conn, division_id
         core.trade_players(conn, division_id, avs, [a], wild, [])
     core.trade_players(conn, division_id, avs, [a], wild, [], allow_split=True)
     assert _team_of(conn, division_id, a) == wild
+
+
+def test_trade_renumbers_a_player_whose_jersey_is_taken_on_the_new_team(conn, division_id):
+    avs = core.add_team(conn, division_id, "Avalanche")
+    wild = core.add_team(conn, division_id, "Wild")
+    a = core.add_player(conn, "Alpha", "Test", current_division_id=division_id)
+    b = core.add_player(conn, "Bravo", "Test", current_division_id=division_id)
+    core.add_roster_entry(conn, avs, "AUTO1", "Alpha Test", player_id=a)
+    core.add_roster_entry(conn, wild, "AUTO1", "Bravo Test", player_id=b)
+    core.add_roster_entry(conn, wild, "AUTO2", "Filler", player_id=None)
+
+    core.trade_players(conn, division_id, avs, [a], wild, [b])
+    numbers = {e["player_id"]: e["number"] for t in (avs, wild) for e in core.list_roster(conn, t)}
+    assert numbers[a] == "AUTO3"  # AUTO1 and AUTO2 were taken on Wild
+    assert numbers[b] == "AUTO1"  # Alpha's AUTO1 had already left Avalanche

@@ -2024,9 +2024,10 @@ def team_balance(conn: PGConnection, division_id: int, moves: dict[int, int] | N
 def trade_effects(conn: PGConnection, division_id: int, moves: dict[int, int]) -> list[dict]:
     """Play-with requests and sibling pairs (both rostered in this division)
     whose together/apart status the moves would change: [{name, other_name,
-    kind ("sibling" / "hard" / "soft"), joined (True: now together,
-    False: now split)}]. Siblings and hard requests being split are what
-    trade_players refuses unless told to split anyway."""
+    kind ("sibling" / "hard" / "soft" / "avoid" -- do not play with),
+    joined (True: now together, False: now split)}]. Siblings and hard
+    requests being split, and an avoid pair being joined, are what
+    trade_players refuses unless told to anyway (see trade_blockers)."""
     team_of = dict(conn.execute(
         """SELECT re.player_id, re.team_id FROM roster_entries re JOIN teams t ON t.id = re.team_id
            WHERE t.division_id = %s AND re.player_id IS NOT NULL""",
@@ -2035,12 +2036,12 @@ def trade_effects(conn: PGConnection, division_id: int, moves: dict[int, int]) -
     after = {**team_of, **moves}
     names = {p["id"]: p["name"] for p in list_players(conn) if p["id"] in team_of}
     pairs: dict[frozenset, str] = {}
-    for a, b, hard in conn.execute(
-        "SELECT player_id, requested_player_id, hard FROM player_requests WHERE player_id = ANY(%s)",
+    for a, b, hard, avoid in conn.execute(
+        "SELECT player_id, requested_player_id, hard, avoid FROM player_requests WHERE player_id = ANY(%s)",
         (list(team_of),),
     ).fetchall():
         if b in team_of:
-            pairs[frozenset((a, b))] = "hard" if hard else "soft"
+            pairs[frozenset((a, b))] = "avoid" if avoid else "hard" if hard else "soft"
     by_parent: dict[int, list[int]] = {}
     for player_id, parent_id in conn.execute(
         "SELECT id, parent_id FROM players WHERE id = ANY(%s) AND parent_id IS NOT NULL", (list(team_of),)
@@ -2059,6 +2060,16 @@ def trade_effects(conn: PGConnection, division_id: int, moves: dict[int, int]) -
     return sorted(effects, key=lambda e: (e["joined"], e["kind"] != "sibling", e["kind"] != "hard", e["name"]))
 
 
+def trade_blockers(effects: list[dict]) -> list[dict]:
+    """The trade_effects entries a trade shouldn't do without an explicit
+    "anyway": splitting siblings or a hard request, or putting a "do not
+    play with" pair on the same team."""
+    return [
+        e for e in effects
+        if (not e["joined"] and e["kind"] in ("sibling", "hard")) or (e["joined"] and e["kind"] == "avoid")
+    ]
+
+
 def trade_players(
     conn: PGConnection, division_id: int, team_a: int, from_a: list[int], team_b: int, from_b: list[int],
     note: str | None = None, allow_split: bool = False,
@@ -2069,7 +2080,8 @@ def trade_players(
     transfer. Each move is logged (see move_player_to_team) with a note
     naming the whole trade plus any reason given. Raises ValueError for
     anything off (a player not on the team named, a team outside the
-    division), or if it would split siblings or a hard request, unless
+    division), or if it would split siblings or a hard request or put a
+    "do not play with" pair together (see trade_blockers), unless
     allow_split."""
     if team_a == team_b:
         raise ValueError("Pick two different teams.")
@@ -2088,13 +2100,14 @@ def trade_players(
             if team_of.get(player_id) != team_id:
                 raise ValueError(f"{get_player(conn, player_id)['name']} isn't on {team_names[team_id]}.")
     moves = {**{p: team_b for p in from_a}, **{p: team_a for p in from_b}}
-    splits = [
-        e for e in trade_effects(conn, division_id, moves) if not e["joined"] and e["kind"] in ("sibling", "hard")
-    ]
-    if splits and not allow_split:
+    blockers = trade_blockers(trade_effects(conn, division_id, moves))
+    if blockers and not allow_split:
         raise ValueError(
-            "This trade splits " + "; ".join(f"{e['name']} and {e['other_name']} ({e['kind']})" for e in splits)
-            + " — include them in the trade, or split them anyway."
+            "This trade " + "; ".join(
+                f"puts {e['name']} and {e['other_name']} together (do not play with)" if e["kind"] == "avoid"
+                else f"splits {e['name']} and {e['other_name']} ({e['kind']})"
+                for e in blockers
+            ) + " — change the trade, or do it anyway."
         )
     names = {p["id"]: p["name"] for p in list_players(conn) if p["id"] in moves}
     summary = (
@@ -2304,7 +2317,7 @@ def harden_sibling_requests(conn: PGConnection) -> int:
         """UPDATE player_requests pr SET hard = TRUE
            FROM players p1, players p2
            WHERE p1.id = pr.player_id AND p2.id = pr.requested_player_id
-             AND p1.parent_id = p2.parent_id AND NOT pr.hard"""
+             AND p1.parent_id = p2.parent_id AND NOT pr.hard AND NOT pr.avoid"""
     )
     conn.commit()
     return cur.rowcount
@@ -2364,7 +2377,8 @@ def link_players_as_siblings(conn: PGConnection, player_id_a: int, player_id_b: 
 
 
 def add_player_request(
-    conn: PGConnection, player_id: int, requested_player_id: int, note: str | None = None, hard: bool = False
+    conn: PGConnection, player_id: int, requested_player_id: int, note: str | None = None, hard: bool = False,
+    avoid: bool = False,
 ) -> int:
     """Record player_id's request to play with requested_player_id next
     draft/season -- see the player_requests table comment for how this
@@ -2374,27 +2388,35 @@ def add_player_request(
     same note and hard/soft) unless that one's already on file, so the
     pair shows as each player's own request. Raises ValueError if they're
     the same player, either doesn't exist, or this exact request already
-    exists. Returns the forward request's id."""
+    exists. Returns the forward request's id.
+
+    avoid=True records the opposite -- "do not play with": keep the two on
+    different teams (hard/soft doesn't apply). A pair has one or the other,
+    never both."""
     if player_id == requested_player_id:
         raise ValueError("A player can't send a play-with request to themselves.")
     if get_player(conn, player_id) is None or get_player(conn, requested_player_id) is None:
         raise ValueError("Player not found.")
     existing = conn.execute(
-        "SELECT id FROM player_requests WHERE player_id = %s AND requested_player_id = %s",
-        (player_id, requested_player_id),
+        "SELECT avoid FROM player_requests WHERE (player_id, requested_player_id) IN ((%s, %s), (%s, %s))",
+        (player_id, requested_player_id, requested_player_id, player_id),
     ).fetchone()
     if existing:
-        raise ValueError("That request already exists.")
+        raise ValueError(
+            "That request already exists." if existing[0] == avoid else
+            "These two already have the opposite request on file — remove it first."
+        )
+    hard = hard and not avoid
     cur = conn.execute(
-        "INSERT INTO player_requests (player_id, requested_player_id, note, hard) "
-        "VALUES (%s, %s, %s, %s) RETURNING id",
-        (player_id, requested_player_id, note, hard),
+        "INSERT INTO player_requests (player_id, requested_player_id, note, hard, avoid) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (player_id, requested_player_id, note, hard, avoid),
     )
     request_id = cur.fetchone()[0]
     conn.execute(
-        "INSERT INTO player_requests (player_id, requested_player_id, note, hard) "
-        "VALUES (%s, %s, %s, %s) ON CONFLICT (player_id, requested_player_id) DO NOTHING",
-        (requested_player_id, player_id, note, hard),
+        "INSERT INTO player_requests (player_id, requested_player_id, note, hard, avoid) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (player_id, requested_player_id) DO NOTHING",
+        (requested_player_id, player_id, note, hard, avoid),
     )
     conn.commit()
     harden_sibling_requests(conn)
@@ -2412,7 +2434,8 @@ def set_player_request_hard(conn: PGConnection, request_id: int, hard: bool):
     (auto_draft honors it only while teams stay balanced) and hard (always
     placed together, like siblings). One between siblings stays hard."""
     conn.execute(
-        f"UPDATE player_requests SET hard = %s WHERE {_REQUEST_PAIR_WHERE}", (hard, request_id, request_id)
+        f"UPDATE player_requests SET hard = %s WHERE NOT avoid AND {_REQUEST_PAIR_WHERE}",
+        (hard, request_id, request_id),
     )
     conn.commit()
     harden_sibling_requests(conn)
@@ -2430,12 +2453,13 @@ def list_player_requests(conn: PGConnection, player_id: int) -> list[dict]:
     profile alike (unlike a plain one-directional log) -- but as a direct
     pairwise edge (player_requests), not a shared-group relationship the
     way Siblings is. Each entry: {id, player_id (the *other* player),
-    name, note, hard, sibling (always hard -- see harden_sibling_requests),
+    name, note, hard, avoid ("do not play with"), sibling (a play-with
+    request between siblings is always hard -- see harden_sibling_requests),
     direction: "made" if this player sent the request, "received" if the
     other player did}. A pair recorded both ways (see add_player_request)
     is listed once, as "made"."""
     rows = conn.execute(
-        """SELECT pr.id, pr.note, pr.hard, COALESCE(p1.parent_id = p2.parent_id, FALSE),
+        """SELECT pr.id, pr.note, pr.hard, pr.avoid, COALESCE(p1.parent_id = p2.parent_id, FALSE),
                   pr.player_id, pr.requested_player_id,
                   p1.first_name, p1.last_name, p2.first_name, p2.last_name
            FROM player_requests pr
@@ -2446,14 +2470,14 @@ def list_player_requests(conn: PGConnection, player_id: int) -> list[dict]:
         (player_id, player_id),
     ).fetchall()
     results = []
-    for req_id, note, hard, sibling, made_by, made_to, f1, l1, f2, l2 in rows:
+    for req_id, note, hard, avoid, sibling, made_by, made_to, f1, l1, f2, l2 in rows:
         if made_by == player_id:
             other_id, other_name, direction = made_to, full_name(f2, l2), "made"
         else:
             other_id, other_name, direction = made_by, full_name(f1, l1), "received"
         results.append({
             "id": req_id, "player_id": other_id, "name": other_name, "note": note, "hard": hard,
-            "sibling": sibling, "direction": direction,
+            "avoid": avoid, "sibling": sibling, "direction": direction,
         })
     made_to_ids = {r["player_id"] for r in results if r["direction"] == "made"}
     return [r for r in results if r["direction"] == "made" or r["player_id"] not in made_to_ids]
@@ -3284,7 +3308,7 @@ def auto_draft_table(conn: PGConnection, division_id: int) -> list[dict]:
     parent -- see coach_children -- whether or not coaching here), number,
     player_id, name, grade (as displayed), draft_grade (the
     tier auto_draft ranked them by: "A".."C" or "D/New"), birth_date,
-    position (registered), goalie, requests: [{name, hard, together}]}.
+    position (registered), goalie, requests: [{name, hard, avoid, together}]}.
     Sorted by team, then draft grade, then oldest first. [] if no run."""
     run = get_auto_draft_run(conn, division_id)
     if run is None or not run["roster_entry_ids"]:
@@ -3305,7 +3329,9 @@ def auto_draft_table(conn: PGConnection, division_id: int) -> list[dict]:
             continue
         together = r["team"] is not None and r["team"] == r["other_team"]
         for me, other in ((r["player_id"], r["other_name"]), (r["other_player_id"], r["name"])):
-            requests_by_player.setdefault(me, []).append({"name": other, "hard": r["hard"], "together": together})
+            requests_by_player.setdefault(me, []).append(
+                {"name": other, "hard": r["hard"], "avoid": r["avoid"], "together": together}
+            )
     coach_of_team = {
         team_id: ", ".join(full_name(c["first_name"], c["last_name"]) for c in coaches) or None
         for team_id, coaches in list_team_coaches_for_division(conn, division_id).items()
@@ -3391,6 +3417,9 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     be honored without leaving a team more than one player ahead of the
     least-loaded one, or landing on a team already more than
     _AUTO_DRAFT_REQUEST_SKILL_SLACK skill points ahead of the weakest:
+      - A "do not play with" request keeps two players on different teams
+        (see player_requests.avoid), unless a hard placement above forces
+        them together -- then it's a warning.
       - A soft (the default) play-with request (see player_requests /
         list_player_requests) —
         unlike a sibling, a deliberate but non-family "friend" ask — lands
@@ -3476,7 +3505,7 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             union(sibling_ids[0], pid)
     for pid_a, pid_b in conn.execute(
         "SELECT player_id, requested_player_id FROM player_requests "
-        "WHERE hard AND (player_id = ANY(%s) OR requested_player_id = ANY(%s))",
+        "WHERE hard AND NOT avoid AND (player_id = ANY(%s) OR requested_player_id = ANY(%s))",
         (pool_ids, pool_ids),
     ).fetchall():
         union(pid_a, pid_b)
@@ -3510,7 +3539,7 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     request_pairs = sorted({
         (min(r[0], r[1]), max(r[0], r[1])) for r in conn.execute(
             "SELECT player_id, requested_player_id FROM player_requests "
-            "WHERE player_id = ANY(%s) AND requested_player_id = ANY(%s)",
+            "WHERE NOT avoid AND player_id = ANY(%s) AND requested_player_id = ANY(%s)",
             (pool_ids, pool_ids),
         ).fetchall()
         if unit_of_player[r[0]] != unit_of_player[r[1]]  # already together (e.g. also siblings)
@@ -3519,6 +3548,23 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     for pid_a, pid_b in request_pairs:
         requested_units.setdefault(unit_of_player[pid_a], set()).add(unit_of_player[pid_b])
         requested_units.setdefault(unit_of_player[pid_b], set()).add(unit_of_player[pid_a])
+
+    # "Do not play with" (avoid) requests: a unit never goes to a team that
+    # already has someone it avoids -- a pool player placed earlier in this
+    # pass, or one already on a roster here -- unless every otherwise-
+    # eligible team does (then it's placed anyway and warned about below).
+    avoid_pairs = sorted({
+        (min(a, b), max(a, b)) for a, b in conn.execute(
+            "SELECT player_id, requested_player_id FROM player_requests WHERE avoid AND player_id = ANY(%s)",
+            (pool_ids,),
+        ).fetchall()
+        if b in pool_by_id or b in existing_team_by_player
+    })
+    avoided_by_unit: dict[int, set[int]] = {}
+    for pid_a, pid_b in avoid_pairs:
+        for me, other in ((pid_a, pid_b), (pid_b, pid_a)):
+            if me in unit_of_player:
+                avoided_by_unit.setdefault(unit_of_player[me], set()).add(other)
 
     # Coach's-kid: pin a unit to a team the coach already coaches.
     coach_team_by_id: dict[int, int] = {}
@@ -3585,6 +3631,10 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         if unit_goalies:
             fewest_goalies = min(team_goalies.values())
             eligible = [t for t in team_size if team_goalies[t] == fewest_goalies]
+        avoided_teams = {
+            assignments.get(pid) or existing_team_by_player.get(pid) for pid in avoided_by_unit.get(unit["idx"], ())
+        }
+        eligible = [t for t in eligible if t not in avoided_teams] or eligible
         requested_team_id = None
         if unit["pinned_team_id"] is None:
             # Only redirect to a team that's currently among the least-loaded
@@ -3634,6 +3684,14 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             warnings.append(
                 f"Could not honor play-with request between {pool_by_id[pid_a]['name']} and "
                 f"{pool_by_id[pid_b]['name']} — it would have unbalanced the teams."
+            )
+    for pid_a, pid_b in avoid_pairs:
+        team_a = assignments.get(pid_a) or existing_team_by_player.get(pid_a)
+        if team_a is not None and team_a == (assignments.get(pid_b) or existing_team_by_player.get(pid_b)):
+            names = {p["id"]: p["name"] for p in list_players(conn) if p["id"] in (pid_a, pid_b)}
+            warnings.append(
+                f"{names[pid_a]} and {names[pid_b]} (do not play with) ended up on the same team — siblings, "
+                "a hard request or a coach's kid placement forced it."
             )
     team_name = {t["id"]: t["name"] for t in teams}
     # Only when there are goalies to go around -- a division with none
@@ -4252,12 +4310,12 @@ def list_division_requests(conn: PGConnection, division_id: int) -> list[dict]:
     division, one row per pair (a mutual request's two directions -- see
     add_player_request -- are listed once). Each row: {id, player_id,
     name, team, other_player_id, other_name, other_team, other_in_division,
-    hard, note}, where "player" is always the one in this division (the
+    hard, avoid ("do not play with"), note}, where "player" is always the one in this division (the
     alphabetically first when both are) and team is their team here, or
     None if not yet rostered. Sorted by name. Deleted players are left
     out."""
     rows = conn.execute(
-        """SELECT pr.id, pr.hard, pr.note,
+        """SELECT pr.id, pr.hard, pr.avoid, pr.note,
                   p1.id, p1.first_name, p1.last_name, pd1.player_id IS NOT NULL,
                   p2.id, p2.first_name, p2.last_name, pd2.player_id IS NOT NULL
            FROM player_requests pr
@@ -4279,7 +4337,7 @@ def list_division_requests(conn: PGConnection, division_id: int) -> list[dict]:
     }
 
     pairs: dict[frozenset, dict] = {}
-    for req_id, hard, note, id1, f1, l1, in_div1, id2, f2, l2, in_div2 in rows:
+    for req_id, hard, avoid, note, id1, f1, l1, in_div1, id2, f2, l2, in_div2 in rows:
         key = frozenset((id1, id2))
         if key in pairs:
             continue
@@ -4290,7 +4348,7 @@ def list_division_requests(conn: PGConnection, division_id: int) -> list[dict]:
         pairs[key] = {
             "id": req_id, "player_id": a[0], "name": a[1], "team": team_of.get(a[0]),
             "other_player_id": b[0], "other_name": b[1], "other_team": team_of.get(b[0]),
-            "other_in_division": b[2], "hard": hard, "note": note,
+            "other_in_division": b[2], "hard": hard, "avoid": avoid, "note": note,
         }
     return sorted(pairs.values(), key=lambda r: (r["name"].lower(), r["other_name"].lower()))
 
@@ -4642,7 +4700,9 @@ def player_stats_table(conn: PGConnection, division_id: int) -> list[dict]:
 
 def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
     """Every rostered player in the division, per team: team, coach(es),
-    jersey number, name, birthday, grade and play-with requests. The grade
+    jersey number, name, birthday, grade, position (their position on
+    this team if set, else the one they registered with), whether they're
+    a goalie, and play-with requests. The grade
     is the player's latest available (this division's, else their most
     recent), marked "*" when from a different age group (grade_display). Requests list both directions: "->
     Name" for one this player made, "<- Name" for one made to them."""
@@ -4662,8 +4722,8 @@ def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
 
     requests_by_player: dict[int, list[str]] = {}
     if player_ids:
-        for made_by, made_to, f1, l1, f2, l2 in conn.execute(
-            """SELECT pr.player_id, pr.requested_player_id,
+        for made_by, made_to, avoid, f1, l1, f2, l2 in conn.execute(
+            """SELECT pr.player_id, pr.requested_player_id, pr.avoid,
                       p1.first_name, p1.last_name, p2.first_name, p2.last_name
                FROM player_requests pr
                JOIN players p1 ON p1.id = pr.player_id
@@ -4672,17 +4732,30 @@ def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
                ORDER BY pr.created_at""",
             (player_ids, player_ids),
         ).fetchall():
-            requests_by_player.setdefault(made_by, []).append(f"-> {full_name(f2, l2)}")
-            requests_by_player.setdefault(made_to, []).append(f"<- {full_name(f1, l1)}")
+            tag = " (do not play with)" if avoid else ""
+            requests_by_player.setdefault(made_by, []).append(f"-> {full_name(f2, l2)}{tag}")
+            requests_by_player.setdefault(made_to, []).append(f"<- {full_name(f1, l1)}{tag}")
         # A pair recorded both ways (see add_player_request) shows once, as "->".
         for player_id, entries in requests_by_player.items():
             made = {e[3:] for e in entries if e.startswith("-> ")}
             requests_by_player[player_id] = [e for e in entries if e.startswith("-> ") or e[3:] not in made]
 
+    team_positions = {
+        (r[0], r[1]): r[2] for r in conn.execute(
+            "SELECT player_id, team_id, position FROM player_positions WHERE division_id = %s", (division_id,)
+        ).fetchall() if r[2]
+    }
+    registered_positions = {
+        r[0]: r[1] for r in conn.execute(
+            "SELECT player_id, position FROM player_divisions WHERE division_id = %s", (division_id,)
+        ).fetchall() if r[1]
+    }
+
     table = []
     for team_id, team, number, name, player_id, birth_date in rows:
         grade_info = grades.get(player_id) if player_id is not None else None
         grade = grade_display(grade_info)
+        position = team_positions.get((player_id, team_id)) or registered_positions.get(player_id)
         table.append({
             "Team": display_text(team),
             "Coach": ", ".join(
@@ -4693,6 +4766,8 @@ def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
             "Name": display_text(name),
             "Birthday": birth_date,
             "Grade": grade,
+            "Position": position,
+            "Goalie": "Yes" if is_goalie(position) else None,
             "Play-with Requests": "; ".join(requests_by_player.get(player_id, [])) or None,
         })
     return table

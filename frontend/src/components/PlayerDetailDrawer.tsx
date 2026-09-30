@@ -54,7 +54,7 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
   const [siblingPickId, setSiblingPickId] = useState<string | null>(null)
   const [requestPickId, setRequestPickId] = useState<string | null>(null)
   const [requestNote, setRequestNote] = useState('')
-  const [requestStrength, setRequestStrength] = useState<'soft' | 'hard'>('soft')
+  const [requestStrength, setRequestStrength] = useState<'soft' | 'hard' | 'avoid'>('soft')
   const [evalDivisionId, setEvalDivisionId] = useState<string | null>(null)
   const [evalGrade, setEvalGrade] = useState('')
 
@@ -144,7 +144,13 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
 
   const addRequestMutation = useMutation({
     mutationFn: () =>
-      addPlayerRequest(player!.id, Number(requestPickId), requestNote.trim(), pickIsSibling || requestStrength === 'hard'),
+      addPlayerRequest(
+        player!.id,
+        Number(requestPickId),
+        requestNote.trim(),
+        pickIsSibling || requestStrength === 'hard',
+        !pickIsSibling && requestStrength === 'avoid',
+      ),
     onSuccess: () => {
       invalidateRequests()
       setRequestPickId(null)
@@ -456,7 +462,8 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
             </Title>
             <Text size="xs" c="dimmed" mb="xs">
               An ask to play with a specific player. Soft (the default): Auto Draft honors it when it can without
-              unbalancing teams. Hard: always placed together. A request between siblings is always hard.
+              unbalancing teams. Hard: always placed together. A request between siblings is always hard. Do not
+              play with: kept on different teams.
             </Text>
             {!requests || requests.length === 0 ? (
               <Text size="sm" c="dimmed" mb="xs">
@@ -467,17 +474,25 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
                 {requests.map((r) => (
                   <Group key={r.id} justify="space-between">
                     <Text size="sm">
-                      {r.direction === 'made' ? `Requested ${r.name}` : `Requested by ${r.name}`}
+                      {r.avoid
+                        ? `🚫 Do not play with ${r.name}`
+                        : r.direction === 'made'
+                          ? `Requested ${r.name}`
+                          : `Requested by ${r.name}`}
                       {r.note ? ` — ${r.note}` : ''}
                     </Text>
-                    <Switch
-                      size="xs"
-                      label="Hard"
-                      checked={r.hard}
-                      disabled={r.sibling}
-                      title={r.sibling ? 'Siblings: always hard' : undefined}
-                      onChange={(e) => setRequestHardMutation.mutate({ requestId: r.id, hard: e.currentTarget.checked })}
-                    />
+                    {!r.avoid && (
+                      <Switch
+                        size="xs"
+                        label="Hard"
+                        checked={r.hard}
+                        disabled={r.sibling}
+                        title={r.sibling ? 'Siblings: always hard' : undefined}
+                        onChange={(e) =>
+                          setRequestHardMutation.mutate({ requestId: r.id, hard: e.currentTarget.checked })
+                        }
+                      />
+                    )}
                     <Button
                       size="compact-xs"
                       variant="subtle"
@@ -492,7 +507,7 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
             )}
             <Group>
               <Select
-                placeholder="Request to play with…"
+                placeholder="Player…"
                 data={(allPlayers ?? [])
                   .filter((p) => p.id !== player.id)
                   .map((p) => ({ value: String(p.id), label: p.name }))}
@@ -511,10 +526,11 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
                 size="xs"
                 value={pickIsSibling ? 'hard' : requestStrength}
                 disabled={pickIsSibling}
-                onChange={(v) => setRequestStrength(v as 'soft' | 'hard')}
+                onChange={(v) => setRequestStrength(v as 'soft' | 'hard' | 'avoid')}
                 data={[
                   { value: 'soft', label: 'Soft' },
                   { value: 'hard', label: 'Hard' },
+                  { value: 'avoid', label: 'Do not play with' },
                 ]}
               />
               <Button

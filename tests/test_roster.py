@@ -244,7 +244,23 @@ def test_roster_table_includes_coach_birthday_grade_and_requests(conn, division_
     rows = {r["Number"]: r for r in core.roster_table(conn, division_id)}
     assert rows["87"] == {
         "Team": "Avalanche", "Coach": 'Jared Bednar "Bed"', "Number": "87", "Name": "Sidney Crosby",
-        "Birthday": "2019-08-07", "Grade": "A", "Play-with Requests": "-> Wayne Gretzky",
+        "Birthday": "2019-08-07", "Grade": "A", "Position": None, "Goalie": None,
+        "Play-with Requests": "-> Wayne Gretzky",
     }
     assert rows["99"]["Grade"] == "B"  # same age group (Penguin): no asterisk
     assert rows["99"]["Play-with Requests"] == "-> Sidney Crosby"  # mutual
+
+
+def test_roster_table_shows_position_and_flags_goalies(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    goalie = core.add_player(conn, "Marc", "Fleury", current_division_id=division_id)
+    skater = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.set_registration_position(conn, goalie, division_id, "Goalie")
+    core.set_registration_position(conn, skater, division_id, "Forward or Defense")
+    core.add_roster_entry(conn, team_id, "29", "Marc Fleury", player_id=goalie)
+    core.add_roster_entry(conn, team_id, "87", "Sidney Crosby", player_id=skater)
+    core.set_position(conn, skater, division_id, team_id, "Center")  # team position wins
+
+    rows = {r["Number"]: r for r in core.roster_table(conn, division_id)}
+    assert (rows["29"]["Position"], rows["29"]["Goalie"]) == ("Goalie", "Yes")
+    assert (rows["87"]["Position"], rows["87"]["Goalie"]) == ("Center", None)

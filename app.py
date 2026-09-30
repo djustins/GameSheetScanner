@@ -1310,6 +1310,8 @@ def render_trade_panel(conn, division_id: int, teams: list[dict]):
         return
     with st.expander("🔁 Trade players between teams"):
         team_names = {t["id"]: t["name"] for t in teams}
+        coaches_by_team = core.list_team_coaches_for_division(conn, division_id)
+        team_labels = {t["id"]: team_label_with_coaches(t, coaches_by_team) for t in teams}
         rosters = {t["id"]: [e for e in core.list_roster(conn, t["id"]) if e["player_id"]] for t in teams}
         grades = core.get_latest_grades_with_source(
             conn, division_id, [e["player_id"] for r in rosters.values() for e in r]
@@ -1323,10 +1325,10 @@ def render_trade_panel(conn, division_id: int, teams: list[dict]):
         tcol1, tcol2 = st.columns(2)
         team_ids = list(team_names)
         team_a = tcol1.selectbox(
-            "Team", team_ids, format_func=lambda i: team_names[i], key=f"trade_team_a_{division_id}"
+            "Team", team_ids, format_func=lambda i: team_labels[i], key=f"trade_team_a_{division_id}"
         )
         team_b = tcol2.selectbox(
-            "Trades with", [t for t in team_ids if t != team_a], format_func=lambda i: team_names[i],
+            "Trades with", [t for t in team_ids if t != team_a], format_func=lambda i: team_labels[i],
             key=f"trade_team_b_{division_id}_{team_a}",
         )
         options_a = {e["player_id"]: player_label(e) for e in rosters[team_a]}
@@ -1348,7 +1350,7 @@ def render_trade_panel(conn, division_id: int, teams: list[dict]):
         st.dataframe(
             zebra_style(pd.DataFrame([
                 {
-                    "Team": team_names[t], "": label,
+                    "Team": team_labels[t], "": label,
                     "Players": b[t]["players"], "Skill": b[t]["skill"], "Avg skill": b[t]["avg_skill"],
                     "Goalies": b[t]["goalies"], "Avg age": core.format_age(b[t]["avg_age"]),
                 }
@@ -1361,12 +1363,15 @@ def render_trade_panel(conn, division_id: int, teams: list[dict]):
             st.caption(f"Other teams' average skill: {min(others_skill)}–{max(others_skill)}.")
 
         effects = core.trade_effects(conn, division_id, moves)
-        blocking = [e for e in effects if not e["joined"] and e["kind"] in ("sibling", "hard")]
+        blocking = core.trade_blockers(effects)
         if effects:
             st.markdown("**Requests & siblings this trade changes**")
             for e in effects:
-                icon = "✅ joins" if e["joined"] else ("⛔ splits" if e in blocking else "❌ splits")
-                st.write(f"- {icon} {e['name']} & {e['other_name']} ({e['kind']})")
+                if e["kind"] == "avoid":
+                    icon, kind = ("⛔ puts together" if e["joined"] else "✅ separates"), "do not play with"
+                else:
+                    icon, kind = ("✅ joins" if e["joined"] else "⛔ splits" if e in blocking else "❌ splits"), e["kind"]
+                st.write(f"- {icon} {e['name']} & {e['other_name']} ({kind})")
         else:
             st.caption("No play-with requests or siblings are joined or split by this trade.")
 
@@ -1376,8 +1381,8 @@ def render_trade_panel(conn, division_id: int, teams: list[dict]):
         split_anyway = False
         if blocking:
             split_anyway = st.checkbox(
-                "Split them anyway", key=f"trade_split_anyway_{division_id}",
-                help="Siblings and hard requests are normally kept together.",
+                "Do it anyway", key=f"trade_split_anyway_{division_id}",
+                help="Siblings and hard requests are normally kept together, and a do-not-play-with pair apart.",
             )
         if st.button(
             "Confirm trade", key=f"trade_confirm_{division_id}", type="primary",
@@ -1437,7 +1442,11 @@ def render_auto_draft_results(conn, division_id: int):
                 "Drafted as": r["draft_grade"], "Birth date": r["birth_date"] or "—",
                 "Position": ("🥅 " if r["goalie"] else "") + (r["position"] or "—"),
                 "Requests": "; ".join(
-                    ("✅ " if q["together"] else "❌ ") + q["name"] + (" (hard)" if q["hard"] else "")
+                    (
+                        ("✅ 🚫 " if not q["together"] else "❌ 🚫 ") + q["name"] + " (do not play with)"
+                        if q["avoid"] else
+                        ("✅ " if q["together"] else "❌ ") + q["name"] + (" (hard)" if q["hard"] else "")
+                    )
                     for q in r["requests"]
                 ),
             }
@@ -1953,7 +1962,7 @@ def render_player_panel(
         st.caption(
             "An ask to play with a specific player. **Soft** (the default): Auto Draft honors it when it "
             "can without unbalancing teams. **Hard**: always placed together. A request between siblings "
-            "is always hard."
+            "is always hard. **Do not play with**: kept on different teams."
         )
         sibling_ids = {s["id"] for s in core.list_siblings(conn, player_id)}
         requests = core.list_player_requests(conn, player_id)
@@ -1961,9 +1970,14 @@ def render_player_panel(
             st.caption("No play-with requests on file.")
         for req in requests:
             rcol1, rcol2, rcol3 = st.columns([4, 1, 1])
-            label = f"Requested **{req['name']}**" if req["direction"] == "made" else f"Requested by **{req['name']}**"
+            if req["avoid"]:
+                label = f"🚫 Do not play with **{req['name']}**"
+            elif req["direction"] == "made":
+                label = f"Requested **{req['name']}**"
+            else:
+                label = f"Requested by **{req['name']}**"
             rcol1.write(label + (f" — {req['note']}" if req["note"] else ""))
-            hard = rcol2.toggle(
+            hard = req["hard"] if req["avoid"] else rcol2.toggle(
                 "Hard", value=req["hard"], key=f"{key_prefix}_hard_request_{req['id']}",
                 disabled=is_read_only or req["sibling"],
                 help="Siblings: always hard." if req["sibling"] else
@@ -1983,7 +1997,7 @@ def render_player_panel(
             qcol1, qcol2, qcol3, qcol4 = st.columns([3, 2, 1, 1])
             with qcol1:
                 pick_request_id = st.selectbox(
-                    "Request to play with", options=list(request_options),
+                    "Player", options=list(request_options),
                     format_func=lambda i: request_options[i], index=None,
                     key=f"{key_prefix}_request_pick_{player_id}", disabled=is_read_only,
                 )
@@ -1999,8 +2013,8 @@ def render_player_panel(
                     )
                 else:
                     request_strength = st.radio(
-                        "Type", ["Soft", "Hard"], key=f"{key_prefix}_request_strength_{player_id}",
-                        disabled=is_read_only,
+                        "Type", ["Soft", "Hard", "Do not play with"],
+                        key=f"{key_prefix}_request_strength_{player_id}", disabled=is_read_only,
                     )
             with qcol4:
                 st.write("")
@@ -2011,7 +2025,7 @@ def render_player_panel(
                     try:
                         core.add_player_request(
                             conn, player_id, pick_request_id, request_note.strip() or None,
-                            hard=request_strength == "Hard",
+                            hard=request_strength == "Hard", avoid=request_strength == "Do not play with",
                         )
                     except ValueError as e:
                         st.error(str(e))
@@ -4596,26 +4610,36 @@ with tab_teams_group:
             st.caption(
                 "Play-with requests between players registered in the Working Division, one row per pair. "
                 "**Soft**: Auto-Draft keeps them together when teams stay balanced. **Hard**: always "
-                "together (siblings are always hard). To change or remove one, open either player's page. "
+                "together (siblings are always hard). **Do not play with**: kept on different teams. To "
+                "change or remove one, open either player's page. "
                 "Change the Working Division in the sidebar to see another division's."
             )
             all_division_requests = core.list_division_requests(conn, working_division_id)
             division_requests = [r for r in all_division_requests if r["other_in_division"]]
             cross_division_requests = [r for r in all_division_requests if not r["other_in_division"]]
 
+            def request_type(r: dict) -> str:
+                return "Do not play with" if r["avoid"] else "Hard" if r["hard"] else "Soft"
+
             def request_status(r: dict) -> str:
                 if not r["team"] or not r["other_team"]:
                     return "Not drafted"
-                return "✅ Together" if r["team"] == r["other_team"] else "❌ Split"
+                together = r["team"] == r["other_team"]
+                if r["avoid"]:
+                    return "❌ Together" if together else "✅ Apart"
+                return "✅ Together" if together else "❌ Split"
 
+            request_statuses = ("✅ Together", "✅ Apart", "❌ Split", "❌ Together", "Not drafted")
             rcol1, rcol2 = st.columns(2)
-            request_type_filter = rcol1.selectbox("Type", ["All", "Hard", "Soft"], key="requests_type_filter")
+            request_type_filter = rcol1.selectbox(
+                "Type", ["All", "Hard", "Soft", "Do not play with"], key="requests_type_filter"
+            )
             request_status_filter = rcol2.selectbox(
-                "Status", ["All", "✅ Together", "❌ Split", "Not drafted"], key="requests_status_filter",
+                "Status", ["All", *request_statuses], key="requests_status_filter",
             )
             shown_requests = [
                 r for r in division_requests
-                if (request_type_filter == "All" or r["hard"] == (request_type_filter == "Hard"))
+                if (request_type_filter == "All" or request_type(r) == request_type_filter)
                 and (request_status_filter == "All" or request_status(r) == request_status_filter)
             ]
             if not shown_requests:
@@ -4624,16 +4648,15 @@ with tab_teams_group:
                 statuses = [request_status(r) for r in shown_requests]
                 st.caption(
                     f"{len(shown_requests)} pair(s) · {sum(r['hard'] for r in shown_requests)} hard · "
-                    + ", ".join(
-                        f"{s}: {statuses.count(s)}" for s in ("✅ Together", "❌ Split", "Not drafted") if s in statuses
-                    )
+                    f"{sum(r['avoid'] for r in shown_requests)} do not play with · "
+                    + ", ".join(f"{s}: {statuses.count(s)}" for s in request_statuses if s in statuses)
                 )
                 st.dataframe(
                     zebra_style(pd.DataFrame([
                         {
                             "Player": r["name"], "Team": r["team"] or "—",
-                            "Plays with": r["other_name"], "Their team": r["other_team"] or "—",
-                            "Type": "Hard" if r["hard"] else "Soft", "Status": request_status(r),
+                            "Other player": r["other_name"], "Their team": r["other_team"] or "—",
+                            "Type": request_type(r), "Status": request_status(r),
                             "Note": r["note"] or "",
                         }
                         for r in shown_requests
@@ -4649,8 +4672,8 @@ with tab_teams_group:
                     st.dataframe(
                         zebra_style(pd.DataFrame([
                             {
-                                "Player": r["name"], "Plays with": r["other_name"],
-                                "Type": "Hard" if r["hard"] else "Soft", "Note": r["note"] or "",
+                                "Player": r["name"], "Other player": r["other_name"],
+                                "Type": request_type(r), "Note": r["note"] or "",
                             }
                             for r in cross_division_requests
                         ])),
@@ -4742,6 +4765,10 @@ with tab_teams_group:
                     }
 
                     birth_date_by_player = {p["id"]: p["birth_date"] for p in core.list_players(conn)}
+                    # Goalies per team, by roster position or registered position.
+                    goalies_by_team = {
+                        tid: b["goalies"] for tid, b in core.team_balance(conn, teams_division_id).items()
+                    }
 
                     col_widths = [1.6, 0.8, 2.1, 1.6, 1.1, 2.2, 1.4, 1.8, 1.2]
                     head1, head2, head3, head4, head5, head6, head9, head7, head8 = st.columns(col_widths)
@@ -4814,12 +4841,18 @@ with tab_teams_group:
                             if tiered_grades:
                                 avg = sum(GRADE_VALUES[g] for g in tiered_grades) / len(tiered_grades)
                                 c5.write(f"**{avg:.1f}**/{max(GRADE_VALUES.values())}")
-                                c6.write(", ".join(
+                                breakdown = ", ".join(
                                     f"{tier}: {tiered_grades.count(tier)}" for tier in GRADE_TIERS if tier in tiered_grades
-                                ))
+                                )
                             else:
                                 c5.write("—")
-                                c6.write("—")
+                                breakdown = "—"
+                            team_goalies = goalies_by_team.get(t["id"], 0)
+                            c6.write(
+                                breakdown + "  \n"
+                                + (f"🥅 {team_goalies} goalie" + ("s" if team_goalies > 1 else "")
+                                   if team_goalies else "⚠️ **No goalie**")
+                            )
 
 
 # ---------------------------------------------------------------------------

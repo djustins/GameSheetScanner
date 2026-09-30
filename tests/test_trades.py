@@ -82,3 +82,19 @@ def test_trade_rejects_a_player_not_on_the_named_team(conn, division_id):
     a = _rostered(conn, division_id, avs, "Alpha")
     with pytest.raises(ValueError, match="isn't on Wild"):
         core.trade_players(conn, division_id, avs, [], wild, [a])
+
+
+def test_trade_refuses_to_put_a_do_not_play_with_pair_together(conn, division_id):
+    avs = core.add_team(conn, division_id, "Avalanche")
+    wild = core.add_team(conn, division_id, "Wild")
+    a = _rostered(conn, division_id, avs, "Alpha")
+    b = _rostered(conn, division_id, wild, "Bravo")
+    core.add_player_request(conn, a, b, avoid=True)
+
+    effects = core.trade_effects(conn, division_id, {a: wild})
+    assert [(e["kind"], e["joined"]) for e in effects] == [("avoid", True)]
+    assert core.trade_blockers(effects) == effects
+    with pytest.raises(ValueError, match="do not play with"):
+        core.trade_players(conn, division_id, avs, [a], wild, [])
+    core.trade_players(conn, division_id, avs, [a], wild, [], allow_split=True)
+    assert _team_of(conn, division_id, a) == wild

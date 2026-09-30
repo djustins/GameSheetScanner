@@ -333,6 +333,8 @@ export interface PlayerRequest {
   name: string
   note: string | null
   hard: boolean
+  // "Do not play with": keep the two on different teams.
+  avoid: boolean
   sibling: boolean
   direction: 'made' | 'received'
 }

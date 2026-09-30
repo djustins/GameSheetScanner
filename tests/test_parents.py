@@ -131,7 +131,7 @@ def test_player_requests_show_on_both_profiles_and_can_be_removed(conn):
     made = core.list_player_requests(conn, p1)
     assert made == [{
         "id": request_id, "player_id": p2, "name": "Wayne Gretzky", "note": "best friends", "hard": False,
-        "sibling": False, "direction": "made",
+        "avoid": False, "sibling": False, "direction": "made",
     }]
     # Mutual: player 2 gets the same request back to player 1, listed once.
     assert [(r["player_id"], r["note"], r["direction"]) for r in core.list_player_requests(conn, p2)] == [
@@ -209,7 +209,7 @@ def test_list_division_requests_lists_each_mutual_pair_once_with_teams(conn, div
     assert wayne_row == {
         "id": wayne_row["id"], "player_id": sid, "name": "Sidney Crosby", "team": "Avalanche",
         "other_player_id": wayne, "other_name": "Wayne Gretzky", "other_team": None,
-        "other_in_division": True, "hard": True, "note": "carpool",
+        "other_in_division": True, "hard": True, "avoid": False, "note": "carpool",
     }
     assert core.list_division_requests(conn, other_division)[0]["name"] == "Mario Lemieux"
 
@@ -233,3 +233,19 @@ def test_requests_between_siblings_are_always_hard(conn):
     assert friend_request["hard"] is False and friend_request["sibling"] is False
     core.link_players_as_siblings(conn, kid_a, friend)
     assert core.list_player_requests(conn, friend)[0]["hard"] is True
+
+
+def test_do_not_play_with_is_mutual_never_hard_and_exclusive_with_play_with(conn):
+    p1 = core.add_player(conn, "Sidney", "Crosby")
+    p2 = core.add_player(conn, "Wayne", "Gretzky")
+    request_id = core.add_player_request(conn, p1, p2, "rivals", hard=True, avoid=True)
+    for pid in (p1, p2):
+        [r] = core.list_player_requests(conn, pid)
+        assert (r["avoid"], r["hard"], r["note"]) == (True, False, "rivals")
+    core.set_player_request_hard(conn, request_id, True)  # doesn't apply to an avoid request
+    assert core.list_player_requests(conn, p1)[0]["hard"] is False
+    try:
+        core.add_player_request(conn, p2, p1)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "opposite request" in str(e)

@@ -51,10 +51,11 @@ export function addPlayerRequest(
   requestedPlayerId: number,
   note?: string,
   hard = false,
+  avoid = false,
 ): Promise<PlayerRequest> {
   return apiFetch<PlayerRequest>(`/players/${playerId}/requests/${requestedPlayerId}`, {
     method: 'POST',
-    body: JSON.stringify({ note: note || null, hard }),
+    body: JSON.stringify({ note: note || null, hard, avoid }),
   })
 }
 

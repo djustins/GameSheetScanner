@@ -849,6 +849,7 @@ def api_link_siblings(
 class PlayerRequestCreate(BaseModel):
     note: str | None = None
     hard: bool = False
+    avoid: bool = False  # "do not play with" -- see core.add_player_request
 
 
 class PlayerRequestUpdate(BaseModel):
@@ -870,7 +871,9 @@ def api_add_player_request(
     for exactly how auto_draft treats it differently: a soft preference by
     default, or with hard: true, a placement as firm as a sibling's)."""
     try:
-        request_id = core.add_player_request(conn, player_id, requested_player_id, body.note, body.hard)
+        request_id = core.add_player_request(
+            conn, player_id, requested_player_id, body.note, body.hard, avoid=body.avoid
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     return next(r for r in core.list_player_requests(conn, player_id) if r["id"] == request_id)

@@ -442,3 +442,35 @@ def test_a_team_without_a_goalie_drafts_a_little_better(conn, division_id):
         totals[key] = totals.get(key, 0) + skill[r["draft_grade"]]
     # Without the bonus the goalie's team would end up stronger (7 vs 6).
     assert totals == {"goalie team": 6, "no goalie": 7}
+
+
+def test_auto_draft_keeps_do_not_play_with_pairs_apart(conn, division_id):
+    core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    a = _add_player(conn, division_id, "Alpha", "Test", grade="A")
+    b = _add_player(conn, division_id, "Bravo", "Test", grade="B")
+    _add_player(conn, division_id, "Bravo2", "Test", grade="B")
+    c = _add_player(conn, division_id, "Charlie", "Test", grade="C")
+    # Balance alone would put Charlie with Alpha (4 vs the two B's 6); the
+    # avoid request forces Charlie onto the other team.
+    core.add_player_request(conn, c, a, avoid=True)
+
+    result = core.auto_draft(conn, division_id)
+    team_of = {r["player_id"]: r["team_id"] for r in core.auto_draft_table(conn, division_id)}
+    assert team_of[a] != team_of[c]
+    assert team_of[b] == team_of[c]
+    assert not any("do not play with" in w for w in result["warnings"])
+
+
+def test_auto_draft_warns_when_a_hard_link_forces_an_avoid_pair_together(conn, division_id):
+    core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    a = _add_player(conn, division_id, "Alpha", "Test")
+    b = _add_player(conn, division_id, "Bravo", "Test")
+    c = _add_player(conn, division_id, "Charlie", "Test")
+    core.add_player_request(conn, a, b, hard=True)
+    core.add_player_request(conn, a, c, hard=True)
+    core.add_player_request(conn, b, c, avoid=True)
+
+    result = core.auto_draft(conn, division_id)
+    assert any("Bravo Test and Charlie Test (do not play with)" in w for w in result["warnings"])

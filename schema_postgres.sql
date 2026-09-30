@@ -235,6 +235,10 @@ CREATE TABLE IF NOT EXISTS player_requests (
 -- Soft (the default) vs. hard: a hard request is placed like a sibling --
 -- always on the same team in auto_draft, balance or not.
 ALTER TABLE player_requests ADD COLUMN IF NOT EXISTS hard BOOLEAN NOT NULL DEFAULT FALSE;
+-- "Do not play with": the opposite ask -- keep the two on different teams.
+-- auto_draft never puts them together unless a hard link forces it (and
+-- warns); trade_players refuses a trade that would. hard doesn't apply.
+ALTER TABLE player_requests ADD COLUMN IF NOT EXISTS avoid BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Every division a player is currently registered in. Usually one, but a
 -- player can play in two age groups at once -- always within the same

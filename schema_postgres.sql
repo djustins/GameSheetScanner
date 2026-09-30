@@ -249,6 +249,10 @@ CREATE TABLE IF NOT EXISTS player_divisions (
 INSERT INTO player_divisions (player_id, division_id)
     SELECT id, current_division_id FROM players WHERE current_division_id IS NOT NULL
     ON CONFLICT DO NOTHING;
+-- The position the player asked for when registering (e.g. "Goalie",
+-- "Forward or Defense") -- known before they're on a team, unlike
+-- player_positions. Auto-draft uses it to give each team one goalie.
+ALTER TABLE player_divisions ADD COLUMN IF NOT EXISTS position TEXT;
 
 -- A single evaluation of a player for a given division/team.
 CREATE TABLE IF NOT EXISTS evaluations (
@@ -346,6 +350,7 @@ CREATE TABLE IF NOT EXISTS auto_draft_runs (
     coach_assignments   TEXT NOT NULL,  -- JSON list of {"team_id": .., "coach_id": ..}
     created_at          TEXT DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE auto_draft_runs ADD COLUMN IF NOT EXISTS warnings TEXT;  -- JSON list of the run's warnings
 
 -- Official season schedule, uploaded as a CSV and persisted here so it
 -- survives a restart and stays comparable against stored games without

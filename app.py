@@ -1302,6 +1302,73 @@ def render_coach_panel(
 
 
 @st.fragment(run_every="5s")
+def render_auto_draft_results(conn, division_id: int):
+    """The division's current auto-draft as a table -- a per-team summary,
+    then every player it placed -- plus the warnings from that run. Shown
+    until the run is undone."""
+    rows = core.auto_draft_table(conn, division_id)
+    if not rows:
+        return
+    run = core.get_auto_draft_run(conn, division_id)
+    st.divider()
+    st.subheader("Auto-Draft results")
+    st.caption(f"Run {(run['created_at'] or '')[:16]} · {len(rows)} player(s) placed.")
+    if run["warnings"]:
+        with st.expander(f"⚠️ Warnings ({len(run['warnings'])})"):
+            for w in run["warnings"]:
+                st.write(f"- {w}")
+
+    skill = {"A": 4, "B": 3, "C": 2, "D/New": 1}
+    summary = []
+    for team in sorted({r["team"] for r in rows}):
+        team_rows = [r for r in rows if r["team"] == team]
+        grades = [r["draft_grade"] for r in team_rows]
+        summary.append({
+            "Team": team, "Players": len(team_rows), "Goalies": sum(r["goalie"] for r in team_rows),
+            "Avg skill": round(sum(skill[g] for g in grades) / len(grades), 2),
+            "A/B/C/D-New": " / ".join(str(grades.count(g)) for g in ("A", "B", "C", "D/New")),
+            "Avg age": core.format_age(core.average_age([r["birth_date"] for r in team_rows])),
+        })
+    st.dataframe(zebra_style(pd.DataFrame(summary)), width="stretch", hide_index=True)
+
+    team_filter = st.selectbox(
+        "Team", ["All Teams"] + [s["Team"] for s in summary], key=f"auto_draft_results_team_{division_id}"
+    )
+    st.dataframe(
+        zebra_style(pd.DataFrame([
+            {
+                "Team": r["team"], "#": r["number"], "Player": r["name"], "Grade": r["grade"] or "—",
+                "Drafted as": r["draft_grade"], "Birth date": r["birth_date"] or "—",
+                "Position": ("🥅 " if r["goalie"] else "") + (r["position"] or "—"),
+                "Requests": "; ".join(
+                    ("✅ " if q["together"] else "❌ ") + q["name"] + (" (hard)" if q["hard"] else "")
+                    for q in r["requests"]
+                ),
+            }
+            for r in rows if team_filter == "All Teams" or r["team"] == team_filter
+        ])),
+        width="stretch", hide_index=True,
+    )
+
+
+def render_draft_notes(conn, division_id: int):
+    """Free-form notes for this division's draft, saved in the database
+    (app_settings) so they're there for everyone, every session."""
+    st.divider()
+    st.subheader("Draft notes")
+    notes_key = f"draft_notes_{division_id}"
+    saved = core.get_setting(conn, notes_key) or ""
+    notes = st.text_area(
+        "Notes", value=saved, height=180, key=f"draft_notes_input_{division_id}",
+        label_visibility="collapsed", placeholder="Anything to remember about this draft…",
+        disabled=is_read_only,
+    )
+    if st.button("Save notes", key=f"draft_notes_save_{division_id}", disabled=is_read_only or notes == saved):
+        core.set_setting(conn, notes_key, notes)
+        st.toast("Draft notes saved.")
+        st.rerun()
+
+
 def render_draft_live(conn, draft_division_id: int):
     """The stateful part of the Draft tab — setup-vs-in-progress-vs-completed,
     current turn, pick pool/controls, and history. Streamlit has no
@@ -1691,6 +1758,26 @@ def render_player_panel(
                 help=f"Position on {h['team_name']} for this division." if len(current_team_entries) > 1 else None,
                 disabled=is_read_only,
             )
+
+    # The position asked for at registration, per division -- a player in
+    # two age groups can be a goalie in one and a skater in the other.
+    # Auto-draft uses it to give each team one goalie.
+    registered_positions = core.list_registration_positions(conn, player_id)
+    if player["division_ids"]:
+        pcols = st.columns(len(player["division_ids"]))
+        for pcol, division_id in zip(pcols, player["division_ids"]):
+            saved_position = registered_positions.get(division_id) or ""
+            choices = ["", "Forward", "Defense", "Forward or Defense", "Goalie"]
+            if saved_position not in choices:
+                choices.append(saved_position)
+            picked_position = pcol.selectbox(
+                f"Registered position — {division_name_by_id.get(division_id, '')}", choices,
+                index=choices.index(saved_position), format_func=lambda c: c or "(not given)",
+                key=f"{key_prefix}_reg_position_{player_id}_{division_id}", disabled=is_read_only,
+            )
+            if picked_position != saved_position:
+                core.set_registration_position(conn, player_id, division_id, picked_position)
+                st.rerun()
 
     with st.expander("📇 Contact info"):
         ecol3, ecol4 = st.columns(2)
@@ -4504,6 +4591,8 @@ with tab_teams_group:
                 )
 
                 render_draft_live(conn, draft_division_id)
+                render_auto_draft_results(conn, draft_division_id)
+                render_draft_notes(conn, draft_division_id)
 
     else:
         if "teams" not in visible_pages:

@@ -2425,6 +2425,32 @@ def register_player_in_division(conn: PGConnection, player_id: int, division_id:
     _refresh_main_division(conn, player_id, prefer=division_id if main else None)
 
 
+def set_registration_position(conn: PGConnection, player_id: int, division_id: int, position: str | None):
+    """The position a player asked for when registering in this division
+    (see player_divisions.position) -- blank clears it."""
+    conn.execute(
+        "UPDATE player_divisions SET position = %s WHERE player_id = %s AND division_id = %s",
+        ((position or "").strip() or None, player_id, division_id),
+    )
+    conn.commit()
+
+
+def list_registration_positions(conn: PGConnection, player_id: int) -> dict[int, str | None]:
+    """division_id -> the position this player registered with there, for
+    every division they're registered in -- positions are per division, so
+    a goalie in one age group can skate in another."""
+    return dict(conn.execute(
+        "SELECT division_id, position FROM player_divisions WHERE player_id = %s", (player_id,)
+    ).fetchall())
+
+
+def is_goalie(position: str | None) -> bool:
+    """Whether a position (registration preference or roster position)
+    means goalie, e.g. "Goalie", "goaltender", "G"."""
+    position = (position or "").strip().lower()
+    return "goal" in position or position == "g"
+
+
 def unregister_player_from_division(conn: PGConnection, player_id: int, division_id: int):
     """Removes one division registration; if it was the player's main
     division, another of their registrations (if any) takes over."""
@@ -2680,9 +2706,10 @@ def list_draft_order(conn: PGConnection, draft_id: int) -> list[dict]:
 
 def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
     """Players eligible to be drafted: registered for this division
-    (player_divisions) and not already on any of its teams' rosters."""
+    (player_divisions) and not already on any of its teams' rosters.
+    "position" is the one they asked for when registering."""
     rows = conn.execute(
-        """SELECT p.id, p.first_name, p.last_name, p.nickname, p.birth_date
+        """SELECT p.id, p.first_name, p.last_name, p.nickname, p.birth_date, pd.position
            FROM players p JOIN player_divisions pd ON pd.player_id = p.id AND pd.division_id = %s
            WHERE p.deleted_at IS NULL
              AND p.id NOT IN (
@@ -2693,7 +2720,7 @@ def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
            ORDER BY p.last_name, p.first_name""",
         (division_id, division_id),
     ).fetchall()
-    cols = ["id", "first_name", "last_name", "nickname", "birth_date"]
+    cols = ["id", "first_name", "last_name", "nickname", "birth_date", "position"]
     players = [dict(zip(cols, r)) for r in rows]
     for p in players:
         p["name"] = full_name(p["first_name"], p["last_name"])
@@ -3101,7 +3128,8 @@ def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
     undone (undo_auto_draft deletes the row) or if auto_draft has never
     been run for this division."""
     row = conn.execute(
-        "SELECT id, roster_entry_ids, coach_assignments, created_at FROM auto_draft_runs WHERE division_id = %s",
+        "SELECT id, roster_entry_ids, coach_assignments, created_at, warnings "
+        "FROM auto_draft_runs WHERE division_id = %s",
         (division_id,),
     ).fetchone()
     if row is None:
@@ -3109,8 +3137,56 @@ def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
     return {
         "id": row[0], "division_id": division_id,
         "roster_entry_ids": json.loads(row[1]), "coach_assignments": json.loads(row[2]),
-        "created_at": row[3],
+        "created_at": row[3], "warnings": json.loads(row[4]) if row[4] else [],
     }
+
+
+def _draft_tier_rank(grade_info: dict | None) -> int:
+    """A player's auto-draft tier (0 = A ... 3 = D/New) from a
+    get_latest_grades_with_source entry. A grade from a different age group
+    (a player moving up) counts as New."""
+    if not grade_info or not grade_info["same_age_group"]:
+        return 3
+    return _AUTO_DRAFT_TIER_RANK.get((grade_info["grade"] or "").strip().upper(), 3)
+
+
+def auto_draft_table(conn: PGConnection, division_id: int) -> list[dict]:
+    """The division's current auto-draft run, one row per player it placed:
+    {team, number, player_id, name, grade (as displayed), draft_grade (the
+    tier auto_draft ranked them by: "A".."C" or "D/New"), birth_date,
+    position (registered), goalie, requests: [{name, hard, together}]}.
+    Sorted by team, then draft grade, then oldest first. [] if no run."""
+    run = get_auto_draft_run(conn, division_id)
+    if run is None or not run["roster_entry_ids"]:
+        return []
+    rows = conn.execute(
+        """SELECT re.number, t.id, t.name, p.id, p.first_name, p.last_name, p.birth_date, pd.position
+           FROM roster_entries re
+           JOIN teams t ON t.id = re.team_id
+           JOIN players p ON p.id = re.player_id
+           LEFT JOIN player_divisions pd ON pd.player_id = p.id AND pd.division_id = %s
+           WHERE re.id = ANY(%s)""",
+        (division_id, run["roster_entry_ids"]),
+    ).fetchall()
+    grades = get_latest_grades_with_source(conn, division_id, [r[3] for r in rows])
+    requests_by_player: dict[int, list[dict]] = {}
+    for r in list_division_requests(conn, division_id):
+        if not r["other_in_division"]:
+            continue
+        together = r["team"] is not None and r["team"] == r["other_team"]
+        for me, other in ((r["player_id"], r["other_name"]), (r["other_player_id"], r["name"])):
+            requests_by_player.setdefault(me, []).append({"name": other, "hard": r["hard"], "together": together})
+    table = []
+    for number, team_id, team, player_id, first, last, birth_date, position in rows:
+        tier = _draft_tier_rank(grades.get(player_id))
+        table.append({
+            "team_id": team_id, "team": display_text(team), "number": number, "player_id": player_id,
+            "name": full_name(first, last), "grade": grade_display(grades.get(player_id)),
+            "draft_grade": "ABC"[tier] if tier < 3 else "D/New", "birth_date": birth_date,
+            "position": position, "goalie": is_goalie(position),
+            "requests": requests_by_player.get(player_id, []),
+        })
+    return sorted(table, key=lambda r: (r["team"] or "", r["draft_grade"], r["birth_date"] or "9999"))
 
 
 def undo_auto_draft(conn: PGConnection, division_id: int):
@@ -3156,6 +3232,11 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     whichever team their child lands on afterward (skipped with a warning
     if that team already ended up with a different coach).
 
+    Goalies (by the position they registered with -- see
+    player_divisions.position) go one per team: a unit with a goalie only
+    goes to a team with the fewest goalies so far, so every team gets one
+    before any gets a second (a warning lists teams left without one).
+
     Everyone else is assigned greedily, best-skill unit first, always to
     whichever team currently has the lowest total skill (ties broken by
     fewest players so far) — keeping both roster size and aggregate rank
@@ -3195,10 +3276,7 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     grade_info = get_latest_grades_with_source(conn, division_id, list(pool_by_id))
 
     def tier_rank_of(player_id: int) -> int:
-        info = grade_info.get(player_id)
-        if not info or not info["same_age_group"]:
-            return 3
-        return _AUTO_DRAFT_TIER_RANK.get((info["grade"] or "").strip().upper(), 3)
+        return _draft_tier_rank(grade_info.get(player_id))
 
     def skill_of(player_id: int) -> int:
         return _AUTO_DRAFT_TIER_SKILL[tier_rank_of(player_id)]
@@ -3309,12 +3387,27 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             if children.intersection(unit["player_ids"]):
                 unit["pinned_team_id"] = unit["pinned_team_id"] or team_id
 
+    # Goalies: one per team. A pool player is a goalie by the position they
+    # registered with; an already-rostered one by their roster position,
+    # else their registration.
+    goalie_ids = {pid for pid, p in pool_by_id.items() if is_goalie(p["position"])}
+    for player_id, position in conn.execute(
+        """SELECT player_id, position FROM player_positions WHERE division_id = %s
+           UNION ALL
+           SELECT player_id, position FROM player_divisions WHERE division_id = %s""",
+        (division_id, division_id),
+    ).fetchall():
+        if player_id in existing_team_by_player and is_goalie(position):
+            goalie_ids.add(player_id)
+
     team_size = {t["id"]: 0 for t in teams}
     team_skill = {t["id"]: 0 for t in teams}
+    team_goalies = {t["id"]: 0 for t in teams}
     for player_id, team_id in existing_team_by_player.items():
         if team_id in team_size:
             team_size[team_id] += 1
             team_skill[team_id] += skill_of(player_id)
+            team_goalies[team_id] += player_id in goalie_ids
 
     assignments: dict[int, int] = {}
     pinned_units = [u for u in units if u["pinned_team_id"] is not None]
@@ -3325,6 +3418,13 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
 
     team_of_unit: dict[int, int] = {}
     for unit in pinned_units + open_units:
+        unit_goalies = sum(pid in goalie_ids for pid in unit["player_ids"])
+        # A unit bringing a goalie may only go to a team with the fewest
+        # goalies so far, so every team gets one before any gets a second.
+        eligible = list(team_size)
+        if unit_goalies:
+            fewest_goalies = min(team_goalies.values())
+            eligible = [t for t in team_size if team_goalies[t] == fewest_goalies]
         requested_team_id = None
         if unit["pinned_team_id"] is None:
             # Only redirect to a team that's currently among the least-loaded
@@ -3337,20 +3437,21 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             for other_idx in requested_units.get(unit["idx"], ()):
                 other_team_id = team_of_unit.get(other_idx)
                 if (
-                    other_team_id is not None and team_size[other_team_id] == min_size
+                    other_team_id in eligible and team_size[other_team_id] == min_size
                     and team_skill[other_team_id] - min_skill <= _AUTO_DRAFT_REQUEST_SKILL_SLACK
                 ):
                     requested_team_id = other_team_id
                     break
         team_id = (
             unit["pinned_team_id"] or requested_team_id
-            or min(team_size, key=lambda t: (team_skill[t], team_size[t], t))
+            or min(eligible, key=lambda t: (team_skill[t], team_size[t], t))
         )
         team_of_unit[unit["idx"]] = team_id
         for pid in unit["player_ids"]:
             assignments[pid] = team_id
         team_size[team_id] += len(unit["player_ids"])
         team_skill[team_id] += sum(skill_of(pid) for pid in unit["player_ids"])
+        team_goalies[team_id] += unit_goalies
 
     # Number each team's new players after whatever's already on its
     # roster, same "placeholder jersey number" convention as
@@ -3374,6 +3475,20 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
                 f"Could not honor play-with request between {pool_by_id[pid_a]['name']} and "
                 f"{pool_by_id[pid_b]['name']} — it would have unbalanced the teams."
             )
+    team_name = {t["id"]: t["name"] for t in teams}
+    # Only when there are goalies to go around -- a division with none
+    # registered (e.g. no positions recorded) would otherwise always warn.
+    no_goalie = [team_name[t] for t in team_size if team_goalies[t] == 0]
+    if goalie_ids and no_goalie:
+        warnings.append(
+            f"No goalie on {', '.join(no_goalie)} — only {len(goalie_ids)} goalie(s) registered for "
+            f"{len(teams)} teams."
+        )
+    if goalie_ids and max(team_goalies.values()) > max(1, -(-len(goalie_ids) // len(teams))):
+        warnings.append(
+            "Siblings or hard requests put more than one goalie on "
+            + ", ".join(f"{team_name[t]} ({n})" for t, n in team_goalies.items() if n > 1) + "."
+        )
 
     # Coach-follows-kid: a coach with no team yet in this division whose
     # child just got auto-drafted is assigned to that child's team.
@@ -3393,8 +3508,9 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             warnings.append(str(e))
 
     conn.execute(
-        "INSERT INTO auto_draft_runs (division_id, roster_entry_ids, coach_assignments) VALUES (%s, %s, %s)",
-        (division_id, json.dumps(roster_entry_ids), json.dumps(coach_assignments)),
+        "INSERT INTO auto_draft_runs (division_id, roster_entry_ids, coach_assignments, warnings) "
+        "VALUES (%s, %s, %s, %s)",
+        (division_id, json.dumps(roster_entry_ids), json.dumps(coach_assignments), json.dumps(warnings)),
     )
     conn.commit()
     return {"assigned": len(assignments), "teams": len(teams), "warnings": warnings}
@@ -3859,6 +3975,8 @@ def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[di
             skipped += 1
             continue
 
+        if entry["position"]:
+            set_registration_position(conn, player_id, division_id, entry["position"])
         if entry.get("request_text") or entry.get("sibling_text"):
             linkers.append((entry, player_id))
 

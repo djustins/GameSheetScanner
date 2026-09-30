@@ -320,3 +320,88 @@ def test_auto_draft_grades_a_player_moving_up_age_groups_as_new(conn, division_i
     # Ranked as New (tied with D), so the older D player goes first.
     assert _first_pick_team(conn, team_a, team_b, d_player)
     assert not _first_pick_team(conn, team_a, team_b, moving_up)
+
+
+def _goalie(conn, division_id, first, grade="A"):
+    player_id = _add_player(conn, division_id, first, "Goalie", grade=grade)
+    core.set_registration_position(conn, player_id, division_id, "Goalie")
+    return player_id
+
+
+def test_auto_draft_puts_one_goalie_on_each_team(conn, division_id):
+    teams = [core.add_team(conn, division_id, n) for n in ("Avalanche", "Wild", "Blues")]
+    goalies = {_goalie(conn, division_id, f"G{i}") for i in range(3)}
+    for i in range(6):
+        _add_player(conn, division_id, f"Skater{i}", "Test", grade="D")
+
+    result = core.auto_draft(conn, division_id)
+    assert result["warnings"] == []
+    for team_id in teams:
+        on_team = {r["player_id"] for r in core.list_roster(conn, team_id)}
+        assert len(on_team & goalies) == 1
+
+
+def test_auto_draft_skips_a_request_that_would_stack_goalies(conn, division_id):
+    core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    g1 = _goalie(conn, division_id, "G1", grade="A")
+    g2 = _goalie(conn, division_id, "G2", grade="B")
+    core.add_player_request(conn, g2, g1)
+
+    result = core.auto_draft(conn, division_id)
+    teams = {t["id"]: {r["player_id"] for r in core.list_roster(conn, t["id"])} for t in core.list_teams(conn, division_id)}
+    assert all(len(ids & {g1, g2}) == 1 for ids in teams.values())
+    assert any("G1 Goalie" in w and "G2 Goalie" in w for w in result["warnings"])
+
+
+def test_auto_draft_warns_when_a_team_has_no_goalie(conn, division_id):
+    core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    _goalie(conn, division_id, "G1")
+    _add_player(conn, division_id, "Skater", "Test")
+
+    result = core.auto_draft(conn, division_id)
+    assert any("No goalie on" in w and "1 goalie(s)" in w for w in result["warnings"])
+
+
+def test_import_saves_registration_position(conn, division_id):
+    columns = core.detect_player_import_columns(["Player Name", "What position does your child prefer?"])
+    plan = core.build_player_import_plan(
+        conn, division_id, [{"Player Name": "Marc Fleury", "What position does your child prefer?": "Goalie"}], columns,
+    )
+    core.apply_player_import_plan(conn, division_id, plan)
+    [pooled] = core.draft_pool(conn, division_id)
+    assert pooled["position"] == "Goalie" and core.is_goalie(pooled["position"])
+
+
+def test_registration_position_is_per_division(conn, division_id):
+    beaver = core.add_division(conn, 2026, "Summer", "Beaver")
+    player_id = _add_player(conn, division_id, "Two", "Way")
+    core.register_player_in_division(conn, player_id, beaver)
+    core.set_registration_position(conn, player_id, division_id, "Goalie")
+    core.set_registration_position(conn, player_id, beaver, "Forward")
+
+    assert core.list_registration_positions(conn, player_id) == {division_id: "Goalie", beaver: "Forward"}
+    assert core.draft_pool(conn, division_id)[0]["position"] == "Goalie"
+    assert core.draft_pool(conn, beaver)[0]["position"] == "Forward"
+
+
+def test_auto_draft_table_lists_every_placed_player_and_keeps_warnings(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    g = _goalie(conn, division_id, "G1", grade="A")
+    s = _add_player(conn, division_id, "Skater", "Test", grade="C", birth_date="2017-01-01")
+    core.add_player_request(conn, s, g)
+
+    result = core.auto_draft(conn, division_id)
+    rows = core.auto_draft_table(conn, division_id)
+    assert {r["name"] for r in rows} == {"G1 Goalie", "Skater Test"}
+    goalie_row = next(r for r in rows if r["player_id"] == g)
+    assert goalie_row["goalie"] is True and goalie_row["draft_grade"] == "A" and goalie_row["team"] == "Avalanche"
+    assert goalie_row["requests"][0]["name"] == "Skater Test"
+    # Warnings (e.g. "No goalie on Wild") are kept with the run.
+    assert core.get_auto_draft_run(conn, division_id)["warnings"] == result["warnings"]
+    assert any("No goalie on Wild" in w for w in result["warnings"])
+
+    core.undo_auto_draft(conn, division_id)
+    assert core.auto_draft_table(conn, division_id) == []

@@ -331,6 +331,7 @@ export interface PlayerRequest {
   name: string
   note: string | null
   hard: boolean
+  sibling: boolean
   direction: 'made' | 'received'
 }
 

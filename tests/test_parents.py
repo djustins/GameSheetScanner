@@ -131,7 +131,7 @@ def test_player_requests_show_on_both_profiles_and_can_be_removed(conn):
     made = core.list_player_requests(conn, p1)
     assert made == [{
         "id": request_id, "player_id": p2, "name": "Wayne Gretzky", "note": "best friends", "hard": False,
-        "direction": "made",
+        "sibling": False, "direction": "made",
     }]
     # Mutual: player 2 gets the same request back to player 1, listed once.
     assert [(r["player_id"], r["note"], r["direction"]) for r in core.list_player_requests(conn, p2)] == [
@@ -212,3 +212,24 @@ def test_list_division_requests_lists_each_mutual_pair_once_with_teams(conn, div
         "other_in_division": True, "hard": True, "note": "carpool",
     }
     assert core.list_division_requests(conn, other_division)[0]["name"] == "Mario Lemieux"
+
+
+def test_requests_between_siblings_are_always_hard(conn):
+    kid_a = core.add_player(conn, "Archer", "Zankel", contact_email="zankel@example.com")
+    kid_b = core.add_player(conn, "Izabella", "Zankel", contact_email="zankel@example.com")
+    friend = core.add_player(conn, "Wayne", "Gretzky")
+
+    # Added as soft, but they're siblings -> hard, both directions.
+    request_id = core.add_player_request(conn, kid_a, kid_b)
+    assert [(r["hard"], r["sibling"]) for r in core.list_player_requests(conn, kid_a)] == [(True, True)]
+    assert core.list_player_requests(conn, kid_b)[0]["hard"] is True
+    # Can't be switched back to soft.
+    core.set_player_request_hard(conn, request_id, False)
+    assert core.list_player_requests(conn, kid_a)[0]["hard"] is True
+
+    # A soft request becomes hard once the two are linked as siblings.
+    core.add_player_request(conn, kid_a, friend)
+    friend_request = next(r for r in core.list_player_requests(conn, friend))
+    assert friend_request["hard"] is False and friend_request["sibling"] is False
+    core.link_players_as_siblings(conn, kid_a, friend)
+    assert core.list_player_requests(conn, friend)[0]["hard"] is True

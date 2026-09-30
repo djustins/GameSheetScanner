@@ -2159,6 +2159,21 @@ def list_parents(conn: PGConnection) -> list[dict]:
     return parents
 
 
+def harden_sibling_requests(conn: PGConnection) -> int:
+    """A play-with request between siblings (players sharing a parent) is
+    always hard -- auto_draft keeps siblings together regardless, so a
+    "soft" one would misstate what happens. Run after anything that adds a
+    request or changes who's a sibling. Returns how many were switched."""
+    cur = conn.execute(
+        """UPDATE player_requests pr SET hard = TRUE
+           FROM players p1, players p2
+           WHERE p1.id = pr.player_id AND p2.id = pr.requested_player_id
+             AND p1.parent_id = p2.parent_id AND NOT pr.hard"""
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def set_player_parent(conn: PGConnection, player_id: int, parent_id: int | None):
     """Manually link (parent_id given) or unlink (parent_id=None) a player
     to a parent/sibling-group — for correcting a get_or_create_parent
@@ -2166,6 +2181,7 @@ def set_player_parent(conn: PGConnection, player_id: int, parent_id: int | None)
     automatically matched (e.g. no contact info on file for one of them)."""
     conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, player_id))
     conn.commit()
+    harden_sibling_requests(conn)
 
 
 def list_siblings(conn: PGConnection, player_id: int) -> list[dict]:
@@ -2207,6 +2223,7 @@ def link_players_as_siblings(conn: PGConnection, player_id_a: int, player_id_b: 
         conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, player_id_b))
     conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, player_id_a))
     conn.commit()
+    harden_sibling_requests(conn)
     return parent_id
 
 
@@ -2215,7 +2232,8 @@ def add_player_request(
 ) -> int:
     """Record player_id's request to play with requested_player_id next
     draft/season -- see the player_requests table comment for how this
-    differs from Siblings. Soft unless `hard` (see set_player_request_hard).
+    differs from Siblings. Soft unless `hard` (see set_player_request_hard),
+    except between siblings, which is always hard (harden_sibling_requests).
     Also records the reverse request (requested_player_id -> player_id,
     same note and hard/soft) unless that one's already on file, so the
     pair shows as each player's own request. Raises ValueError if they're
@@ -2243,6 +2261,7 @@ def add_player_request(
         (requested_player_id, player_id, note, hard),
     )
     conn.commit()
+    harden_sibling_requests(conn)
     return request_id
 
 
@@ -2255,11 +2274,12 @@ _REQUEST_PAIR_WHERE = """(id = %s OR (player_id, requested_player_id) IN (
 def set_player_request_hard(conn: PGConnection, request_id: int, hard: bool):
     """Switch a play-with request (and its reverse) between soft
     (auto_draft honors it only while teams stay balanced) and hard (always
-    placed together, like siblings)."""
+    placed together, like siblings). One between siblings stays hard."""
     conn.execute(
         f"UPDATE player_requests SET hard = %s WHERE {_REQUEST_PAIR_WHERE}", (hard, request_id, request_id)
     )
     conn.commit()
+    harden_sibling_requests(conn)
 
 
 def remove_player_request(conn: PGConnection, request_id: int):
@@ -2274,11 +2294,13 @@ def list_player_requests(conn: PGConnection, player_id: int) -> list[dict]:
     profile alike (unlike a plain one-directional log) -- but as a direct
     pairwise edge (player_requests), not a shared-group relationship the
     way Siblings is. Each entry: {id, player_id (the *other* player),
-    name, note, hard, direction: "made" if this player sent the request,
-    "received" if the other player did}. A pair recorded both ways (see
-    add_player_request) is listed once, as "made"."""
+    name, note, hard, sibling (always hard -- see harden_sibling_requests),
+    direction: "made" if this player sent the request, "received" if the
+    other player did}. A pair recorded both ways (see add_player_request)
+    is listed once, as "made"."""
     rows = conn.execute(
-        """SELECT pr.id, pr.note, pr.hard, pr.player_id, pr.requested_player_id,
+        """SELECT pr.id, pr.note, pr.hard, COALESCE(p1.parent_id = p2.parent_id, FALSE),
+                  pr.player_id, pr.requested_player_id,
                   p1.first_name, p1.last_name, p2.first_name, p2.last_name
            FROM player_requests pr
            JOIN players p1 ON p1.id = pr.player_id
@@ -2288,14 +2310,14 @@ def list_player_requests(conn: PGConnection, player_id: int) -> list[dict]:
         (player_id, player_id),
     ).fetchall()
     results = []
-    for req_id, note, hard, made_by, made_to, f1, l1, f2, l2 in rows:
+    for req_id, note, hard, sibling, made_by, made_to, f1, l1, f2, l2 in rows:
         if made_by == player_id:
             other_id, other_name, direction = made_to, full_name(f2, l2), "made"
         else:
             other_id, other_name, direction = made_by, full_name(f1, l1), "received"
         results.append({
             "id": req_id, "player_id": other_id, "name": other_name, "note": note, "hard": hard,
-            "direction": direction,
+            "sibling": sibling, "direction": direction,
         })
     made_to_ids = {r["player_id"] for r in results if r["direction"] == "made"}
     return [r for r in results if r["direction"] == "made" or r["player_id"] not in made_to_ids]
@@ -2318,6 +2340,7 @@ def backfill_player_parents(conn: PGConnection) -> int:
             conn.execute("UPDATE players SET parent_id = %s WHERE id = %s", (parent_id, p["id"]))
             linked += 1
     conn.commit()
+    harden_sibling_requests(conn)
     return linked
 
 
@@ -2374,6 +2397,8 @@ def update_player(conn: PGConnection, player_id: int, **fields):
         f"UPDATE players SET {set_clause} WHERE id = %s", (*updates.values(), player_id)
     )
     conn.commit()
+    if "parent_id" in updates:
+        harden_sibling_requests(conn)
 
 
 def soft_delete_player(conn: PGConnection, player_id: int):
@@ -3577,7 +3602,7 @@ def build_player_import_plan(conn: PGConnection, division_id: int, rows: list[di
 # Kellan Comiskey", "Bobby Dobson - uncle/car pool". Split into one piece
 # per requested name on commas/semicolons/"&"/"and"/" / "; each piece then
 # drops a trailing " - comment".
-_REQUEST_SPLIT_RE = re.compile(r"[,;&\n]|\s/\s|\band\b", re.IGNORECASE)
+_REQUEST_SPLIT_RE = re.compile(r"[,;&\n]|\s/\s|\band\b|\bor\b", re.IGNORECASE)
 
 
 def parse_request_names(text: str | None) -> list[str]:
@@ -3602,19 +3627,27 @@ def _normalize_person_name(name: str) -> str:
     return " ".join(name.lower().split())
 
 
-def _match_requested_players(piece: str, players_by_name: dict[str, list[dict]]) -> list[dict]:
-    """Every player whose full name appears as consecutive words in this
-    request piece -- longest name first, so "Mary Ann Smith" wins over a
-    "Mary Ann" -- or [] if none does. Only a whole first+last name counts:
-    a last name alone ("Casselberry") or a nickname ("Bobby" for Robert)
-    is too much of a guess to link automatically."""
+def _match_requested_players(piece: str, players_by_name: dict[str, list[dict]]) -> list[list[dict]]:
+    """Each player name appearing as consecutive words in this request
+    piece, left to right -- so "Harper Abbott Roman Mckain" (no separator)
+    finds both -- as its list of same-named candidates; [] if none. At each
+    position the longest name wins, so "Mary Ann Smith" beats "Mary Ann".
+    Only a whole first+last name counts: a last name alone ("Casselberry")
+    or a nickname ("Bobby" for Robert) is too much of a guess to link
+    automatically."""
     words = _normalize_person_name(piece).split()
-    for length in range(min(len(words), 4), 1, -1):
-        for start in range(len(words) - length + 1):
+    found = []
+    start = 0
+    while start < len(words):
+        for length in range(min(len(words) - start, 4), 1, -1):
             matches = players_by_name.get(" ".join(words[start:start + length]))
             if matches:
-                return matches
-    return []
+                found.append(matches)
+                start += length
+                break
+        else:
+            start += 1
+    return found
 
 
 def _import_request(conn: PGConnection, player_id: int, other_id: int, text: str) -> bool:
@@ -3660,20 +3693,22 @@ def _resolve_import_names(
         text = entry.get(text_field)
         where = f"Row {entry['row_number']} ({entry['name']})"
         for piece in parse_request_names(text):
-            matches = [m for m in _match_requested_players(piece, players_by_name) if m["id"] != player_id]
-            in_division = [m for m in matches if m["current_division_id"] == division_id]
-            if len(in_division) == 1 or len(matches) == 1:
-                if link(conn, player_id, (in_division or matches)[0]["id"], text):
-                    added += 1
-            elif matches:
-                warnings.append(
-                    f"{where}: {what} \"{piece}\" matches more than one player — add it from their profile."
-                )
-            else:
+            found = _match_requested_players(piece, players_by_name)
+            if not found:
                 warnings.append(
                     f"{where}: couldn't match {what} \"{piece}\" to a player — "
                     "add it from their profile if it names one."
                 )
+            for candidates in found:
+                matches = [m for m in candidates if m["id"] != player_id]
+                in_division = [m for m in matches if m["current_division_id"] == division_id]
+                if len(in_division) == 1 or len(matches) == 1:
+                    if link(conn, player_id, (in_division or matches)[0]["id"], text):
+                        added += 1
+                elif matches:
+                    warnings.append(
+                        f"{where}: {what} \"{piece}\" matches more than one player — add it from their profile."
+                    )
     return added, warnings
 
 

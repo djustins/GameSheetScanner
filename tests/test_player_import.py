@@ -490,3 +490,22 @@ def test_apply_links_a_siblings_column_as_siblings_not_requests(conn, division_i
         {"Player Name": "Layla Graham", "Request/Sibling": "Killian Graham"},
     ])
     assert [s["name"] for s in core.list_siblings(conn, layla)] == ["Killian Graham"]
+
+
+def test_apply_matches_or_alternatives_and_names_without_a_separator(conn, division_id):
+    result = _import_rows(conn, division_id, [
+        {"Player Name": "Vincent Andros", "Teammate Request": "Ramon King or Riley Cummings"},
+        {"Player Name": "Camryn Seitz", "Teammate Request": "Harper Abbott Roman Mckain"},
+        {"Player Name": "Ramon King", "Teammate Request": None},
+        {"Player Name": "Riley Cummings", "Teammate Request": None},
+        {"Player Name": "Harper Abbott", "Teammate Request": None},
+        {"Player Name": "Roman McKain", "Teammate Request": None},
+    ])
+    assert result["requested"] == 4
+    assert result["warnings"] == []
+    assert {r["name"] for r in core.list_player_requests(conn, _player_id(conn, "Vincent Andros"))} == {
+        "Ramon King", "Riley Cummings",
+    }
+    assert {r["name"] for r in core.list_player_requests(conn, _player_id(conn, "Camryn Seitz"))} == {
+        "Harper Abbott", "Roman McKain",
+    }

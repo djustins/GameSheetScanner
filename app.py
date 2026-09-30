@@ -1751,9 +1751,11 @@ def render_player_panel(
 
     with st.expander("🤝 Play-with Requests"):
         st.caption(
-            "A non-family ask to play with a specific player. **Soft** (the default): Auto Draft honors "
-            "it when it can without unbalancing teams. **Hard**: always placed together, like siblings."
+            "An ask to play with a specific player. **Soft** (the default): Auto Draft honors it when it "
+            "can without unbalancing teams. **Hard**: always placed together. A request between siblings "
+            "is always hard."
         )
+        sibling_ids = {s["id"] for s in core.list_siblings(conn, player_id)}
         requests = core.list_player_requests(conn, player_id)
         if not requests:
             st.caption("No play-with requests on file.")
@@ -1762,8 +1764,10 @@ def render_player_panel(
             label = f"Requested **{req['name']}**" if req["direction"] == "made" else f"Requested by **{req['name']}**"
             rcol1.write(label + (f" — {req['note']}" if req["note"] else ""))
             hard = rcol2.toggle(
-                "Hard", value=req["hard"], key=f"{key_prefix}_hard_request_{req['id']}", disabled=is_read_only,
-                help="On: always placed on the same team. Off (soft): only if teams stay balanced.",
+                "Hard", value=req["hard"], key=f"{key_prefix}_hard_request_{req['id']}",
+                disabled=is_read_only or req["sibling"],
+                help="Siblings: always hard." if req["sibling"] else
+                "On: always placed on the same team. Off (soft): only if teams stay balanced.",
             )
             if hard != req["hard"]:
                 core.set_player_request_hard(conn, req["id"], hard)
@@ -1788,10 +1792,16 @@ def render_player_panel(
                     "Note (optional)", key=f"{key_prefix}_request_note_{player_id}", disabled=is_read_only
                 )
             with qcol3:
-                request_strength = st.radio(
-                    "Type", ["Soft", "Hard"], key=f"{key_prefix}_request_strength_{player_id}",
-                    disabled=is_read_only,
-                )
+                if pick_request_id in sibling_ids:
+                    request_strength = st.radio(
+                        "Type", ["Hard"], key=f"{key_prefix}_request_strength_sibling_{player_id}",
+                        disabled=True, help="Siblings: always hard.",
+                    )
+                else:
+                    request_strength = st.radio(
+                        "Type", ["Soft", "Hard"], key=f"{key_prefix}_request_strength_{player_id}",
+                        disabled=is_read_only,
+                    )
             with qcol4:
                 st.write("")
                 if st.button(
@@ -4372,17 +4382,22 @@ with tab_teams_group:
         elif working_division_id is None:
             st.warning("No division selected. Add one in the Divisions button first.")
         else:
-            st.header("Requests")
-            st.caption(
-                "Every play-with request involving a player in the Working Division, one row per pair. "
-                "**Soft**: Auto-Draft keeps them together when teams stay balanced. **Hard**: always "
-                "together, like siblings. To change or remove one, open either player's page."
+            requests_division = next(d for d in all_divisions if d["id"] == working_division_id)
+            st.header(
+                f"Requests — {requests_division['year']} {core.display_text(requests_division['season'])} "
+                f"{division_label(requests_division['age_group'])}"
             )
-            division_requests = core.list_division_requests(conn, working_division_id)
+            st.caption(
+                "Play-with requests between players registered in the Working Division, one row per pair. "
+                "**Soft**: Auto-Draft keeps them together when teams stay balanced. **Hard**: always "
+                "together (siblings are always hard). To change or remove one, open either player's page. "
+                "Change the Working Division in the sidebar to see another division's."
+            )
+            all_division_requests = core.list_division_requests(conn, working_division_id)
+            division_requests = [r for r in all_division_requests if r["other_in_division"]]
+            cross_division_requests = [r for r in all_division_requests if not r["other_in_division"]]
 
             def request_status(r: dict) -> str:
-                if not r["other_in_division"]:
-                    return "Other division"
                 if not r["team"] or not r["other_team"]:
                     return "Not drafted"
                 return "✅ Together" if r["team"] == r["other_team"] else "❌ Split"
@@ -4390,8 +4405,7 @@ with tab_teams_group:
             rcol1, rcol2 = st.columns(2)
             request_type_filter = rcol1.selectbox("Type", ["All", "Hard", "Soft"], key="requests_type_filter")
             request_status_filter = rcol2.selectbox(
-                "Status", ["All", "✅ Together", "❌ Split", "Not drafted", "Other division"],
-                key="requests_status_filter",
+                "Status", ["All", "✅ Together", "❌ Split", "Not drafted"], key="requests_status_filter",
             )
             shown_requests = [
                 r for r in division_requests
@@ -4405,8 +4419,7 @@ with tab_teams_group:
                 st.caption(
                     f"{len(shown_requests)} pair(s) · {sum(r['hard'] for r in shown_requests)} hard · "
                     + ", ".join(
-                        f"{s}: {statuses.count(s)}"
-                        for s in ("✅ Together", "❌ Split", "Not drafted", "Other division") if s in statuses
+                        f"{s}: {statuses.count(s)}" for s in ("✅ Together", "❌ Split", "Not drafted") if s in statuses
                     )
                 )
                 st.dataframe(
@@ -4421,6 +4434,22 @@ with tab_teams_group:
                     ])),
                     width="stretch", hide_index=True,
                 )
+
+            if cross_division_requests:
+                with st.expander(
+                    f"Requests with a player in another division ({len(cross_division_requests)}) — "
+                    "ignored by Auto-Draft"
+                ):
+                    st.dataframe(
+                        zebra_style(pd.DataFrame([
+                            {
+                                "Player": r["name"], "Plays with": r["other_name"],
+                                "Type": "Hard" if r["hard"] else "Soft", "Note": r["note"] or "",
+                            }
+                            for r in cross_division_requests
+                        ])),
+                        width="stretch", hide_index=True,
+                    )
 
     elif teams_subpage == "🎯 Draft":
         if "draft" not in visible_pages:

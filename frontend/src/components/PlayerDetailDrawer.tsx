@@ -75,6 +75,8 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
     queryFn: () => listPlayerRequests(player!.id),
     enabled: player != null,
   })
+  // A request between siblings is always hard.
+  const pickIsSibling = (siblings ?? []).some((s) => String(s.id) === requestPickId)
 
   const { data: parents } = useQuery({ queryKey: ['parents'], queryFn: listParents })
   const { data: allPlayers } = useQuery({ queryKey: ['players'], queryFn: () => listPlayers() })
@@ -142,7 +144,7 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
 
   const addRequestMutation = useMutation({
     mutationFn: () =>
-      addPlayerRequest(player!.id, Number(requestPickId), requestNote.trim(), requestStrength === 'hard'),
+      addPlayerRequest(player!.id, Number(requestPickId), requestNote.trim(), pickIsSibling || requestStrength === 'hard'),
     onSuccess: () => {
       invalidateRequests()
       setRequestPickId(null)
@@ -453,8 +455,8 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
               Play-with Requests
             </Title>
             <Text size="xs" c="dimmed" mb="xs">
-              A non-family ask to play with a specific player. Soft (the default): Auto Draft honors it when it
-              can without unbalancing teams. Hard: always placed together, like siblings.
+              An ask to play with a specific player. Soft (the default): Auto Draft honors it when it can without
+              unbalancing teams. Hard: always placed together. A request between siblings is always hard.
             </Text>
             {!requests || requests.length === 0 ? (
               <Text size="sm" c="dimmed" mb="xs">
@@ -472,6 +474,8 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
                       size="xs"
                       label="Hard"
                       checked={r.hard}
+                      disabled={r.sibling}
+                      title={r.sibling ? 'Siblings: always hard' : undefined}
                       onChange={(e) => setRequestHardMutation.mutate({ requestId: r.id, hard: e.currentTarget.checked })}
                     />
                     <Button
@@ -505,7 +509,8 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
               />
               <SegmentedControl
                 size="xs"
-                value={requestStrength}
+                value={pickIsSibling ? 'hard' : requestStrength}
+                disabled={pickIsSibling}
                 onChange={(v) => setRequestStrength(v as 'soft' | 'hard')}
                 data={[
                   { value: 'soft', label: 'Soft' },

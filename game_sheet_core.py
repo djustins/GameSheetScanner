@@ -3369,12 +3369,17 @@ def _swap_to_join_requests(
                 if mover not in movable:
                     continue
                 src, dest = team(mover), team(stay)
-                for partner in [p for p in movable if assignments[p] == dest]:
+                for partner in [p for p in movable if assignments[p] == dest and p != stay]:
                     if tier_rank_of(partner) != tier_rank_of(mover):
                         continue
                     assignments[mover], assignments[partner] = dest, src
                     gap = age_gap()
-                    ok = not breaks_something({mover, partner}) and gap <= max(_AUTO_DRAFT_SWAP_AGE_GAP_DAYS, gap_now)
+                    # Must actually join the pair -- otherwise (e.g. swapping
+                    # the two halves of the pair) the loop could go forever.
+                    ok = (
+                        team(mover) == team(stay) and not breaks_something({mover, partner})
+                        and gap <= max(_AUTO_DRAFT_SWAP_AGE_GAP_DAYS, gap_now)
+                    )
                     assignments[mover], assignments[partner] = src, dest
                     if ok and (best is None or gap < best[0]):
                         best = (gap, mover, partner, src, dest)

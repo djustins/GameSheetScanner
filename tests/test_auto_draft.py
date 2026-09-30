@@ -138,7 +138,7 @@ def test_auto_draft_assigns_coach_to_teammate_kid_lands_on(conn, division_id):
     assert coach_id in assigned_coach_ids
 
 
-def test_auto_draft_warns_instead_of_failing_on_coach_assignment_conflict(conn, division_id):
+def test_auto_draft_leaves_a_team_that_already_has_a_coach_alone(conn, division_id):
     team_a = core.add_team(conn, division_id, "Avalanche")
     core.add_team(conn, division_id, "Wild")
     other_coach = core.add_coach(conn, "Sidney", "Crosby")
@@ -157,8 +157,7 @@ def test_auto_draft_warns_instead_of_failing_on_coach_assignment_conflict(conn, 
     core.add_roster_entry(conn, team_a, "1", "Jordan Lemieux", player_id=sibling_id)
 
     result = core.auto_draft(conn, division_id)
-    assert len(result["warnings"]) == 1
-    assert "already has a coach" in result["warnings"][0]
+    assert result["warnings"] == []  # the parent just isn't coaching here -- not a problem
     assigned_coach_ids = {c["id"] for c in core.list_team_coaches(conn, team_a)}
     assert assigned_coach_ids == {other_coach}
 
@@ -405,3 +404,41 @@ def test_auto_draft_table_lists_every_placed_player_and_keeps_warnings(conn, div
 
     core.undo_auto_draft(conn, division_id)
     assert core.auto_draft_table(conn, division_id) == []
+
+
+def test_auto_draft_table_shows_team_coach_and_parent_coach(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    core.assign_coach_to_team(conn, team_a, core.add_coach(conn, "Jared", "Bednar"))
+    parent = core.add_coach(conn, "Bobby", "Junker")
+    kid = _add_player(conn, division_id, "Jack", "Junker", grade="A")
+    core.link_coach_child(conn, parent, kid)
+    _add_player(conn, division_id, "Other", "Kid", grade="D")
+
+    core.auto_draft(conn, division_id)
+    rows = {r["name"]: r for r in core.auto_draft_table(conn, division_id)}
+    assert rows["Jack Junker"]["parent_coach"] == "Bobby Junker"
+    assert rows["Other Kid"]["parent_coach"] is None
+    avalanche_row = next(r for r in rows.values() if r["team_id"] == team_a)
+    assert avalanche_row["coach"] == "Jared Bednar"
+
+
+def test_a_team_without_a_goalie_drafts_a_little_better(conn, division_id):
+    core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    goalie = _goalie(conn, division_id, "G1", grade="A")
+    _add_player(conn, division_id, "Alpha", "Test", grade="A")
+    _add_player(conn, division_id, "Charlie1", "Test", grade="C")
+    _add_player(conn, division_id, "Charlie2", "Test", grade="C")
+    _add_player(conn, division_id, "Delta", "Test", grade="D")
+
+    core.auto_draft(conn, division_id)
+    skill = {"A": 4, "B": 3, "C": 2, "D/New": 1}
+    totals = {}
+    for r in core.auto_draft_table(conn, division_id):
+        key = "goalie team" if any(
+            x["player_id"] == goalie for x in core.auto_draft_table(conn, division_id) if x["team_id"] == r["team_id"]
+        ) else "no goalie"
+        totals[key] = totals.get(key, 0) + skill[r["draft_grade"]]
+    # Without the bonus the goalie's team would end up stronger (7 vs 6).
+    assert totals == {"goalie team": 6, "no goalie": 7}

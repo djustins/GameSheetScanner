@@ -1324,7 +1324,8 @@ def render_auto_draft_results(conn, division_id: int):
         team_rows = [r for r in rows if r["team"] == team]
         grades = [r["draft_grade"] for r in team_rows]
         summary.append({
-            "Team": team, "Players": len(team_rows), "Goalies": sum(r["goalie"] for r in team_rows),
+            "Team": team, "Coach": team_rows[0]["coach"] or "— none —",
+            "Players": len(team_rows), "Goalies": sum(r["goalie"] for r in team_rows),
             "Avg skill": round(sum(skill[g] for g in grades) / len(grades), 2),
             "A/B/C/D-New": " / ".join(str(grades.count(g)) for g in ("A", "B", "C", "D/New")),
             "Avg age": core.format_age(core.average_age([r["birth_date"] for r in team_rows])),
@@ -1337,7 +1338,9 @@ def render_auto_draft_results(conn, division_id: int):
     st.dataframe(
         zebra_style(pd.DataFrame([
             {
-                "Team": r["team"], "#": r["number"], "Player": r["name"], "Grade": r["grade"] or "—",
+                "Team": r["team"], "Coach": r["coach"] or "—", "#": r["number"],
+                "Player": r["name"] + (f"  👤 parent: {r['parent_coach']}" if r["parent_coach"] else ""),
+                "Grade": r["grade"] or "—",
                 "Drafted as": r["draft_grade"], "Birth date": r["birth_date"] or "—",
                 "Position": ("🥅 " if r["goalie"] else "") + (r["position"] or "—"),
                 "Requests": "; ".join(

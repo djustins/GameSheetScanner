@@ -3121,6 +3121,10 @@ _AUTO_DRAFT_TIER_SKILL = {0: 4, 1: 3, 2: 2, 3: 1}  # numeric skill value per tie
 # already be ahead of the weakest team for a play-with request to still be
 # honored -- two grade steps, e.g. an A-led team vs. a C-led one.
 _AUTO_DRAFT_REQUEST_SKILL_SLACK = 2
+# A team left without a goalie (fewer goalies than teams) counts as this
+# many skill points weaker while balancing, so it drafts a little better
+# to make up for it -- about one C player's worth.
+_AUTO_DRAFT_NO_GOALIE_BONUS = 2
 
 
 def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
@@ -3152,7 +3156,9 @@ def _draft_tier_rank(grade_info: dict | None) -> int:
 
 def auto_draft_table(conn: PGConnection, division_id: int) -> list[dict]:
     """The division's current auto-draft run, one row per player it placed:
-    {team, number, player_id, name, grade (as displayed), draft_grade (the
+    {team, coach (the team's), parent_coach (a coach who's this player's
+    parent -- see coach_children -- whether or not coaching here), number,
+    player_id, name, grade (as displayed), draft_grade (the
     tier auto_draft ranked them by: "A".."C" or "D/New"), birth_date,
     position (registered), goalie, requests: [{name, hard, together}]}.
     Sorted by team, then draft grade, then oldest first. [] if no run."""
@@ -3176,10 +3182,23 @@ def auto_draft_table(conn: PGConnection, division_id: int) -> list[dict]:
         together = r["team"] is not None and r["team"] == r["other_team"]
         for me, other in ((r["player_id"], r["other_name"]), (r["other_player_id"], r["name"])):
             requests_by_player.setdefault(me, []).append({"name": other, "hard": r["hard"], "together": together})
+    coach_of_team = {
+        team_id: ", ".join(full_name(c["first_name"], c["last_name"]) for c in coaches) or None
+        for team_id, coaches in list_team_coaches_for_division(conn, division_id).items()
+    }
+    parent_coach: dict[int, list[str]] = {}
+    for player_id, first, last in conn.execute(
+        """SELECT cc.player_id, c.first_name, c.last_name FROM coach_children cc
+           JOIN coaches c ON c.id = cc.coach_id AND c.deleted_at IS NULL
+           WHERE cc.player_id = ANY(%s)""",
+        ([r[3] for r in rows],),
+    ).fetchall():
+        parent_coach.setdefault(player_id, []).append(full_name(first, last))
     table = []
     for number, team_id, team, player_id, first, last, birth_date, position in rows:
         tier = _draft_tier_rank(grades.get(player_id))
         table.append({
+            "coach": coach_of_team.get(team_id), "parent_coach": ", ".join(parent_coach.get(player_id, [])) or None,
             "team_id": team_id, "team": display_text(team), "number": number, "player_id": player_id,
             "name": full_name(first, last), "grade": grade_display(grades.get(player_id)),
             "draft_grade": "ABC"[tier] if tier < 3 else "D/New", "birth_date": birth_date,
@@ -3229,13 +3248,16 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         whichever team that coach already coaches in this division.
     Coach-follows-kid: a coach who does *not* yet coach a team in this
     division, but whose child is auto-drafted here, is assigned to
-    whichever team their child lands on afterward (skipped with a warning
-    if that team already ended up with a different coach).
+    whichever team their child lands on afterward, if that team has no
+    coach yet (left alone, no warning, if it already has one).
 
     Goalies (by the position they registered with -- see
     player_divisions.position) go one per team: a unit with a goalie only
     goes to a team with the fewest goalies so far, so every team gets one
     before any gets a second (a warning lists teams left without one).
+    Goalies are placed first; a team left without one then counts as
+    _AUTO_DRAFT_NO_GOALIE_BONUS skill points weaker for the rest of the
+    draft, so it gets slightly better skaters to make up for it.
 
     Everyone else is assigned greedily, best-skill unit first, always to
     whichever team currently has the lowest total skill (ties broken by
@@ -3411,10 +3433,24 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
 
     assignments: dict[int, int] = {}
     pinned_units = [u for u in units if u["pinned_team_id"] is not None]
+    # Units bringing a goalie go first (right after the pinned ones), so
+    # which teams end up without a goalie is settled before everyone else
+    # is placed -- those teams then draft a little better (see
+    # _AUTO_DRAFT_NO_GOALIE_BONUS).
     open_units = sorted(
         (u for u in units if u["pinned_team_id"] is None),
-        key=lambda u: min(draft_order_key(pid) for pid in u["player_ids"]),
+        key=lambda u: (
+            not any(pid in goalie_ids for pid in u["player_ids"]),
+            min(draft_order_key(pid) for pid in u["player_ids"]),
+        ),
     )
+
+    def balance_skill(team_id: int) -> int:
+        """Skill as balancing sees it: a team without a goalie counts as
+        weaker than its players alone (only once there are goalies to have
+        gone around)."""
+        short = bool(goalie_ids) and team_goalies[team_id] == 0
+        return team_skill[team_id] - (_AUTO_DRAFT_NO_GOALIE_BONUS if short else 0)
 
     team_of_unit: dict[int, int] = {}
     for unit in pinned_units + open_units:
@@ -3433,18 +3469,18 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             # _AUTO_DRAFT_REQUEST_SKILL_SLACK -- balanced by rank, not just
             # by head count.
             min_size = min(team_size.values())
-            min_skill = min(team_skill.values())
+            min_skill = min(balance_skill(t) for t in team_size)
             for other_idx in requested_units.get(unit["idx"], ()):
                 other_team_id = team_of_unit.get(other_idx)
                 if (
                     other_team_id in eligible and team_size[other_team_id] == min_size
-                    and team_skill[other_team_id] - min_skill <= _AUTO_DRAFT_REQUEST_SKILL_SLACK
+                    and balance_skill(other_team_id) - min_skill <= _AUTO_DRAFT_REQUEST_SKILL_SLACK
                 ):
                     requested_team_id = other_team_id
                     break
         team_id = (
             unit["pinned_team_id"] or requested_team_id
-            or min(eligible, key=lambda t: (team_skill[t], team_size[t], t))
+            or min(eligible, key=lambda t: (balance_skill(t), team_size[t], t))
         )
         team_of_unit[unit["idx"]] = team_id
         for pid in unit["player_ids"]:
@@ -3498,6 +3534,15 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
             continue
         children_ids = {c["id"] for c in list_coach_children(conn, coach_id)}
         landed_team_ids = {assignments[pid] for pid in children_ids if pid in assignments}
+        # Only a team still without a coach -- one that already has one
+        # (e.g. every team's coach set before drafting) is left alone, not
+        # warned about: the parent just isn't coaching this season.
+        coached_team_ids = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT team_id FROM team_coaches WHERE team_id = ANY(%s)", (list(landed_team_ids),)
+            ).fetchall()
+        }
+        landed_team_ids -= coached_team_ids
         if not landed_team_ids:
             continue
         team_id = sorted(landed_team_ids)[0]

@@ -899,9 +899,15 @@ def test_player_requests_endpoints(conn, admin_auth, readonly_auth):
     assert duplicate.status_code == 409
 
     received = client.get(f"/players/{p2}/requests", auth=admin_auth).json()
-    assert received[0]["direction"] == "received"
+    assert received[0]["player_id"] == p1
+    assert received[0]["direction"] == "made"  # mutual: recorded on both players
 
     request_id = created.json()["id"]
+    assert created.json()["hard"] is False
+    made_hard = client.put(f"/players/{p1}/requests/{request_id}", json={"hard": True}, auth=admin_auth)
+    assert made_hard.status_code == 200 and made_hard.json()["hard"] is True
+    assert client.put(f"/players/{p1}/requests/{request_id}", json={"hard": False}, auth=readonly_auth).status_code == 403
+
     assert client.delete(f"/players/{p1}/requests/{request_id}", auth=admin_auth).status_code == 204
     assert client.get(f"/players/{p1}/requests", auth=admin_auth).json() == []
     assert client.delete(f"/players/{p1}/requests/{request_id}", auth=admin_auth).status_code == 404

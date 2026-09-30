@@ -218,7 +218,8 @@ CREATE TABLE IF NOT EXISTS coach_children (
 -- Siblings (players.parent_id): a sibling link is a symmetric family
 -- relationship, usually auto-matched from shared contact info, and always
 -- a *hard* placement in auto_draft; a play-with request is entered by
--- hand and treated as a *soft* preference there (honored when it doesn't
+-- hand or from a registration import, and by default treated as a *soft*
+-- preference there (honored when it doesn't
 -- unbalance teams, skipped with a warning otherwise). Shown on both
 -- players' profiles regardless of who made it (see
 -- game_sheet_core.list_player_requests) rather than only the requester's.
@@ -231,6 +232,9 @@ CREATE TABLE IF NOT EXISTS player_requests (
     CHECK (player_id != requested_player_id),
     UNIQUE (player_id, requested_player_id)
 );
+-- Soft (the default) vs. hard: a hard request is placed like a sibling --
+-- always on the same team in auto_draft, balance or not.
+ALTER TABLE player_requests ADD COLUMN IF NOT EXISTS hard BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- A single evaluation of a player for a given division/team.
 CREATE TABLE IF NOT EXISTS evaluations (

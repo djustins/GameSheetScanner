@@ -56,6 +56,7 @@ def test_detect_player_import_columns_handles_a_real_messy_registration_export()
     assert detected["contact_email"] == "User Email"
     assert detected["contact_phone"] == "Telephone"
     assert detected["position"] == "What position does your child prefer?"
+    assert detected["request"] == "Teammate Request"
     # No team-assignment column actually exists in this file (it's a
     # signup list, not a roster) -- must NOT be fooled into matching one of
     # these, both of which genuinely contain the whole word "team".
@@ -206,7 +207,10 @@ def test_apply_creates_player_profile_only_when_no_team_given(conn, division_id)
         conn, division_id, [{"Player Name": "Sidney Crosby", "Date Of Birth": "2016-08-07"}], columns
     )
     result = core.apply_player_import_plan(conn, division_id, plan)
-    assert result == {"created": 1, "updated": 0, "skipped": 0, "rostered": 0, "coached": 0, "warnings": []}
+    assert result == {
+        "created": 1, "updated": 0, "skipped": 0, "rostered": 0, "coached": 0, "requested": 0, "siblings": 0,
+        "warnings": [],
+    }
     players = core.list_players(conn)
     assert len(players) == 1
     assert players[0]["current_division_id"] == division_id
@@ -297,7 +301,10 @@ def test_apply_skips_rows_with_no_resolution(conn, division_id):
     assert plan[0]["status"] == "ambiguous"
 
     result = core.apply_player_import_plan(conn, division_id, plan)  # nobody resolved it
-    assert result == {"created": 0, "updated": 0, "skipped": 1, "rostered": 0, "coached": 0, "warnings": []}
+    assert result == {
+        "created": 0, "updated": 0, "skipped": 1, "rostered": 0, "coached": 0, "requested": 0, "siblings": 0,
+        "warnings": [],
+    }
     # Unchanged -- neither existing candidate touched, no new player created.
     player_ids = {p["id"] for p in core.list_players(conn)}
     assert player_ids == {id1, id2}
@@ -367,3 +374,119 @@ def test_empty_cells_from_pandas_are_treated_as_missing_not_the_string_nan(conn,
     assert result["coached"] == 0
     assert core.list_teams(conn, division_id) == []  # no bogus "Nan" team created
     assert core.list_coaches(conn) == []  # no bogus "nan" coach created
+
+
+def test_detect_player_import_columns_finds_request_column_variants():
+    assert core.detect_player_import_columns(["Player Name", "Requests"])["request"] == "Requests"
+    detected = core.detect_player_import_columns(["Player Name", "Request/Sibling"])
+    assert detected["sibling"] == "Request/Sibling"
+    assert "request" not in detected
+    assert (
+        core.detect_player_import_columns(["Player Name", "Would your child like to play with a teammate?"])["request"]
+        == "Would your child like to play with a teammate?"
+    )
+
+
+def test_parse_request_names_handles_real_registration_free_text():
+    # All verbatim from real registration exports.
+    assert core.parse_request_names("Cole Jones, Kellan Comiskey") == ["Cole Jones", "Kellan Comiskey"]
+    assert core.parse_request_names("Jessica Moore (cousin)") == ["Jessica Moore"]
+    assert core.parse_request_names("Bobby Dobson - uncle/car pool") == ["Bobby Dobson"]
+    assert core.parse_request_names("Elliot Casselberry's Cousin") == ["Elliot Casselberry Cousin"]
+    assert core.parse_request_names("Layla & Killian Graham") == ["Layla", "Killian Graham"]
+    assert core.parse_request_names(None) == []
+
+
+def _import_rows(conn, division_id, rows):
+    columns = core.detect_player_import_columns(list(rows[0]))
+    plan = core.build_player_import_plan(conn, division_id, rows, columns)
+    return core.apply_player_import_plan(conn, division_id, plan)
+
+
+def _player_id(conn, name):
+    return next(p["id"] for p in core.list_players(conn) if p["name"] == name)
+
+
+def test_apply_saves_teammate_requests_even_for_a_player_later_in_the_file(conn, division_id):
+    result = _import_rows(conn, division_id, [
+        {"Player Name": "Sidney Crosby", "Teammate Request": "Cora Krause we live next door"},
+        {"Player Name": "Cora Krause", "Teammate Request": None},
+    ])
+    assert result["requested"] == 1
+    assert result["warnings"] == []
+    requests = core.list_player_requests(conn, _player_id(conn, "Sidney Crosby"))
+    assert [(r["name"], r["direction"], r["note"]) for r in requests] == [
+        ("Cora Krause", "made", "Cora Krause we live next door"),
+    ]
+
+
+def test_apply_saves_each_name_in_a_multi_name_request(conn, division_id):
+    result = _import_rows(conn, division_id, [
+        {"Player Name": "Sidney Crosby", "Requests": "Cole Jones, Kellan Comiskey"},
+        {"Player Name": "Cole Jones", "Requests": None},
+        {"Player Name": "Kellan Comiskey", "Requests": None},
+    ])
+    assert result["requested"] == 2
+    names = {r["name"] for r in core.list_player_requests(conn, _player_id(conn, "Sidney Crosby"))}
+    assert names == {"Cole Jones", "Kellan Comiskey"}
+
+
+def test_apply_warns_on_a_request_it_cant_match_instead_of_guessing(conn, division_id):
+    core.add_player(conn, "Elliot", "Casselberry", current_division_id=division_id)
+    result = _import_rows(conn, division_id, [
+        {"Player Name": "Sidney Crosby", "Teammate Request": "Casselberry"},
+    ])
+    assert result["requested"] == 0
+    assert len(result["warnings"]) == 1
+    assert "Casselberry" in result["warnings"][0]
+    assert core.list_player_requests(conn, _player_id(conn, "Sidney Crosby")) == []
+
+
+def test_apply_prefers_the_same_named_player_registered_in_this_division(conn, division_id):
+    other_division = core.add_division(conn, 2025, "Fall", "Penguin")
+    core.add_player(conn, "Cora", "Krause", current_division_id=other_division)
+    this_cora = core.add_player(conn, "Cora", "Krause", current_division_id=division_id)
+    result = _import_rows(conn, division_id, [{"Player Name": "Sidney Crosby", "Teammate Request": "Cora Krause"}])
+    assert result["requested"] == 1
+    requests = core.list_player_requests(conn, _player_id(conn, "Sidney Crosby"))
+    assert [r["player_id"] for r in requests] == [this_cora]
+
+
+def test_reimporting_the_same_request_does_not_duplicate_it(conn, division_id):
+    rows = [
+        {"Player Name": "Sidney Crosby", "Teammate Request": "Cora Krause"},
+        {"Player Name": "Cora Krause", "Teammate Request": None},
+    ]
+    _import_rows(conn, division_id, rows)
+    second = _import_rows(conn, division_id, rows)
+    assert second["requested"] == 0
+    assert second["warnings"] == []
+    assert len(core.list_player_requests(conn, _player_id(conn, "Sidney Crosby"))) == 1
+
+
+def test_imported_teammate_requests_are_soft(conn, division_id):
+    _import_rows(conn, division_id, [
+        {"Player Name": "Sidney Crosby", "Teammate Request": "Cora Krause"},
+        {"Player Name": "Cora Krause", "Teammate Request": None},
+    ])
+    [request] = core.list_player_requests(conn, _player_id(conn, "Sidney Crosby"))
+    assert request["hard"] is False
+
+
+def test_apply_links_a_siblings_column_as_siblings_not_requests(conn, division_id):
+    result = _import_rows(conn, division_id, [
+        {"Player Name": "Layla Graham", "Request/Sibling": "Killian Graham"},
+        {"Player Name": "Killian Graham", "Request/Sibling": None},
+    ])
+    assert result["siblings"] == 1
+    assert result["requested"] == 0
+    layla = _player_id(conn, "Layla Graham")
+    assert [s["name"] for s in core.list_siblings(conn, layla)] == ["Killian Graham"]
+    assert core.list_player_requests(conn, layla) == []
+
+    # Re-importing (which re-derives parent_id from contact info, blank
+    # here -- see update_player) still leaves them linked.
+    _import_rows(conn, division_id, [
+        {"Player Name": "Layla Graham", "Request/Sibling": "Killian Graham"},
+    ])
+    assert [s["name"] for s in core.list_siblings(conn, layla)] == ["Killian Graham"]

@@ -1,5 +1,19 @@
 import { useState } from 'react'
-import { Badge, Button, Drawer, Group, Loader, Select, Stack, Table, Text, TextInput, Title } from '@mantine/core'
+import {
+  Badge,
+  Button,
+  Drawer,
+  Group,
+  Loader,
+  SegmentedControl,
+  Select,
+  Stack,
+  Switch,
+  Table,
+  Text,
+  TextInput,
+  Title,
+} from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -13,6 +27,7 @@ import {
   listPlayerRequests,
   listPlayers,
   removePlayerRequest,
+  setPlayerRequestHard,
   updatePlayer,
 } from '../api/players'
 import { linkSiblings, listParents, setPlayerParent } from '../api/parents'
@@ -39,6 +54,7 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
   const [siblingPickId, setSiblingPickId] = useState<string | null>(null)
   const [requestPickId, setRequestPickId] = useState<string | null>(null)
   const [requestNote, setRequestNote] = useState('')
+  const [requestStrength, setRequestStrength] = useState<'soft' | 'hard'>('soft')
   const [evalDivisionId, setEvalDivisionId] = useState<string | null>(null)
   const [evalGrade, setEvalGrade] = useState('')
 
@@ -125,12 +141,21 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
   const invalidateRequests = () => queryClient.invalidateQueries({ queryKey: ['player-requests'] })
 
   const addRequestMutation = useMutation({
-    mutationFn: () => addPlayerRequest(player!.id, Number(requestPickId), requestNote.trim()),
+    mutationFn: () =>
+      addPlayerRequest(player!.id, Number(requestPickId), requestNote.trim(), requestStrength === 'hard'),
     onSuccess: () => {
       invalidateRequests()
       setRequestPickId(null)
       setRequestNote('')
+      setRequestStrength('soft')
     },
+    onError,
+  })
+
+  const setRequestHardMutation = useMutation({
+    mutationFn: ({ requestId, hard }: { requestId: number; hard: boolean }) =>
+      setPlayerRequestHard(player!.id, requestId, hard),
+    onSuccess: invalidateRequests,
     onError,
   })
 
@@ -428,8 +453,8 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
               Play-with Requests
             </Title>
             <Text size="xs" c="dimmed" mb="xs">
-              A non-family ask to play with a specific player. Auto Draft honors it when it can without
-              unbalancing teams — unlike siblings, which are always placed together.
+              A non-family ask to play with a specific player. Soft (the default): Auto Draft honors it when it
+              can without unbalancing teams. Hard: always placed together, like siblings.
             </Text>
             {!requests || requests.length === 0 ? (
               <Text size="sm" c="dimmed" mb="xs">
@@ -443,6 +468,12 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
                       {r.direction === 'made' ? `Requested ${r.name}` : `Requested by ${r.name}`}
                       {r.note ? ` — ${r.note}` : ''}
                     </Text>
+                    <Switch
+                      size="xs"
+                      label="Hard"
+                      checked={r.hard}
+                      onChange={(e) => setRequestHardMutation.mutate({ requestId: r.id, hard: e.currentTarget.checked })}
+                    />
                     <Button
                       size="compact-xs"
                       variant="subtle"
@@ -471,6 +502,15 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
                 value={requestNote}
                 onChange={(e) => setRequestNote(e.currentTarget.value)}
                 flex={1}
+              />
+              <SegmentedControl
+                size="xs"
+                value={requestStrength}
+                onChange={(v) => setRequestStrength(v as 'soft' | 'hard')}
+                data={[
+                  { value: 'soft', label: 'Soft' },
+                  { value: 'hard', label: 'Hard' },
+                ]}
               />
               <Button
                 size="xs"

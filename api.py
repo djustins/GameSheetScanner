@@ -825,6 +825,11 @@ def api_link_siblings(
 
 class PlayerRequestCreate(BaseModel):
     note: str | None = None
+    hard: bool = False
+
+
+class PlayerRequestUpdate(BaseModel):
+    hard: bool
 
 
 @app.get("/players/{player_id}/requests", tags=["players"])
@@ -839,12 +844,24 @@ def api_add_player_request(
 ) -> dict:
     """A play-with request for next draft/season -- a deliberate, non-
     family "friend" ask, distinct from siblings (see core.add_player_request
-    for exactly how auto_draft treats it differently: a soft preference,
-    not a hard placement)."""
+    for exactly how auto_draft treats it differently: a soft preference by
+    default, or with hard: true, a placement as firm as a sibling's)."""
     try:
-        request_id = core.add_player_request(conn, player_id, requested_player_id, body.note)
+        request_id = core.add_player_request(conn, player_id, requested_player_id, body.note, body.hard)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return next(r for r in core.list_player_requests(conn, player_id) if r["id"] == request_id)
+
+
+@app.put("/players/{player_id}/requests/{request_id}", tags=["players"])
+def api_update_player_request(
+    player_id: int, request_id: int, body: PlayerRequestUpdate,
+    conn=Depends(get_conn), user=Depends(require_writer),
+) -> dict:
+    """Switch a request between soft and hard -- see core.set_player_request_hard."""
+    if not any(r["id"] == request_id for r in core.list_player_requests(conn, player_id)):
+        not_found("Request not found for this player.")
+    core.set_player_request_hard(conn, request_id, body.hard)
     return next(r for r in core.list_player_requests(conn, player_id) if r["id"] == request_id)
 
 

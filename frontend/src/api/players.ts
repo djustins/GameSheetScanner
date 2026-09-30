@@ -46,10 +46,22 @@ export function listPlayerRequests(playerId: number): Promise<PlayerRequest[]> {
   return apiFetch<PlayerRequest[]>(`/players/${playerId}/requests`)
 }
 
-export function addPlayerRequest(playerId: number, requestedPlayerId: number, note?: string): Promise<PlayerRequest> {
+export function addPlayerRequest(
+  playerId: number,
+  requestedPlayerId: number,
+  note?: string,
+  hard = false,
+): Promise<PlayerRequest> {
   return apiFetch<PlayerRequest>(`/players/${playerId}/requests/${requestedPlayerId}`, {
     method: 'POST',
-    body: JSON.stringify({ note: note || null }),
+    body: JSON.stringify({ note: note || null, hard }),
+  })
+}
+
+export function setPlayerRequestHard(playerId: number, requestId: number, hard: boolean): Promise<PlayerRequest> {
+  return apiFetch<PlayerRequest>(`/players/${playerId}/requests/${requestId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ hard }),
   })
 }
 

@@ -248,3 +248,44 @@ def test_auto_draft_skips_play_with_request_that_would_unbalance_teams(conn, div
     assert len(core.list_roster(conn, team_a)) == 2
     assert len(core.list_roster(conn, team_b)) == 2
     assert any("Delta Test" in w and "Bravo Test" in w for w in result["warnings"])
+
+
+def test_auto_draft_skips_play_with_request_onto_a_much_stronger_team(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    # Wild already has a weak player seated, so after Alpha1 goes to
+    # Avalanche both teams have one player -- equal head count, but
+    # Avalanche is an A ahead of a D.
+    seated = _add_player(conn, division_id, "Seated", "Dee", grade="D")
+    core.add_roster_entry(conn, team_b, "1", "Seated Dee", player_id=seated)
+    a1 = _add_player(conn, division_id, "Alpha1", "Test", grade="A")
+    a2 = _add_player(conn, division_id, "Alpha2", "Test", grade="A")
+    core.add_player_request(conn, a2, a1)
+
+    result = core.auto_draft(conn, division_id)
+    assert {r["player_id"] for r in core.list_roster(conn, team_a)} == {a1}
+    assert {r["player_id"] for r in core.list_roster(conn, team_b)} == {seated, a2}
+    assert any("Alpha1 Test" in w and "Alpha2 Test" in w for w in result["warnings"])
+
+
+def test_auto_draft_always_honors_a_hard_request_even_if_unbalanced(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    a1 = _add_player(conn, division_id, "Alpha1", "Test", grade="A")
+    a2 = _add_player(conn, division_id, "Alpha2", "Test", grade="A")
+    _add_player(conn, division_id, "Delta", "Test", grade="D")
+    core.add_player_request(conn, a2, a1, hard=True)
+
+    result = core.auto_draft(conn, division_id)
+    assert result["warnings"] == []
+    rosters = {t: {r["player_id"] for r in core.list_roster(conn, t)} for t in (team_a, team_b)}
+    assert any({a1, a2} <= ids for ids in rosters.values())
+
+
+def test_set_player_request_hard_toggles_and_defaults_soft(conn, division_id):
+    a = _add_player(conn, division_id, "Alpha", "Test")
+    b = _add_player(conn, division_id, "Bravo", "Test")
+    request_id = core.add_player_request(conn, a, b)
+    assert core.list_player_requests(conn, a)[0]["hard"] is False
+    core.set_player_request_hard(conn, request_id, True)
+    assert core.list_player_requests(conn, a)[0]["hard"] is True

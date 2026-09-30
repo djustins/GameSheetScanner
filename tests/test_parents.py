@@ -129,10 +129,14 @@ def test_player_requests_show_on_both_profiles_and_can_be_removed(conn):
     request_id = core.add_player_request(conn, p1, p2, "best friends")
 
     made = core.list_player_requests(conn, p1)
-    assert made == [{"id": request_id, "player_id": p2, "name": "Wayne Gretzky", "note": "best friends", "direction": "made"}]
-    received = core.list_player_requests(conn, p2)
-    assert received[0]["player_id"] == p1
-    assert received[0]["direction"] == "received"
+    assert made == [{
+        "id": request_id, "player_id": p2, "name": "Wayne Gretzky", "note": "best friends", "hard": False,
+        "direction": "made",
+    }]
+    # Mutual: player 2 gets the same request back to player 1, listed once.
+    assert [(r["player_id"], r["note"], r["direction"]) for r in core.list_player_requests(conn, p2)] == [
+        (p1, "best friends", "made"),
+    ]
 
     core.remove_player_request(conn, request_id)
     assert core.list_player_requests(conn, p1) == []
@@ -154,6 +158,32 @@ def test_add_player_request_rejects_self_and_duplicates(conn):
         assert False, "expected ValueError"
     except ValueError as e:
         assert "already exists" in str(e)
-    # The reverse direction is a distinct request.
-    core.add_player_request(conn, p2, p1)
-    assert len(core.list_player_requests(conn, p1)) == 2
+    # The reverse was recorded automatically (mutual), so it's a duplicate too.
+    try:
+        core.add_player_request(conn, p2, p1)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "already exists" in str(e)
+    assert len(core.list_player_requests(conn, p1)) == 1
+
+
+def test_hard_toggle_and_remove_apply_to_both_sides_of_a_mutual_request(conn):
+    p1 = core.add_player(conn, "Sidney", "Crosby")
+    p2 = core.add_player(conn, "Wayne", "Gretzky")
+    core.add_player_request(conn, p1, p2)
+    reverse_id = core.list_player_requests(conn, p2)[0]["id"]
+
+    core.set_player_request_hard(conn, reverse_id, True)
+    assert core.list_player_requests(conn, p1)[0]["hard"] is True
+    assert core.list_player_requests(conn, p2)[0]["hard"] is True
+
+    core.remove_player_request(conn, reverse_id)
+    assert core.list_player_requests(conn, p1) == []
+    assert core.list_player_requests(conn, p2) == []
+
+
+def test_one_way_request_from_before_mutual_still_shows_on_both(conn):
+    p1 = core.add_player(conn, "Sidney", "Crosby")
+    p2 = core.add_player(conn, "Wayne", "Gretzky")
+    conn.execute("INSERT INTO player_requests (player_id, requested_player_id) VALUES (%s, %s)", (p1, p2))
+    assert core.list_player_requests(conn, p2)[0]["direction"] == "received"

@@ -2179,15 +2179,16 @@ def link_players_as_siblings(conn: PGConnection, player_id_a: int, player_id_b: 
 
 
 def add_player_request(
-    conn: PGConnection, player_id: int, requested_player_id: int, note: str | None = None
+    conn: PGConnection, player_id: int, requested_player_id: int, note: str | None = None, hard: bool = False
 ) -> int:
     """Record player_id's request to play with requested_player_id next
     draft/season -- see the player_requests table comment for how this
-    differs from Siblings. Raises ValueError if they're the same player,
-    either doesn't exist, or this exact request already exists (the
-    reverse direction is a distinct, allowed request -- see
-    list_player_requests, which surfaces either direction on both
-    profiles anyway)."""
+    differs from Siblings. Soft unless `hard` (see set_player_request_hard).
+    Also records the reverse request (requested_player_id -> player_id,
+    same note and hard/soft) unless that one's already on file, so the
+    pair shows as each player's own request. Raises ValueError if they're
+    the same player, either doesn't exist, or this exact request already
+    exists. Returns the forward request's id."""
     if player_id == requested_player_id:
         raise ValueError("A player can't send a play-with request to themselves.")
     if get_player(conn, player_id) is None or get_player(conn, requested_player_id) is None:
@@ -2199,16 +2200,39 @@ def add_player_request(
     if existing:
         raise ValueError("That request already exists.")
     cur = conn.execute(
-        "INSERT INTO player_requests (player_id, requested_player_id, note) VALUES (%s, %s, %s) RETURNING id",
-        (player_id, requested_player_id, note),
+        "INSERT INTO player_requests (player_id, requested_player_id, note, hard) "
+        "VALUES (%s, %s, %s, %s) RETURNING id",
+        (player_id, requested_player_id, note, hard),
     )
     request_id = cur.fetchone()[0]
+    conn.execute(
+        "INSERT INTO player_requests (player_id, requested_player_id, note, hard) "
+        "VALUES (%s, %s, %s, %s) ON CONFLICT (player_id, requested_player_id) DO NOTHING",
+        (requested_player_id, player_id, note, hard),
+    )
     conn.commit()
     return request_id
 
 
+# A request and its reverse (see add_player_request) are one pair: switching
+# or removing either one applies to both.
+_REQUEST_PAIR_WHERE = """(id = %s OR (player_id, requested_player_id) IN (
+    SELECT requested_player_id, player_id FROM player_requests WHERE id = %s))"""
+
+
+def set_player_request_hard(conn: PGConnection, request_id: int, hard: bool):
+    """Switch a play-with request (and its reverse) between soft
+    (auto_draft honors it only while teams stay balanced) and hard (always
+    placed together, like siblings)."""
+    conn.execute(
+        f"UPDATE player_requests SET hard = %s WHERE {_REQUEST_PAIR_WHERE}", (hard, request_id, request_id)
+    )
+    conn.commit()
+
+
 def remove_player_request(conn: PGConnection, request_id: int):
-    conn.execute("DELETE FROM player_requests WHERE id = %s", (request_id,))
+    """Removes a play-with request and its reverse."""
+    conn.execute(f"DELETE FROM player_requests WHERE {_REQUEST_PAIR_WHERE}", (request_id, request_id))
     conn.commit()
 
 
@@ -2218,10 +2242,11 @@ def list_player_requests(conn: PGConnection, player_id: int) -> list[dict]:
     profile alike (unlike a plain one-directional log) -- but as a direct
     pairwise edge (player_requests), not a shared-group relationship the
     way Siblings is. Each entry: {id, player_id (the *other* player),
-    name, note, direction: "made" if this player sent the request,
-    "received" if the other player did}."""
+    name, note, hard, direction: "made" if this player sent the request,
+    "received" if the other player did}. A pair recorded both ways (see
+    add_player_request) is listed once, as "made"."""
     rows = conn.execute(
-        """SELECT pr.id, pr.note, pr.player_id, pr.requested_player_id,
+        """SELECT pr.id, pr.note, pr.hard, pr.player_id, pr.requested_player_id,
                   p1.first_name, p1.last_name, p2.first_name, p2.last_name
            FROM player_requests pr
            JOIN players p1 ON p1.id = pr.player_id
@@ -2231,15 +2256,17 @@ def list_player_requests(conn: PGConnection, player_id: int) -> list[dict]:
         (player_id, player_id),
     ).fetchall()
     results = []
-    for req_id, note, made_by, made_to, f1, l1, f2, l2 in rows:
+    for req_id, note, hard, made_by, made_to, f1, l1, f2, l2 in rows:
         if made_by == player_id:
             other_id, other_name, direction = made_to, full_name(f2, l2), "made"
         else:
             other_id, other_name, direction = made_by, full_name(f1, l1), "received"
         results.append({
-            "id": req_id, "player_id": other_id, "name": other_name, "note": note, "direction": direction,
+            "id": req_id, "player_id": other_id, "name": other_name, "note": note, "hard": hard,
+            "direction": direction,
         })
-    return results
+    made_to_ids = {r["player_id"] for r in results if r["direction"] == "made"}
+    return [r for r in results if r["direction"] == "made" or r["player_id"] not in made_to_ids]
 
 
 def backfill_player_parents(conn: PGConnection) -> int:
@@ -2912,6 +2939,10 @@ def find_coach_children_in_division(conn: PGConnection, coach_id: int, division_
 
 _AUTO_DRAFT_TIER_RANK = {"A": 0, "B": 1, "C": 2}  # anything else (D, or ungraded/"New") shares tier 3
 _AUTO_DRAFT_TIER_SKILL = {0: 4, 1: 3, 2: 2, 3: 1}  # numeric skill value per tier, for balancing totals
+# How far (in the skill points above) a requested teammate's team may
+# already be ahead of the weakest team for a play-with request to still be
+# honored -- two grade steps, e.g. an A-led team vs. a C-led one.
+_AUTO_DRAFT_REQUEST_SKILL_SLACK = 2
 
 
 def _birth_year(birth_date: str | None) -> int | None:
@@ -2969,9 +3000,10 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     Hard placements, resolved before the balanced pass so it treats them
     as already-seated when sizing up how full each team is:
       - Siblings (players sharing a parent, see the parents table) always
-        land on the same team. If a sibling already has a team in this
-        division from outside this run, the rest of the group is forced
-        onto that team.
+        land on the same team. So do both sides of a *hard* play-with
+        request (player_requests.hard). If a player so linked already has a
+        team in this division from outside this run, the rest of the group
+        is forced onto that team.
       - A coach's own registered child (coach_children) is forced onto
         whichever team that coach already coaches in this division.
     Coach-follows-kid: a coach who does *not* yet coach a team in this
@@ -2985,8 +3017,10 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     as even as possible across teams. Soft placement, tried only for a unit
     with no hard placement above and skipped (with a warning) if it can't
     be honored without leaving a team more than one player ahead of the
-    least-loaded one:
-      - A play-with request (see player_requests / list_player_requests) —
+    least-loaded one, or landing on a team already more than
+    _AUTO_DRAFT_REQUEST_SKILL_SLACK skill points ahead of the weakest:
+      - A soft (the default) play-with request (see player_requests /
+        list_player_requests) —
         unlike a sibling, a deliberate but non-family "friend" ask — lands
         its unit on a requested unit's team if that unit was already
         placed earlier in this pass.
@@ -3049,16 +3083,43 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         ).fetchall()
     }
 
-    # One "unit" per pool player, merging in any pool siblings (an
-    # already-rostered sibling pins the unit's team but isn't itself
+    pool_ids = list(pool_by_id)
+
+    # Hard links -- siblings, plus hard play-with requests -- joined
+    # transitively (union-find), so a sibling of a hard-requested friend
+    # comes along too.
+    link_root: dict[int, int] = {}
+
+    def find(pid: int) -> int:
+        while link_root.get(pid, pid) != pid:
+            pid = link_root[pid]
+        return pid
+
+    def union(pid_a: int, pid_b: int):
+        link_root[find(pid_b)] = find(pid_a)
+
+    for sibling_ids in siblings_by_parent.values():
+        for pid in sibling_ids[1:]:
+            union(sibling_ids[0], pid)
+    for pid_a, pid_b in conn.execute(
+        "SELECT player_id, requested_player_id FROM player_requests "
+        "WHERE hard AND (player_id = ANY(%s) OR requested_player_id = ANY(%s))",
+        (pool_ids, pool_ids),
+    ).fetchall():
+        union(pid_a, pid_b)
+    linked_group: dict[int, list[int]] = {}
+    for pid in set(link_root) | set(link_root.values()):
+        linked_group.setdefault(find(pid), []).append(pid)
+
+    # One "unit" per pool player, merging in any hard-linked pool players
+    # (an already-rostered one pins the unit's team but isn't itself
     # re-assigned — it's already seated).
     units = []
     seen: set[int] = set()
     for player_id in pool_by_id:
         if player_id in seen:
             continue
-        parent_id = parent_of.get(player_id)
-        group = siblings_by_parent.get(parent_id, [player_id]) if parent_id else [player_id]
+        group = linked_group.get(find(player_id), [player_id])
         pool_member_ids = [pid for pid in group if pid in pool_by_id]
         pinned_team_id = next(
             (existing_team_by_player[pid] for pid in group if pid in existing_team_by_player), None
@@ -3066,22 +3127,21 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         seen.update(pool_member_ids)
         units.append({"idx": len(units), "player_ids": pool_member_ids, "pinned_team_id": pinned_team_id})
 
-    # Play-with requests (see player_requests / list_player_requests) are a
-    # *soft* preference, unlike a sibling's hard placement above: only
-    # meaningful when both sides of a request are in this pool, and honored
-    # on placement below only if it doesn't leave a team more than one
-    # player ahead of the current least-loaded one -- an unresolved one
-    # just gets a warning rather than blocking the draft.
-    pool_ids = list(pool_by_id)
+    # Soft play-with requests (see player_requests / list_player_requests)
+    # are a preference, unlike the hard links above: only meaningful when
+    # both sides of a request are in this pool, and honored on placement
+    # below only if it keeps teams balanced -- an unresolved one just gets
+    # a warning rather than blocking the draft.
     unit_of_player = {pid: u["idx"] for u in units for pid in u["player_ids"]}
-    request_pairs = [
-        (r[0], r[1]) for r in conn.execute(
+    # A request and its reverse are one pair (see add_player_request).
+    request_pairs = sorted({
+        (min(r[0], r[1]), max(r[0], r[1])) for r in conn.execute(
             "SELECT player_id, requested_player_id FROM player_requests "
             "WHERE player_id = ANY(%s) AND requested_player_id = ANY(%s)",
             (pool_ids, pool_ids),
         ).fetchall()
         if unit_of_player[r[0]] != unit_of_player[r[1]]  # already together (e.g. also siblings)
-    ]
+    })
     requested_units: dict[int, set[int]] = {}
     for pid_a, pid_b in request_pairs:
         requested_units.setdefault(unit_of_player[pid_a], set()).add(unit_of_player[pid_b])
@@ -3118,12 +3178,20 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     for unit in pinned_units + open_units:
         requested_team_id = None
         if unit["pinned_team_id"] is None:
-            # Only redirect to a team that's currently among the least-loaded,
-            # so placing this unit there leaves it at most one unit ahead.
+            # Only redirect to a team that's currently among the least-loaded
+            # (so placing this unit there leaves it at most one unit ahead)
+            # and not already stronger than the weakest team by more than
+            # _AUTO_DRAFT_REQUEST_SKILL_SLACK -- balanced by rank, not just
+            # by head count.
             min_size = min(team_size.values())
+            min_skill = min(team_skill.values())
             for other_idx in requested_units.get(unit["idx"], ()):
-                if other_idx in team_of_unit and team_size[team_of_unit[other_idx]] == min_size:
-                    requested_team_id = team_of_unit[other_idx]
+                other_team_id = team_of_unit.get(other_idx)
+                if (
+                    other_team_id is not None and team_size[other_team_id] == min_size
+                    and team_skill[other_team_id] - min_skill <= _AUTO_DRAFT_REQUEST_SKILL_SLACK
+                ):
+                    requested_team_id = other_team_id
                     break
         team_id = (
             unit["pinned_team_id"] or requested_team_id
@@ -3155,7 +3223,7 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
         if assignments.get(pid_a) != assignments.get(pid_b):
             warnings.append(
                 f"Could not honor play-with request between {pool_by_id[pid_a]['name']} and "
-                f"{pool_by_id[pid_b]['name']} — teams were already balanced."
+                f"{pool_by_id[pid_b]['name']} — it would have unbalanced the teams."
             )
 
     # Coach-follows-kid: a coach with no team yet in this division whose
@@ -3212,6 +3280,11 @@ PLAYER_IMPORT_FIELDS: dict[str, list[str]] = {
     "number": ["number", "jersey", "jersey #", "jersey number", "#"],
     "position": ["position"],
     "coach": ["coach", "coach name"],
+    "request": [
+        "teammate request", "teammate requests", "request", "requests",
+        "draft request", "draft requests", "play with", "play-with request",
+    ],
+    "sibling": ["sibling", "siblings", "request/sibling", "request/siblings", "sibling request"],
 }
 
 # A header that doesn't exactly match any alias above falls back to a
@@ -3238,6 +3311,8 @@ PLAYER_IMPORT_CONTAINS_FALLBACK: dict[str, list[str]] = {
     "number": ["jersey number", "jersey"],
     "position": ["position"],
     "coach": ["coach"],
+    "sibling": ["sibling", "siblings"],
+    "request": ["teammate request", "teammate", "request", "play with"],
 }
 
 # A header naming a first/last name field is ambiguous on its own --
@@ -3361,6 +3436,11 @@ def build_player_import_plan(conn: PGConnection, division_id: int, rows: list[di
       "team_name", "number", "position", "coach_name": also parsed, used by
         apply_player_import_plan() for roster/coach assignment — None if
         the file has no such column, or this row left it blank
+      "request_text": the registration's free-text teammate/draft request,
+        verbatim -- turned into soft play-with requests by
+        apply_player_import_plan() (see _resolve_import_names)
+      "sibling_text": likewise for a "Siblings"/"Request/Sibling" column --
+        each name found is linked as this player's sibling
       "status": "invalid" (no name — skipped, never applied), "create" (no
         matching existing player), "update" (a single confident match),
         "ambiguous" (2+ same-name candidates that birth_date couldn't tell
@@ -3410,6 +3490,8 @@ def build_player_import_plan(conn: PGConnection, division_id: int, rows: list[di
             "number": _import_cell(row, columns, "number"),
             "position": _import_cell(row, columns, "position"),
             "coach_name": _import_cell(row, columns, "coach"),
+            "request_text": _import_cell(row, columns, "request"),
+            "sibling_text": _import_cell(row, columns, "sibling"),
         }
 
         if not name:
@@ -3463,6 +3545,111 @@ def build_player_import_plan(conn: PGConnection, division_id: int, rows: list[di
     return plan
 
 
+# A registration's teammate request is free text typed by a parent, e.g.
+# "Cora Krause we live next door", "Jessica Moore (cousin)", "Cole Jones,
+# Kellan Comiskey", "Bobby Dobson - uncle/car pool". Split into one piece
+# per requested name on commas/semicolons/"&"/"and"/" / "; each piece then
+# drops a trailing " - comment".
+_REQUEST_SPLIT_RE = re.compile(r"[,;&\n]|\s/\s|\band\b", re.IGNORECASE)
+
+
+def parse_request_names(text: str | None) -> list[str]:
+    """The name-bearing pieces of a free-text teammate request, parenthetical
+    asides and possessives ("Elliot Casselberry's Cousin") removed. Each
+    piece may still carry trailing words ("... we live next door") --
+    _match_requested_players looks for a player's name *within* it."""
+    if not text:
+        return []
+    text = re.sub(r"\([^)]*\)", " ", text)
+    pieces = []
+    for piece in _REQUEST_SPLIT_RE.split(text):
+        piece = re.split(r"\s[-–—]\s", piece, maxsplit=1)[0]
+        piece = re.sub(r"['’]s\b", "", piece)
+        piece = " ".join(piece.split())
+        if piece:
+            pieces.append(piece)
+    return pieces
+
+
+def _normalize_person_name(name: str) -> str:
+    return " ".join(name.lower().split())
+
+
+def _match_requested_players(piece: str, players_by_name: dict[str, list[dict]]) -> list[dict]:
+    """Every player whose full name appears as consecutive words in this
+    request piece -- longest name first, so "Mary Ann Smith" wins over a
+    "Mary Ann" -- or [] if none does. Only a whole first+last name counts:
+    a last name alone ("Casselberry") or a nickname ("Bobby" for Robert)
+    is too much of a guess to link automatically."""
+    words = _normalize_person_name(piece).split()
+    for length in range(min(len(words), 4), 1, -1):
+        for start in range(len(words) - length + 1):
+            matches = players_by_name.get(" ".join(words[start:start + length]))
+            if matches:
+                return matches
+    return []
+
+
+def _import_request(conn: PGConnection, player_id: int, other_id: int, text: str) -> bool:
+    """A registration's teammate request becomes a *soft* play-with
+    request, the raw text kept as its note so context like "we live next
+    door" isn't lost. False if it's already on file (a re-import)."""
+    try:
+        add_player_request(conn, player_id, other_id, text)
+    except ValueError:
+        return False
+    return True
+
+
+def _import_sibling(conn: PGConnection, player_id: int, other_id: int, text: str) -> bool:
+    """A registration's sibling entry links the two as siblings (a shared
+    parent). False if they already are."""
+    parent_id = get_player(conn, player_id)["parent_id"]
+    if parent_id is not None and parent_id == get_player(conn, other_id)["parent_id"]:
+        return False
+    link_players_as_siblings(conn, player_id, other_id)
+    return True
+
+
+def _resolve_import_names(
+    conn: PGConnection, division_id: int, linkers: list[tuple[dict, int]], text_field: str, what: str, link,
+) -> tuple[int, list[str]]:
+    """For each imported (row, player_id), finds the players named in the
+    row's free-text `text_field` and calls link(conn, player_id,
+    other_id, text) for each, which returns whether it made a new link.
+    Runs after every row is written, so a name appearing later in the same
+    file still resolves. A name matching more than one player prefers the
+    one registered in this division; anything still ambiguous or unmatched
+    is left for a human (returned as a warning) rather than guessed at.
+
+    Returns (links made, warnings)."""
+    players_by_name: dict[str, list[dict]] = {}
+    for p in list_players(conn):
+        players_by_name.setdefault(_normalize_person_name(p["name"]), []).append(p)
+
+    added = 0
+    warnings: list[str] = []
+    for entry, player_id in linkers:
+        text = entry.get(text_field)
+        where = f"Row {entry['row_number']} ({entry['name']})"
+        for piece in parse_request_names(text):
+            matches = [m for m in _match_requested_players(piece, players_by_name) if m["id"] != player_id]
+            in_division = [m for m in matches if m["current_division_id"] == division_id]
+            if len(in_division) == 1 or len(matches) == 1:
+                if link(conn, player_id, (in_division or matches)[0]["id"], text):
+                    added += 1
+            elif matches:
+                warnings.append(
+                    f"{where}: {what} \"{piece}\" matches more than one player — add it from their profile."
+                )
+            else:
+                warnings.append(
+                    f"{where}: couldn't match {what} \"{piece}\" to a player — "
+                    "add it from their profile if it names one."
+                )
+    return added, warnings
+
+
 def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[dict]) -> dict:
     """Write a plan built by build_player_import_plan() (with every
     "ambiguous"/"conflict" row's "resolved_action" filled in by the UI) to
@@ -3481,6 +3668,7 @@ def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[di
     this division."""
     created = updated = skipped = rostered = coached = 0
     warnings: list[str] = []
+    linkers: list[tuple[dict, int]] = []
 
     for entry in plan:
         action = entry["resolved_action"]
@@ -3508,6 +3696,9 @@ def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[di
         else:
             skipped += 1
             continue
+
+        if entry.get("request_text") or entry.get("sibling_text"):
+            linkers.append((entry, player_id))
 
         team_name = entry["team_name"]
         if not team_name:
@@ -3548,9 +3739,17 @@ def apply_player_import_plan(conn: PGConnection, division_id: int, plan: list[di
             except ValueError as e:
                 warnings.append(f"Row {entry['row_number']} ({entry['name']}): {e}")
 
+    siblings, sibling_warnings = _resolve_import_names(
+        conn, division_id, linkers, "sibling_text", "sibling", _import_sibling
+    )
+    requested, request_warnings = _resolve_import_names(
+        conn, division_id, linkers, "request_text", "teammate request", _import_request
+    )
+    warnings.extend(sibling_warnings + request_warnings)
+
     return {
-        "created": created, "updated": updated, "skipped": skipped,
-        "rostered": rostered, "coached": coached, "warnings": warnings,
+        "created": created, "updated": updated, "skipped": skipped, "rostered": rostered,
+        "coached": coached, "requested": requested, "siblings": siblings, "warnings": warnings,
     }
 
 
@@ -3978,6 +4177,10 @@ def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
         ).fetchall():
             requests_by_player.setdefault(made_by, []).append(f"-> {full_name(f2, l2)}")
             requests_by_player.setdefault(made_to, []).append(f"<- {full_name(f1, l1)}")
+        # A pair recorded both ways (see add_player_request) shows once, as "->".
+        for player_id, entries in requests_by_player.items():
+            made = {e[3:] for e in entries if e.startswith("-> ")}
+            requests_by_player[player_id] = [e for e in entries if e.startswith("-> ") or e[3:] not in made]
 
     table = []
     for team_id, team, number, name, player_id, birth_date in rows:

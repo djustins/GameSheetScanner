@@ -62,7 +62,9 @@ export function ImportPlayersPanel({ divisionId }: { divisionId: number }) {
           name — using birth date too, when given, to tell same-named players apart or flag a possible
           mismatch — and creates new profiles otherwise. A Team column also assigns each player to that
           team&apos;s roster (with a jersey number, if given); a Coach column assigns that coach to the team
-          too.
+          too. A Teammate Request column is saved as soft play-with requests (Auto-Draft honors them when teams
+          stay balanced; switch any to hard on the player&apos;s profile), and a Siblings (or Request/Sibling)
+          column links the named players as siblings.
         </Text>
         <Group>
           <FileButton resetRef={resetRef} onChange={handleFile} accept=".csv,.xlsx,.xls,.ods">
@@ -76,7 +78,8 @@ export function ImportPlayersPanel({ divisionId }: { divisionId: number }) {
         {result && (
           <Alert color="green" title="Import complete">
             Created {result.created}, updated {result.updated}, added to a roster {result.rostered}, assigned{' '}
-            {result.coached} coach(es), skipped {result.skipped}.
+            {result.coached} coach(es), saved {result.requested} teammate request(s), linked {result.siblings}{' '}
+            sibling(s), skipped {result.skipped}.
             {result.warnings.map((w, i) => (
               <Text size="sm" key={i}>
                 ⚠️ {w}

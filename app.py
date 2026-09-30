@@ -1334,7 +1334,8 @@ def render_draft_live(conn, draft_division_id: int):
             with st.expander("🤖 Auto-Draft", expanded=True):
                 st.caption(
                     "Assigns everyone currently in the pool at once, balanced by rank and roster size, "
-                    "keeping siblings together and seating a coach's own registered child with their "
+                    "keeping siblings and hard play-with requests together, honoring soft requests "
+                    "when teams stay balanced, and seating a coach's own registered child with their "
                     "team. Running this again undoes the previous auto-draft first, so re-drafting from "
                     "scratch is just clicking it again."
                 )
@@ -1750,17 +1751,24 @@ def render_player_panel(
 
     with st.expander("🤝 Play-with Requests"):
         st.caption(
-            "A non-family ask to play with a specific player. Auto Draft honors it when it can without "
-            "unbalancing teams — unlike siblings, which are always placed together."
+            "A non-family ask to play with a specific player. **Soft** (the default): Auto Draft honors "
+            "it when it can without unbalancing teams. **Hard**: always placed together, like siblings."
         )
         requests = core.list_player_requests(conn, player_id)
         if not requests:
             st.caption("No play-with requests on file.")
         for req in requests:
-            rcol1, rcol2 = st.columns([4, 1])
+            rcol1, rcol2, rcol3 = st.columns([4, 1, 1])
             label = f"Requested **{req['name']}**" if req["direction"] == "made" else f"Requested by **{req['name']}**"
             rcol1.write(label + (f" — {req['note']}" if req["note"] else ""))
-            if rcol2.button("Remove", key=f"{key_prefix}_rm_request_{req['id']}", disabled=is_read_only):
+            hard = rcol2.toggle(
+                "Hard", value=req["hard"], key=f"{key_prefix}_hard_request_{req['id']}", disabled=is_read_only,
+                help="On: always placed on the same team. Off (soft): only if teams stay balanced.",
+            )
+            if hard != req["hard"]:
+                core.set_player_request_hard(conn, req["id"], hard)
+                st.rerun()
+            if rcol3.button("Remove", key=f"{key_prefix}_rm_request_{req['id']}", disabled=is_read_only):
                 core.remove_player_request(conn, req["id"])
                 st.rerun()
 
@@ -1768,7 +1776,7 @@ def render_player_panel(
             p["id"]: p["name"] for p in core.list_players(conn) if p["id"] != player_id
         }
         if request_options:
-            qcol1, qcol2, qcol3 = st.columns([3, 2, 1])
+            qcol1, qcol2, qcol3, qcol4 = st.columns([3, 2, 1, 1])
             with qcol1:
                 pick_request_id = st.selectbox(
                     "Request to play with", options=list(request_options),
@@ -1780,13 +1788,21 @@ def render_player_panel(
                     "Note (optional)", key=f"{key_prefix}_request_note_{player_id}", disabled=is_read_only
                 )
             with qcol3:
+                request_strength = st.radio(
+                    "Type", ["Soft", "Hard"], key=f"{key_prefix}_request_strength_{player_id}",
+                    disabled=is_read_only,
+                )
+            with qcol4:
                 st.write("")
                 if st.button(
                     "Add", key=f"{key_prefix}_add_request_{player_id}",
                     disabled=is_read_only or pick_request_id is None,
                 ):
                     try:
-                        core.add_player_request(conn, player_id, pick_request_id, request_note.strip() or None)
+                        core.add_player_request(
+                            conn, player_id, pick_request_id, request_note.strip() or None,
+                            hard=request_strength == "Hard",
+                        )
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -2803,6 +2819,13 @@ def render_divisions_dialog():
                             if counts.get("invalid"):
                                 summary_bits.append(f"{counts['invalid']} skipped (no name)")
                             st.info(f"{len(plan)} row(s) in file: {', '.join(summary_bits)}.")
+                            with_requests = sum(1 for e in plan if e.get("request_text"))
+                            if with_requests:
+                                st.caption(
+                                    f"{with_requests} row(s) have a teammate request — saved as soft "
+                                    "play-with requests (switch any to hard on the player's profile). Any "
+                                    "name that can't be matched to a player is listed after import."
+                                )
 
                             needs_review = [e for e in plan if e["status"] in ("ambiguous", "conflict")]
                             if needs_review:
@@ -2868,7 +2891,9 @@ def render_divisions_dialog():
                                     msg = (
                                         f"Created {result['created']}, updated {result['updated']}, "
                                         f"added to a roster {result['rostered']}, assigned "
-                                        f"{result['coached']} coach(es), skipped {result['skipped']}."
+                                        f"{result['coached']} coach(es), saved {result['requested']} "
+                                        f"teammate request(s), linked {result['siblings']} sibling(s), "
+                                        f"skipped {result['skipped']}."
                                     )
                                     for w in result["warnings"]:
                                         msg += f"\n- ⚠️ {w}"

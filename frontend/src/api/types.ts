@@ -330,6 +330,7 @@ export interface PlayerRequest {
   player_id: number
   name: string
   note: string | null
+  hard: boolean
   direction: 'made' | 'received'
 }
 
@@ -353,6 +354,8 @@ export interface PlayerImportEntry {
   number: string | null
   position: string | null
   coach_name: string | null
+  request_text: string | null
+  sibling_text: string | null
   status: 'invalid' | 'create' | 'update' | 'ambiguous' | 'conflict'
   matched_player_id: number | null
   candidates: PlayerImportCandidate[]
@@ -372,5 +375,7 @@ export interface PlayerImportResult {
   skipped: number
   rostered: number
   coached: number
+  requested: number
+  siblings: number
   warnings: string[]
 }

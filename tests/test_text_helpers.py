@@ -65,3 +65,23 @@ def test_normalize_date_falls_back_to_original_for_unrecognized_text():
 def test_normalize_date_passes_through_none_and_empty():
     assert core.normalize_date(None) is None
     assert core.normalize_date("") == ""
+
+
+def test_average_age_is_exact_to_the_day():
+    from datetime import date
+    as_of = date(2026, 9, 30)
+    assert core.average_age(["2017-05-18"], as_of) == (9, 4, 12)
+    assert core.average_age(["2017-09-30"], as_of) == (9, 0, 0)
+    assert core.average_age(["2017-10-01"], as_of) == (8, 11, 29)
+    # Average of two birth dates 10 days apart is the midpoint.
+    assert core.average_age(["2017-05-13", "2017-05-23"], as_of) == (9, 4, 12)
+    # A 31st birthday counts from the last day of a shorter month.
+    assert core.average_age(["2016-01-31"], date(2026, 3, 1)) == (10, 1, 1)
+
+
+def test_average_age_skips_missing_dates_and_formats():
+    from datetime import date
+    assert core.average_age([None, "", "2017-05-18"], date(2026, 9, 30)) == (9, 4, 12)
+    assert core.average_age([None, ""]) is None
+    assert core.format_age((9, 4, 12)) == "9y 4m 12d"
+    assert core.format_age(None) == "—"

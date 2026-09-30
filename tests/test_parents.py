@@ -187,3 +187,28 @@ def test_one_way_request_from_before_mutual_still_shows_on_both(conn):
     p2 = core.add_player(conn, "Wayne", "Gretzky")
     conn.execute("INSERT INTO player_requests (player_id, requested_player_id) VALUES (%s, %s)", (p1, p2))
     assert core.list_player_requests(conn, p2)[0]["direction"] == "received"
+
+
+def test_list_division_requests_lists_each_mutual_pair_once_with_teams(conn, division_id):
+    other_division = core.add_division(conn, 2026, "Fall", "Beaver")
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    sid = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    wayne = core.add_player(conn, "Wayne", "Gretzky", current_division_id=division_id)
+    mario = core.add_player(conn, "Mario", "Lemieux", current_division_id=other_division)
+    core.add_roster_entry(conn, team_id, "87", "Sidney Crosby", player_id=sid)
+    core.add_player_request(conn, wayne, sid, "carpool", hard=True)
+    core.add_player_request(conn, mario, sid)
+
+    rows = core.list_division_requests(conn, division_id)
+    assert [(r["name"], r["other_name"]) for r in rows] == [
+        ("Sidney Crosby", "Mario Lemieux"),  # in-division player listed first
+        ("Sidney Crosby", "Wayne Gretzky"),
+    ]
+    mario_row, wayne_row = rows
+    assert mario_row["other_in_division"] is False
+    assert wayne_row == {
+        "id": wayne_row["id"], "player_id": sid, "name": "Sidney Crosby", "team": "Avalanche",
+        "other_player_id": wayne, "other_name": "Wayne Gretzky", "other_team": None,
+        "other_in_division": True, "hard": True, "note": "carpool",
+    }
+    assert core.list_division_requests(conn, other_division)[0]["name"] == "Mario Lemieux"

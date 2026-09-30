@@ -3406,6 +3406,7 @@ TEAMS_SUBPAGES = {
     "🧑 Players": "teams",
     "👥 Team Rosters": "rosters",
     "📝 Evals": "teams",
+    "🤝 Requests": "teams",
     "🎯 Draft": "draft",
 }
 
@@ -4365,6 +4366,62 @@ with tab_teams_group:
                             width="stretch", hide_index=True,
                         )
 
+    elif teams_subpage == "🤝 Requests":
+        if "teams" not in visible_pages:
+            st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
+        elif working_division_id is None:
+            st.warning("No division selected. Add one in the Divisions button first.")
+        else:
+            st.header("Requests")
+            st.caption(
+                "Every play-with request involving a player in the Working Division, one row per pair. "
+                "**Soft**: Auto-Draft keeps them together when teams stay balanced. **Hard**: always "
+                "together, like siblings. To change or remove one, open either player's page."
+            )
+            division_requests = core.list_division_requests(conn, working_division_id)
+
+            def request_status(r: dict) -> str:
+                if not r["other_in_division"]:
+                    return "Other division"
+                if not r["team"] or not r["other_team"]:
+                    return "Not drafted"
+                return "✅ Together" if r["team"] == r["other_team"] else "❌ Split"
+
+            rcol1, rcol2 = st.columns(2)
+            request_type_filter = rcol1.selectbox("Type", ["All", "Hard", "Soft"], key="requests_type_filter")
+            request_status_filter = rcol2.selectbox(
+                "Status", ["All", "✅ Together", "❌ Split", "Not drafted", "Other division"],
+                key="requests_status_filter",
+            )
+            shown_requests = [
+                r for r in division_requests
+                if (request_type_filter == "All" or r["hard"] == (request_type_filter == "Hard"))
+                and (request_status_filter == "All" or request_status(r) == request_status_filter)
+            ]
+            if not shown_requests:
+                st.write("No play-with requests match." if division_requests else "No play-with requests yet.")
+            else:
+                statuses = [request_status(r) for r in shown_requests]
+                st.caption(
+                    f"{len(shown_requests)} pair(s) · {sum(r['hard'] for r in shown_requests)} hard · "
+                    + ", ".join(
+                        f"{s}: {statuses.count(s)}"
+                        for s in ("✅ Together", "❌ Split", "Not drafted", "Other division") if s in statuses
+                    )
+                )
+                st.dataframe(
+                    zebra_style(pd.DataFrame([
+                        {
+                            "Player": r["name"], "Team": r["team"] or "—",
+                            "Plays with": r["other_name"], "Their team": r["other_team"] or "—",
+                            "Type": "Hard" if r["hard"] else "Soft", "Status": request_status(r),
+                            "Note": r["note"] or "",
+                        }
+                        for r in shown_requests
+                    ])),
+                    width="stretch", hide_index=True,
+                )
+
     elif teams_subpage == "🎯 Draft":
         if "draft" not in visible_pages:
             st.info("You don't have access to this page. Ask an admin to grant it in User Management.")
@@ -4405,7 +4462,7 @@ with tab_teams_group:
             st.header("Teams")
             st.caption(
                 "Every team in a division at a glance: coach(es), roster size, how many are graded (with "
-                "an average rating and A/B/C/D breakdown), and its record so far."
+                "an average rating and A/B/C/D breakdown), average age, and its record so far."
             )
 
             teams_divisions = core.list_divisions(conn)
@@ -4447,20 +4504,23 @@ with tab_teams_group:
                         s["team"]: s for s in core.get_standings(conn, teams_division_id)
                     }
 
-                    col_widths = [1.6, 0.8, 2.1, 1.6, 1.1, 2.2, 1.8, 1.2]
-                    head1, head2, head3, head4, head5, head6, head7, head8 = st.columns(col_widths)
+                    birth_date_by_player = {p["id"]: p["birth_date"] for p in core.list_players(conn)}
+
+                    col_widths = [1.6, 0.8, 2.1, 1.6, 1.1, 2.2, 1.4, 1.8, 1.2]
+                    head1, head2, head3, head4, head5, head6, head9, head7, head8 = st.columns(col_widths)
                     head1.markdown("**Team**")
                     head2.markdown("**Color**")
                     head3.markdown("**Coach(es)**")
                     head4.markdown("**Players**")
                     head5.markdown("**Avg**")
                     head6.markdown("**Breakdown**")
+                    head9.markdown("**Avg Age**", help="Average age today, to the day (years, months, days).")
                     head7.markdown("**Record (W-L-OTW-OTL)**")
                     head8.markdown("**PTS · GF-GA**")
 
                     for team_idx, t in enumerate(all_division_teams):
                         with highlighted_row(None, row_key=f"teams_tab_row_{t['id']}", index=team_idx):
-                            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(col_widths)
+                            c1, c2, c3, c4, c5, c6, c9, c7, c8 = st.columns(col_widths)
                             c1.write(t["name"])
                             team_standing = standings_by_team.get(core.normalize_text(t["name"]))
                             if team_standing:
@@ -4487,7 +4547,18 @@ with tab_teams_group:
                                 c4.write("No players yet")
                                 c5.write("—")
                                 c6.write("—")
+                                c9.write("—")
                                 continue
+
+                            roster_birth_dates = [
+                                birth_date_by_player.get(e["player_id"]) for e in roster if e["player_id"]
+                            ]
+                            dated_count = sum(1 for b in roster_birth_dates if b)
+                            c9.write(
+                                core.format_age(core.average_age(roster_birth_dates))
+                                + (f" ({dated_count}/{len(roster_birth_dates)})"
+                                   if 0 < dated_count < len(roster_birth_dates) else "")
+                            )
 
                             tiered_grades = []
                             other_age_group_count = 0

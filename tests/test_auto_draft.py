@@ -289,3 +289,34 @@ def test_set_player_request_hard_toggles_and_defaults_soft(conn, division_id):
     assert core.list_player_requests(conn, a)[0]["hard"] is False
     core.set_player_request_hard(conn, request_id, True)
     assert core.list_player_requests(conn, a)[0]["hard"] is True
+
+
+def _first_pick_team(conn, team_a, team_b, player_id):
+    """With 2 teams and an empty draft, the first player placed lands on
+    the lower-id team (team_a) -- a way to observe draft order."""
+    return player_id in {r["player_id"] for r in core.list_roster(conn, team_a)}
+
+
+def test_auto_draft_ranks_older_ahead_of_younger_within_a_grade(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    young = _add_player(conn, division_id, "Young", "B", grade="B", birth_date="2017-12-01")
+    old = _add_player(conn, division_id, "Old", "B", grade="B", birth_date="2017-02-01")  # same year, older
+
+    core.auto_draft(conn, division_id)
+    assert _first_pick_team(conn, team_a, team_b, old)
+    assert not _first_pick_team(conn, team_a, team_b, young)
+
+
+def test_auto_draft_grades_a_player_moving_up_age_groups_as_new(conn, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    younger_division = core.add_division(conn, 2025, "Fall", "Chipmunk")  # this division is Penguin
+    moving_up = _add_player(conn, division_id, "Moving", "Up", birth_date="2016-01-01")
+    core.add_evaluation(conn, moving_up, younger_division, None, "A")
+    d_player = _add_player(conn, division_id, "Dee", "Player", grade="D", birth_date="2015-01-01")
+
+    core.auto_draft(conn, division_id)
+    # Ranked as New (tied with D), so the older D player goes first.
+    assert _first_pick_team(conn, team_a, team_b, d_player)
+    assert not _first_pick_team(conn, team_a, team_b, moving_up)

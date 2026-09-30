@@ -20,7 +20,7 @@ import json
 import mimetypes
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -120,6 +120,38 @@ def normalize_text(s: str | None) -> str | None:
 
 
 _MC_PREFIX_RE = re.compile(r"\bMc([a-z])")
+
+
+def average_age(birth_dates: list[str | None], as_of: date | None = None) -> tuple[int, int, int] | None:
+    """Average age of the people with these (ISO) birth dates, as of
+    `as_of` (default today), to the day: (years, months, days) from their
+    average birth date. Blank or unparseable dates are left out; None if
+    none are usable."""
+    ordinals = []
+    for birth_date in birth_dates:
+        try:
+            ordinals.append(date.fromisoformat(normalize_date(birth_date) or "").toordinal())
+        except ValueError:
+            continue
+    if not ordinals:
+        return None
+    born = date.fromordinal(round(sum(ordinals) / len(ordinals)))
+    as_of = as_of or date.today()
+    months = (as_of.year - born.year) * 12 + as_of.month - born.month
+    if as_of.day < born.day:
+        months -= 1
+    # Day count from the last "monthly birthday" on or before as_of; a birth
+    # day past the end of that month (e.g. the 31st) falls on its last day.
+    anchor_year, anchor_month = divmod(born.year * 12 + born.month - 1 + months, 12)
+    anchor_month += 1
+    last_day = (date(anchor_year + anchor_month // 12, anchor_month % 12 + 1, 1) - timedelta(days=1)).day
+    anchor = date(anchor_year, anchor_month, min(born.day, last_day))
+    return months // 12, months % 12, (as_of - anchor).days
+
+
+def format_age(age: tuple[int, int, int] | None) -> str:
+    """An average_age result as shown, e.g. "9y 4m 12d"."""
+    return "—" if age is None else f"{age[0]}y {age[1]}m {age[2]}d"
 
 
 def display_text(s: str | None) -> str | None:
@@ -2945,13 +2977,6 @@ _AUTO_DRAFT_TIER_SKILL = {0: 4, 1: 3, 2: 2, 3: 1}  # numeric skill value per tie
 _AUTO_DRAFT_REQUEST_SKILL_SLACK = 2
 
 
-def _birth_year(birth_date: str | None) -> int | None:
-    if not birth_date:
-        return None
-    match = re.search(r"(19|20)\d{2}", birth_date)
-    return int(match.group()) if match else None
-
-
 def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
     """The division's auto-draft run still available to undo — None once
     undone (undo_auto_draft deletes the row) or if auto_draft has never
@@ -2994,8 +3019,9 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     division's pool (see draft_pool) onto its teams in a single pass.
 
     Ranking: A > B > C > (D and ungraded/"New" players, treated as tied
-    with each other, tie-broken by birth year — an older "New" player
-    ranks above a D player rather than New always sorting last).
+    with each other). A grade from a different age group — a player moving
+    up — counts as New. Within each grade, older (by birth date) always
+    ranks above younger, so an older "New" player ranks above a younger D.
 
     Hard placements, resolved before the balanced pass so it treats them
     as already-seated when sizing up how full each team is:
@@ -3044,27 +3070,28 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     pool_by_id = {p["id"]: p for p in pool}
     # Latest available grade: this division's, else the player's most
     # recent from an earlier one -- so a returning player isn't ranked as
-    # "New" just because they haven't been re-evaluated yet.
-    grades = get_latest_grades(conn, division_id, list(pool_by_id))
+    # "New" just because they haven't been re-evaluated yet. A grade from a
+    # different age group (a player moving up) doesn't carry over: they
+    # rank as New/D until evaluated in this age group.
+    grade_info = get_latest_grades_with_source(conn, division_id, list(pool_by_id))
 
     def tier_rank_of(player_id: int) -> int:
-        tier = (grades.get(player_id) or "").strip().upper()
-        return _AUTO_DRAFT_TIER_RANK.get(tier, 3)
+        info = grade_info.get(player_id)
+        if not info or not info["same_age_group"]:
+            return 3
+        return _AUTO_DRAFT_TIER_RANK.get((info["grade"] or "").strip().upper(), 3)
 
     def skill_of(player_id: int) -> int:
         return _AUTO_DRAFT_TIER_SKILL[tier_rank_of(player_id)]
 
-    def draft_order_key(player_id: int) -> tuple[int, int]:
-        """Lower sorts first (drafted sooner). Only within tier 3 (D and
-        ungraded/"New", deliberately tied with each other) does birth year
-        break the tie — older (smaller year) first — per an older "New"
-        player outranking a D player; A/B/C players don't need it since
-        they're already separated by tier."""
-        tier_rank = tier_rank_of(player_id)
-        if tier_rank != 3:
-            return (tier_rank, 0)
-        birth_year = _birth_year(pool_by_id[player_id]["birth_date"])
-        return (tier_rank, birth_year if birth_year is not None else 9999)
+    def draft_order_key(player_id: int) -> tuple[int, str]:
+        """Lower sorts first (drafted sooner): by grade tier, then within
+        a tier, older (earlier birth date) always ahead of younger. No
+        birth date on file sorts last in its tier."""
+        birth_date = normalize_date(pool_by_id[player_id]["birth_date"])
+        if not (birth_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", birth_date)):
+            birth_date = "9999-99-99"
+        return (tier_rank_of(player_id), birth_date)
 
     division_players = conn.execute(
         "SELECT id, parent_id FROM players WHERE current_division_id = %s AND deleted_at IS NULL", (division_id,)
@@ -3796,6 +3823,52 @@ def list_division_evaluations(conn: PGConnection, division_id: int) -> list[dict
         }
         for r in rows
     ]
+
+
+def list_division_requests(conn: PGConnection, division_id: int) -> list[dict]:
+    """Every play-with request touching a player registered in this
+    division, one row per pair (a mutual request's two directions -- see
+    add_player_request -- are listed once). Each row: {id, player_id,
+    name, team, other_player_id, other_name, other_team, other_in_division,
+    hard, note}, where "player" is always the one in this division (the
+    alphabetically first when both are) and team is their team here, or
+    None if not yet rostered. Sorted by name. Deleted players are left
+    out."""
+    rows = conn.execute(
+        """SELECT pr.id, pr.hard, pr.note,
+                  p1.id, p1.first_name, p1.last_name, p1.current_division_id = %s,
+                  p2.id, p2.first_name, p2.last_name, p2.current_division_id = %s
+           FROM player_requests pr
+           JOIN players p1 ON p1.id = pr.player_id AND p1.deleted_at IS NULL
+           JOIN players p2 ON p2.id = pr.requested_player_id AND p2.deleted_at IS NULL
+           WHERE p1.current_division_id = %s OR p2.current_division_id = %s
+           ORDER BY pr.created_at, pr.id""",
+        (division_id, division_id, division_id, division_id),
+    ).fetchall()
+    team_of = {
+        r[0]: display_text(r[1]) for r in conn.execute(
+            """SELECT re.player_id, t.name FROM roster_entries re
+               JOIN teams t ON t.id = re.team_id
+               WHERE t.division_id = %s AND re.player_id IS NOT NULL""",
+            (division_id,),
+        ).fetchall()
+    }
+
+    pairs: dict[frozenset, dict] = {}
+    for req_id, hard, note, id1, f1, l1, in_div1, id2, f2, l2, in_div2 in rows:
+        key = frozenset((id1, id2))
+        if key in pairs:
+            continue
+        a = (id1, full_name(f1, l1), bool(in_div1))
+        b = (id2, full_name(f2, l2), bool(in_div2))
+        if not a[2] or (b[2] and b[1].lower() < a[1].lower()):
+            a, b = b, a
+        pairs[key] = {
+            "id": req_id, "player_id": a[0], "name": a[1], "team": team_of.get(a[0]),
+            "other_player_id": b[0], "other_name": b[1], "other_team": team_of.get(b[0]),
+            "other_in_division": b[2], "hard": hard, "note": note,
+        }
+    return sorted(pairs.values(), key=lambda r: (r["name"].lower(), r["other_name"].lower()))
 
 
 def list_evaluations(conn: PGConnection, player_id: int) -> list[dict]:

@@ -1982,6 +1982,130 @@ def move_player_to_team(
     conn.commit()
 
 
+def team_balance(conn: PGConnection, division_id: int, moves: dict[int, int] | None = None) -> dict[int, dict]:
+    """Each of the division's teams as it stands -- or as it would with
+    `moves` (player_id -> new team_id) applied: {name, players, skill (the
+    auto-draft points: A 4, B 3, C 2, D/New 1), avg_skill, goalies,
+    avg_age (see average_age), player_ids}."""
+    moves = moves or {}
+    teams = list_teams(conn, division_id)
+    rostered = conn.execute(
+        """SELECT re.player_id, re.team_id, p.birth_date FROM roster_entries re
+           JOIN teams t ON t.id = re.team_id JOIN players p ON p.id = re.player_id
+           WHERE t.division_id = %s AND re.player_id IS NOT NULL""",
+        (division_id,),
+    ).fetchall()
+    grades = get_latest_grades_with_source(conn, division_id, [r[0] for r in rostered])
+    goalie_ids = {
+        r[0] for r in conn.execute(
+            """SELECT player_id, position FROM player_positions WHERE division_id = %s
+               UNION ALL SELECT player_id, position FROM player_divisions WHERE division_id = %s""",
+            (division_id, division_id),
+        ).fetchall() if is_goalie(r[1])
+    }
+    balance = {
+        t["id"]: {"name": t["name"], "player_ids": [], "birth_dates": [], "skill": 0, "goalies": 0} for t in teams
+    }
+    for player_id, team_id, birth_date in rostered:
+        team = balance.get(moves.get(player_id, team_id))
+        if team is None:
+            continue
+        team["player_ids"].append(player_id)
+        team["birth_dates"].append(birth_date)
+        team["skill"] += _AUTO_DRAFT_TIER_SKILL[_draft_tier_rank(grades.get(player_id))]
+        team["goalies"] += player_id in goalie_ids
+    for team in balance.values():
+        team["players"] = len(team["player_ids"])
+        team["avg_skill"] = round(team["skill"] / team["players"], 2) if team["players"] else None
+        team["avg_age"] = average_age(team.pop("birth_dates"))
+    return balance
+
+
+def trade_effects(conn: PGConnection, division_id: int, moves: dict[int, int]) -> list[dict]:
+    """Play-with requests and sibling pairs (both rostered in this division)
+    whose together/apart status the moves would change: [{name, other_name,
+    kind ("sibling" / "hard" / "soft"), joined (True: now together,
+    False: now split)}]. Siblings and hard requests being split are what
+    trade_players refuses unless told to split anyway."""
+    team_of = dict(conn.execute(
+        """SELECT re.player_id, re.team_id FROM roster_entries re JOIN teams t ON t.id = re.team_id
+           WHERE t.division_id = %s AND re.player_id IS NOT NULL""",
+        (division_id,),
+    ).fetchall())
+    after = {**team_of, **moves}
+    names = {p["id"]: p["name"] for p in list_players(conn) if p["id"] in team_of}
+    pairs: dict[frozenset, str] = {}
+    for a, b, hard in conn.execute(
+        "SELECT player_id, requested_player_id, hard FROM player_requests WHERE player_id = ANY(%s)",
+        (list(team_of),),
+    ).fetchall():
+        if b in team_of:
+            pairs[frozenset((a, b))] = "hard" if hard else "soft"
+    by_parent: dict[int, list[int]] = {}
+    for player_id, parent_id in conn.execute(
+        "SELECT id, parent_id FROM players WHERE id = ANY(%s) AND parent_id IS NOT NULL", (list(team_of),)
+    ).fetchall():
+        by_parent.setdefault(parent_id, []).append(player_id)
+    for kids in by_parent.values():
+        for i, a in enumerate(kids):
+            for b in kids[i + 1:]:
+                pairs[frozenset((a, b))] = "sibling"
+    effects = []
+    for pair, kind in pairs.items():
+        a, b = sorted(pair)
+        before, now = team_of[a] == team_of[b], after[a] == after[b]
+        if before != now:
+            effects.append({"name": names[a], "other_name": names[b], "kind": kind, "joined": now})
+    return sorted(effects, key=lambda e: (e["joined"], e["kind"] != "sibling", e["kind"] != "hard", e["name"]))
+
+
+def trade_players(
+    conn: PGConnection, division_id: int, team_a: int, from_a: list[int], team_b: int, from_b: list[int],
+    note: str | None = None, allow_split: bool = False,
+) -> None:
+    """Swaps players between two teams in one division in one step:
+    everyone in from_a (on team_a) goes to team_b and everyone in from_b
+    (on team_b) goes to team_a -- either side may be empty, for a one-way
+    transfer. Each move is logged (see move_player_to_team) with a note
+    naming the whole trade plus any reason given. Raises ValueError for
+    anything off (a player not on the team named, a team outside the
+    division), or if it would split siblings or a hard request, unless
+    allow_split."""
+    if team_a == team_b:
+        raise ValueError("Pick two different teams.")
+    if not from_a and not from_b:
+        raise ValueError("Pick at least one player to trade.")
+    team_names = {t["id"]: t["name"] for t in list_teams(conn, division_id)}
+    if team_a not in team_names or team_b not in team_names:
+        raise ValueError("Both teams must be in this division.")
+    team_of = dict(conn.execute(
+        """SELECT re.player_id, re.team_id FROM roster_entries re JOIN teams t ON t.id = re.team_id
+           WHERE t.division_id = %s AND re.player_id IS NOT NULL""",
+        (division_id,),
+    ).fetchall())
+    for player_ids, team_id in ((from_a, team_a), (from_b, team_b)):
+        for player_id in player_ids:
+            if team_of.get(player_id) != team_id:
+                raise ValueError(f"{get_player(conn, player_id)['name']} isn't on {team_names[team_id]}.")
+    moves = {**{p: team_b for p in from_a}, **{p: team_a for p in from_b}}
+    splits = [
+        e for e in trade_effects(conn, division_id, moves) if not e["joined"] and e["kind"] in ("sibling", "hard")
+    ]
+    if splits and not allow_split:
+        raise ValueError(
+            "This trade splits " + "; ".join(f"{e['name']} and {e['other_name']} ({e['kind']})" for e in splits)
+            + " — include them in the trade, or split them anyway."
+        )
+    names = {p["id"]: p["name"] for p in list_players(conn) if p["id"] in moves}
+    summary = (
+        f"Trade {team_names[team_a]} ↔ {team_names[team_b]}: "
+        f"{', '.join(names[p] for p in from_a) or 'nobody'} for {', '.join(names[p] for p in from_b) or 'nobody'}"
+    )
+    full_note = summary + (f" — {note.strip()}" if note and note.strip() else "")
+    for player_id, new_team_id in moves.items():
+        move_player_to_team(conn, player_id, division_id, new_team_id, note=full_note)
+
+
 def list_player_move_notes(conn: PGConnection, player_id: int, division_id: int | None = None) -> list[dict]:
     """This player's recorded move reasons, newest first — admin-only in
     the UI (see move_player_to_team). Optionally scoped to one division."""

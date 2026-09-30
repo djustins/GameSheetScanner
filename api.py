@@ -1135,6 +1135,44 @@ def api_delete_draft(draft_id: int, conn=Depends(get_conn), user=Depends(require
     core.delete_draft(conn, draft_id)
 
 
+class TradeBody(BaseModel):
+    team_a: int
+    from_a: list[int] = []
+    team_b: int
+    from_b: list[int] = []
+    note: str | None = None
+    allow_split: bool = False
+
+
+@app.post("/divisions/{division_id}/trade/preview", tags=["draft"])
+def api_preview_trade(
+    division_id: int, body: TradeBody, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> dict:
+    """Both teams' balance now and after the trade, plus the requests and
+    sibling pairs it would join or split -- see core.team_balance /
+    core.trade_effects. Changes nothing."""
+    moves = {**{p: body.team_b for p in body.from_a}, **{p: body.team_a for p in body.from_b}}
+    now, after = core.team_balance(conn, division_id), core.team_balance(conn, division_id, moves)
+    return {
+        "now": {t: now[t] for t in (body.team_a, body.team_b) if t in now},
+        "after": {t: after[t] for t in (body.team_a, body.team_b) if t in after},
+        "effects": core.trade_effects(conn, division_id, moves),
+    }
+
+
+@app.post("/divisions/{division_id}/trade", status_code=status.HTTP_204_NO_CONTENT, tags=["draft"])
+def api_trade(division_id: int, body: TradeBody, conn=Depends(get_conn), user=Depends(require_writer)):
+    """Swap players between two teams -- see core.trade_players. 409 if
+    it would split siblings or a hard request without allow_split."""
+    try:
+        core.trade_players(
+            conn, division_id, body.team_a, body.from_a, body.team_b, body.from_b,
+            note=body.note if user["is_admin"] else None, allow_split=body.allow_split,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
 @app.post("/divisions/{division_id}/auto-draft", tags=["draft"])
 def api_auto_draft(division_id: int, conn=Depends(get_conn), user=Depends(require_writer)) -> dict:
     try:

@@ -1302,6 +1302,99 @@ def render_coach_panel(
 
 
 @st.fragment(run_every="5s")
+def render_trade_panel(conn, division_id: int, teams: list[dict]):
+    """Trade players between two of the division's teams in one step, with
+    a before/after look at both teams' balance and every play-with request
+    or sibling pair the trade would join or split."""
+    if len(teams) < 2:
+        return
+    with st.expander("🔁 Trade players between teams"):
+        team_names = {t["id"]: t["name"] for t in teams}
+        rosters = {t["id"]: [e for e in core.list_roster(conn, t["id"]) if e["player_id"]] for t in teams}
+        grades = core.get_latest_grades_with_source(
+            conn, division_id, [e["player_id"] for r in rosters.values() for e in r]
+        )
+        balance_now = core.team_balance(conn, division_id)
+
+        def player_label(entry: dict) -> str:
+            grade = core.grade_display(grades.get(entry["player_id"])) or "—"
+            return f"{entry['name']} ({grade})"
+
+        tcol1, tcol2 = st.columns(2)
+        team_ids = list(team_names)
+        team_a = tcol1.selectbox(
+            "Team", team_ids, format_func=lambda i: team_names[i], key=f"trade_team_a_{division_id}"
+        )
+        team_b = tcol2.selectbox(
+            "Trades with", [t for t in team_ids if t != team_a], format_func=lambda i: team_names[i],
+            key=f"trade_team_b_{division_id}_{team_a}",
+        )
+        options_a = {e["player_id"]: player_label(e) for e in rosters[team_a]}
+        options_b = {e["player_id"]: player_label(e) for e in rosters[team_b]}
+        from_a = tcol1.multiselect(
+            f"From {team_names[team_a]}", list(options_a), format_func=lambda i: options_a[i],
+            key=f"trade_from_a_{division_id}_{team_a}",
+        )
+        from_b = tcol2.multiselect(
+            f"From {team_names[team_b]}", list(options_b), format_func=lambda i: options_b[i],
+            key=f"trade_from_b_{division_id}_{team_b}",
+        )
+        if not from_a and not from_b:
+            st.caption("Pick the player(s) going each way — one side can be empty for a one-way transfer.")
+            return
+
+        moves = {**{p: team_b for p in from_a}, **{p: team_a for p in from_b}}
+        balance_after = core.team_balance(conn, division_id, moves)
+        st.dataframe(
+            zebra_style(pd.DataFrame([
+                {
+                    "Team": team_names[t], "": label,
+                    "Players": b[t]["players"], "Skill": b[t]["skill"], "Avg skill": b[t]["avg_skill"],
+                    "Goalies": b[t]["goalies"], "Avg age": core.format_age(b[t]["avg_age"]),
+                }
+                for t in (team_a, team_b) for label, b in (("Now", balance_now), ("After", balance_after))
+            ])),
+            width="stretch", hide_index=True,
+        )
+        others_skill = [b["avg_skill"] for t, b in balance_now.items() if t not in (team_a, team_b) and b["avg_skill"]]
+        if others_skill:
+            st.caption(f"Other teams' average skill: {min(others_skill)}–{max(others_skill)}.")
+
+        effects = core.trade_effects(conn, division_id, moves)
+        blocking = [e for e in effects if not e["joined"] and e["kind"] in ("sibling", "hard")]
+        if effects:
+            st.markdown("**Requests & siblings this trade changes**")
+            for e in effects:
+                icon = "✅ joins" if e["joined"] else ("⛔ splits" if e in blocking else "❌ splits")
+                st.write(f"- {icon} {e['name']} & {e['other_name']} ({e['kind']})")
+        else:
+            st.caption("No play-with requests or siblings are joined or split by this trade.")
+
+        trade_note = (
+            st.text_input("Reason (admin only)", key=f"trade_note_{division_id}") if user["is_admin"] else None
+        )
+        split_anyway = False
+        if blocking:
+            split_anyway = st.checkbox(
+                "Split them anyway", key=f"trade_split_anyway_{division_id}",
+                help="Siblings and hard requests are normally kept together.",
+            )
+        if st.button(
+            "Confirm trade", key=f"trade_confirm_{division_id}", type="primary",
+            disabled=is_read_only or (bool(blocking) and not split_anyway),
+        ):
+            try:
+                core.trade_players(
+                    conn, division_id, team_a, from_a, team_b, from_b, note=trade_note, allow_split=split_anyway,
+                )
+                st.toast(f"Traded between {team_names[team_a]} and {team_names[team_b]}.")
+                for key in (f"trade_from_a_{division_id}_{team_a}", f"trade_from_b_{division_id}_{team_b}"):
+                    st.session_state.pop(key, None)
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+
 def render_auto_draft_results(conn, division_id: int):
     """The division's current auto-draft as a table -- a per-team summary,
     then every player it placed -- plus the warnings from that run. Shown
@@ -1352,6 +1445,7 @@ def render_auto_draft_results(conn, division_id: int):
         ])),
         width="stretch", hide_index=True,
     )
+    render_trade_panel(conn, division_id, core.list_teams(conn, division_id))
 
 
 def render_draft_notes(conn, division_id: int):
@@ -4250,6 +4344,7 @@ with tab_teams_group:
                 if not teams:
                     st.write("No teams yet in this division — process a game sheet, or add one above.")
                 else:
+                    render_trade_panel(conn, working_division_id, teams)
                     team_options = {t["id"]: t["name"] for t in teams}
                     roster_coaches_by_team = core.list_team_coaches_for_division(conn, working_division_id)
                     team_select_labels = {t["id"]: team_label_with_coaches(t, roster_coaches_by_team) for t in teams}

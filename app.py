@@ -4866,24 +4866,18 @@ with tab_teams_group:
                             if weighted:
                                 avg = sum(GRADE_VALUES[g] for g in weighted) / len(weighted)
                                 c5.write(f"**{avg:.1f}**/{max(GRADE_VALUES.values())}")
+                                # Move-ups go last: they're weighted below this age
+                                # group's own grades (as a D).
                                 breakdown = ", ".join(
-                                    part
-                                    for tier in GRADE_TIERS
-                                    for part in (
-                                        f"{tier}: {own_grades.count(tier)}" if tier in own_grades else None,
-                                        f"{tier}\\*: {move_up_grades.count(tier)}" if tier in move_up_grades else None,
-                                    )
-                                    if part
+                                    [f"{tier}: {own_grades.count(tier)}" for tier in GRADE_TIERS if tier in own_grades]
+                                    + [f"{tier}\\*: {move_up_grades.count(tier)}"
+                                       for tier in GRADE_TIERS if tier in move_up_grades]
                                 )
                             else:
                                 c5.write("—")
                                 breakdown = "—"
                             team_goalies = goalies_by_team.get(t["id"], 0)
-                            c6.write(
-                                breakdown + "  \n"
-                                + (f"🥅 {team_goalies} goalie" + ("s" if team_goalies > 1 else "")
-                                   if team_goalies else "⚠️ **No goalie**")
-                            )
+                            c6.write(breakdown + ("" if team_goalies else "  \n⚠️ **No goalie**"))
 
 
 # ---------------------------------------------------------------------------

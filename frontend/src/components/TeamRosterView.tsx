@@ -33,12 +33,15 @@ function PositionCell({ playerId, divisionId, teamId }: { playerId: number; divi
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ['position', playerId, divisionId, teamId] }),
   })
+  // No position set on this team yet: show the one they registered with (e.g.
+  // a registered goalie reads as Goalie right after the draft).
+  const shown = data?.position || data?.registered || ''
   return (
     <Select
       size="xs"
-      data={POSITION_OPTIONS.map((p) => ({ value: p, label: p || '—' }))}
-      value={data?.position ?? ''}
-      onChange={(v) => v != null && mutation.mutate(v)}
+      data={[...new Set([...POSITION_OPTIONS, shown])].map((p) => ({ value: p, label: p || '—' }))}
+      value={shown}
+      onChange={(v) => v != null && v !== shown && mutation.mutate(v)}
       allowDeselect={false}
     />
   )

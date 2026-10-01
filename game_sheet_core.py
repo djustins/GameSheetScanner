@@ -2037,6 +2037,43 @@ def team_balance(conn: PGConnection, division_id: int, moves: dict[int, int] | N
     return balance
 
 
+def teams_overview(conn: PGConnection, division_id: int) -> list[dict]:
+    """The Teams page's per-team summary, for any client: {team_id, name,
+    color, coaches, players, graded, grades (this age group's own A-D
+    counts), move_up_grades (A*-D* counts -- grades from a different age
+    group), average (A 4 ... D 1, a move-up weighted as a D), goalies,
+    avg_age ([years, months, days] or None)}."""
+    teams = list_teams(conn, division_id)
+    coaches = list_team_coaches_for_division(conn, division_id)
+    rosters = {t["id"]: [e for e in list_roster(conn, t["id"])] for t in teams}
+    player_ids = [e["player_id"] for r in rosters.values() for e in r if e["player_id"]]
+    grades = get_latest_grades_with_source(conn, division_id, player_ids)
+    balance = team_balance(conn, division_id)
+    values = {"A": 4, "B": 3, "C": 2, "D": 1}
+    result = []
+    for t in teams:
+        own: dict[str, int] = {}
+        move_up: dict[str, int] = {}
+        for e in rosters[t["id"]]:
+            info = grades.get(e["player_id"]) if e["player_id"] else None
+            grade = ((info or {}).get("grade") or "").strip().upper()
+            if grade in values:
+                bucket = own if info["same_age_group"] else move_up
+                bucket[grade] = bucket.get(grade, 0) + 1
+        weighted = [values[g] for g, n in own.items() for _ in range(n)] + [1] * sum(move_up.values())
+        b = balance.get(t["id"], {})
+        result.append({
+            "team_id": t["id"], "name": t["name"], "color": t.get("color"),
+            "coaches": [c["name"] for c in coaches.get(t["id"], [])],
+            "players": len(rosters[t["id"]]), "graded": len(weighted),
+            "grades": own, "move_up_grades": move_up,
+            "average": round(sum(weighted) / len(weighted), 2) if weighted else None,
+            "goalies": b.get("goalies", 0),
+            "avg_age": list(b["avg_age"]) if b.get("avg_age") else None,
+        })
+    return result
+
+
 def trade_effects(conn: PGConnection, division_id: int, moves: dict[int, int]) -> list[dict]:
     """Play-with requests and sibling pairs (both rostered in this division)
     whose together/apart status the moves would change: [{name, other_name,

@@ -953,3 +953,42 @@ def test_hide_contact_role_gets_contacts_redacted_and_cannot_overwrite_them(conn
 
     # Admins still see everything.
     assert client.get(f"/players/{player_id}", auth=admin_auth).json()["contact_phone"] == "412-555-0100"
+
+
+def test_react_parity_endpoints(conn, admin_auth, division_id):
+    team_a = core.add_team(conn, division_id, "Avalanche")
+    team_b = core.add_team(conn, division_id, "Wild")
+    goalie = core.add_player(conn, "Marc", "Fleury", current_division_id=division_id)
+    skater = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.set_registration_position(conn, goalie, division_id, "Goalie")
+    core.add_evaluation(conn, skater, division_id, None, "A")
+    core.add_player_request(conn, skater, goalie)
+
+    reqs = client.get(f"/divisions/{division_id}/requests", auth=admin_auth).json()
+    assert len(reqs) == 1 and reqs[0]["avoid"] is False
+
+    auto = client.post(f"/divisions/{division_id}/auto-draft", auth=admin_auth)
+    assert auto.status_code == 200
+    results = client.get(f"/divisions/{division_id}/draft/auto-draft-results", auth=admin_auth).json()
+    assert {r["name"] for r in results["rows"]} == {"Marc Fleury", "Sidney Crosby"}
+    assert results["run"]["warnings"] == auto.json()["warnings"]
+
+    overview = {t["name"]: t for t in client.get(f"/divisions/{division_id}/teams-overview", auth=admin_auth).json()}
+    assert set(overview) == {"Avalanche", "Wild"}
+    assert sum(t["goalies"] for t in overview.values()) == 1
+    assert sum(t["grades"].get("A", 0) for t in overview.values()) == 1
+
+    assert client.get(f"/divisions/{division_id}/draft/notes", auth=admin_auth).json() == {"notes": ""}
+    saved = client.put(f"/divisions/{division_id}/draft/notes", json={"notes": "hello"}, auth=admin_auth)
+    assert saved.json() == {"notes": "hello"}
+    assert client.get(f"/divisions/{division_id}/draft/notes", auth=admin_auth).json() == {"notes": "hello"}
+
+    regs = client.get(f"/players/{goalie}/registrations", auth=admin_auth).json()
+    assert regs == [{"division_id": division_id, "position": "Goalie", "main": True}]
+    client.put(f"/players/{goalie}/divisions/{division_id}/position", json={"position": "Forward"}, auth=admin_auth)
+    goalie_team = next(r["team_id"] for r in results["rows"] if r["player_id"] == goalie)
+    pos = client.get(
+        f"/players/{goalie}/position?division_id={division_id}&team_id={goalie_team}", auth=admin_auth
+    ).json()
+    assert pos == {"position": None, "registered": "Forward"}
+    assert team_a and team_b

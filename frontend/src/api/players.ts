@@ -1,5 +1,12 @@
 import { apiFetch } from './client'
-import type { Evaluation, Player, PlayerHistoryEntry, PlayerMoveNote, PlayerRequest } from './types'
+import type {
+  Evaluation,
+  Player,
+  PlayerHistoryEntry,
+  PlayerMoveNote,
+  PlayerRegistration,
+  PlayerRequest,
+} from './types'
 
 export function listPlayers(includeDeleted = false): Promise<Player[]> {
   return apiFetch<Player[]>(`/players?include_deleted=${includeDeleted}`)
@@ -74,7 +81,11 @@ export function getMoveNotes(playerId: number, divisionId: number): Promise<Play
   return apiFetch<PlayerMoveNote[]>(`/players/${playerId}/move-notes?division_id=${divisionId}`)
 }
 
-export function getPosition(playerId: number, divisionId: number, teamId: number): Promise<{ position: string | null }> {
+export function getPosition(
+  playerId: number,
+  divisionId: number,
+  teamId: number,
+): Promise<{ position: string | null; registered: string | null }> {
   return apiFetch(`/players/${playerId}/position?division_id=${divisionId}&team_id=${teamId}`)
 }
 
@@ -109,4 +120,27 @@ export function addEvaluation(
 
 export function deleteEvaluation(playerId: number, evaluationId: number): Promise<void> {
   return apiFetch<void>(`/players/${playerId}/evaluations/${evaluationId}`, { method: 'DELETE' })
+}
+
+export function listPlayerRegistrations(playerId: number): Promise<PlayerRegistration[]> {
+  return apiFetch<PlayerRegistration[]>(`/players/${playerId}/registrations`)
+}
+
+export function registerPlayerInDivision(playerId: number, divisionId: number): Promise<Player> {
+  return apiFetch<Player>(`/players/${playerId}/divisions/${divisionId}`, { method: 'PUT' })
+}
+
+export function unregisterPlayerFromDivision(playerId: number, divisionId: number): Promise<Player> {
+  return apiFetch<Player>(`/players/${playerId}/divisions/${divisionId}`, { method: 'DELETE' })
+}
+
+export function setRegistrationPosition(
+  playerId: number,
+  divisionId: number,
+  position: string | null,
+): Promise<{ division_id: number; position: string | null }> {
+  return apiFetch(`/players/${playerId}/divisions/${divisionId}/position`, {
+    method: 'PUT',
+    body: JSON.stringify({ position }),
+  })
 }

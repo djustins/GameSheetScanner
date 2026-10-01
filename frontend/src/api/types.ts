@@ -384,3 +384,96 @@ export interface PlayerImportResult {
   siblings: number
   warnings: string[]
 }
+
+// One play-with / do-not-play-with pair in a division (GET /divisions/{id}/requests).
+export interface DivisionRequest {
+  id: number
+  player_id: number
+  name: string
+  team: string | null
+  other_player_id: number
+  other_name: string
+  other_team: string | null
+  other_in_division: boolean
+  hard: boolean
+  avoid: boolean
+  note: string | null
+}
+
+// [years, months, days]
+export type AgeYMD = [number, number, number]
+
+export interface TeamOverview {
+  team_id: number
+  name: string
+  color: string | null
+  coaches: string[]
+  players: number
+  graded: number
+  // This age group's own grades, e.g. { A: 2, B: 1 }.
+  grades: Record<string, number>
+  // Grades from a different age group (shown as A*), weighted as a D in `average`.
+  move_up_grades: Record<string, number>
+  average: number | null
+  goalies: number
+  avg_age: AgeYMD | null
+}
+
+export interface AutoDraftRow {
+  team_id: number
+  team: string
+  coach: string | null
+  parent_coach: string | null
+  number: string
+  player_id: number
+  name: string
+  grade: string | null
+  draft_grade: string
+  birth_date: string | null
+  position: string | null
+  goalie: boolean
+  requests: { name: string; hard: boolean; avoid: boolean; together: boolean }[]
+}
+
+export interface AutoDraftResults {
+  run: { created_at: string; warnings: string[] } | null
+  rows: AutoDraftRow[]
+}
+
+export interface TeamBalance {
+  name: string
+  player_ids: number[]
+  skill: number
+  goalies: number
+  players: number
+  avg_skill: number | null
+  avg_age: AgeYMD | null
+}
+
+export interface TradeEffect {
+  name: string
+  other_name: string
+  kind: 'sibling' | 'hard' | 'soft' | 'avoid'
+  joined: boolean
+}
+
+export interface TradePreview {
+  now: Record<string, TeamBalance>
+  after: Record<string, TeamBalance>
+  effects: TradeEffect[]
+}
+
+export interface TradeBody {
+  team_a: number
+  from_a: number[]
+  team_b: number
+  from_b: number[]
+  note?: string | null
+  allow_split?: boolean
+}
+
+export interface PlayerRegistration {
+  division_id: number
+  position: string | null
+  main: boolean
+}

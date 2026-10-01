@@ -20,6 +20,8 @@ import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { useWorkingDivision } from '../context/WorkingDivisionContext'
+import { AutoDraftResults, DraftNotes } from '../components/AutoDraftResults'
+import { TradePanel } from '../components/TradePanel'
 
 export function DraftPage() {
   const { user } = useAuth()
@@ -73,6 +75,8 @@ export function DraftPage() {
     queryClient.invalidateQueries({ queryKey: ['draft', divId] })
     queryClient.invalidateQueries({ queryKey: ['draft-pool', divId] })
     queryClient.invalidateQueries({ queryKey: ['auto-draft-run', divId] })
+    queryClient.invalidateQueries({ queryKey: ['auto-draft-results', divId] })
+    queryClient.invalidateQueries({ queryKey: ['roster'] })
     queryClient.invalidateQueries({ queryKey: ['draft-picks'] })
   }
 
@@ -325,6 +329,14 @@ export function DraftPage() {
               Delete this draft
             </Button>
           )}
+        </Stack>
+      )}
+
+      {workingDivisionId != null && (
+        <Stack mt="lg" gap="lg">
+          <AutoDraftResults divisionId={workingDivisionId} />
+          <TradePanel divisionId={workingDivisionId} />
+          <DraftNotes divisionId={workingDivisionId} />
         </Stack>
       )}
     </Stack>

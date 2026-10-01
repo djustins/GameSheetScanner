@@ -34,6 +34,7 @@ import { linkSiblings, listParents, setPlayerParent } from '../api/parents'
 import { listDivisions } from '../api/divisions'
 import type { Player } from '../api/types'
 import { ApiError } from '../api/client'
+import { RegistrationsEditor } from './RegistrationsEditor'
 import { useAuth } from '../auth/AuthContext'
 import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { coachLabel, divisionLabel, divisionSeasonLabel } from '../utils/format'
@@ -110,6 +111,7 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
   const invalidatePlayerLists = () => {
     queryClient.invalidateQueries({ queryKey: ['players'] })
     queryClient.invalidateQueries({ queryKey: ['division-players'] })
+    queryClient.invalidateQueries({ queryKey: ['player-registrations'] })
   }
 
   const saveMutation = useMutation({
@@ -291,6 +293,7 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
                 description="From Team Rosters — link this player to a roster row there to set it."
               />
             </Group>
+            <RegistrationsEditor playerId={player.id} mainDivisionId={currentDivisionId} />
             <Group grow mt="xs">
               <TextInput
                 label="Contact first name"

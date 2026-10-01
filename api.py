@@ -1007,8 +1007,13 @@ def api_get_position(
     player_id: int, division_id: int, team_id: int, conn=Depends(get_conn), user=Depends(get_current_user)
 ) -> dict:
     """A player's position on one specific team/division — pass both as
-    query params, e.g. ?division_id=1&team_id=2."""
-    return {"position": core.get_position(conn, player_id, division_id, team_id)}
+    query params, e.g. ?division_id=1&team_id=2. "registered" is the
+    position they asked for when registering in that division -- what to
+    show while no team position is set."""
+    return {
+        "position": core.get_position(conn, player_id, division_id, team_id),
+        "registered": core.list_registration_positions(conn, player_id).get(division_id),
+    }
 
 
 class PositionUpdate(BaseModel):
@@ -1023,9 +1028,46 @@ def api_set_position(
 ) -> dict:
     """Sets (or clears, with position="") a player's position for one
     team/division — a plain current value with no history, same as the
-    Streamlit app's Position dropdown."""
+    Streamlit app's Position dropdown. Clearing it when no team position
+    was set clears the registered position too, so it doesn't show again."""
+    had_team_position = core.get_position(conn, player_id, body.division_id, body.team_id)
     core.set_position(conn, player_id, body.division_id, body.team_id, body.position)
-    return {"position": core.get_position(conn, player_id, body.division_id, body.team_id)}
+    if not body.position.strip() and not had_team_position:
+        core.set_registration_position(conn, player_id, body.division_id, None)
+    return {
+        "position": core.get_position(conn, player_id, body.division_id, body.team_id),
+        "registered": core.list_registration_positions(conn, player_id).get(body.division_id),
+    }
+
+
+@app.get("/players/{player_id}/registrations", tags=["players"])
+def api_player_registrations(player_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    """Every division this player is registered in (one season -- see
+    core.register_player_in_division) with the position they registered
+    with there: [{division_id, position, main}]."""
+    player = core.get_player(conn, player_id)
+    if player is None:
+        not_found("Player not found.")
+    positions = core.list_registration_positions(conn, player_id)
+    return [
+        {"division_id": d, "position": positions.get(d), "main": d == player["current_division_id"]}
+        for d in player["division_ids"]
+    ]
+
+
+class RegistrationPositionUpdate(BaseModel):
+    position: str | None = None
+
+
+@app.put("/players/{player_id}/divisions/{division_id}/position", tags=["players"])
+def api_set_registration_position(
+    player_id: int, division_id: int, body: RegistrationPositionUpdate,
+    conn=Depends(get_conn), user=Depends(require_writer),
+) -> dict:
+    """The position a player registered with in one division (blank clears
+    it) -- per division, so a goalie in one age group can skate in another."""
+    core.set_registration_position(conn, player_id, division_id, body.position)
+    return {"division_id": division_id, "position": core.list_registration_positions(conn, player_id).get(division_id)}
 
 
 @app.get("/players/{player_id}/season-grade", tags=["players"])
@@ -1136,6 +1178,51 @@ def api_list_picks(draft_id: int, conn=Depends(get_conn), user=Depends(get_curre
 @app.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["draft"])
 def api_delete_draft(draft_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
     core.delete_draft(conn, draft_id)
+
+
+@app.get("/divisions/{division_id}/requests", tags=["draft"])
+def api_division_requests(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    """Every play-with / do-not-play-with request involving a player
+    registered in this division, one row per pair -- see
+    core.list_division_requests."""
+    return core.list_division_requests(conn, division_id)
+
+
+@app.get("/divisions/{division_id}/teams-overview", tags=["divisions"])
+def api_teams_overview(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    """The Teams page's per-team summary -- see core.teams_overview."""
+    return core.teams_overview(conn, division_id)
+
+
+@app.get("/divisions/{division_id}/draft/auto-draft-results", tags=["draft"])
+def api_auto_draft_results(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    """The current auto-draft run as a table -- every player it placed
+    (core.auto_draft_table) plus the run's saved warnings. rows is empty
+    and run null when there's no run (or it was undone)."""
+    run = core.get_auto_draft_run(conn, division_id)
+    return {
+        "run": {"created_at": run["created_at"], "warnings": run["warnings"]} if run else None,
+        "rows": core.auto_draft_table(conn, division_id),
+    }
+
+
+class DraftNotes(BaseModel):
+    notes: str
+
+
+@app.get("/divisions/{division_id}/draft/notes", tags=["draft"])
+def api_get_draft_notes(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    """Free-form notes for this division's draft -- shared with the
+    Streamlit app (the same app_settings key)."""
+    return {"notes": core.get_setting(conn, f"draft_notes_{division_id}") or ""}
+
+
+@app.put("/divisions/{division_id}/draft/notes", tags=["draft"])
+def api_set_draft_notes(
+    division_id: int, body: DraftNotes, conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    core.set_setting(conn, f"draft_notes_{division_id}", body.notes)
+    return {"notes": body.notes}
 
 
 class TradeBody(BaseModel):

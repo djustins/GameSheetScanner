@@ -1,5 +1,15 @@
 import { apiFetch } from './client'
-import type { AutoDraftResult, AutoDraftRun, Draft, DraftPick, DraftPoolPlayer } from './types'
+import type {
+  AutoDraftResult,
+  AutoDraftResults,
+  AutoDraftRun,
+  DivisionRequest,
+  Draft,
+  DraftPick,
+  DraftPoolPlayer,
+  TradeBody,
+  TradePreview,
+} from './types'
 
 export function getDraft(divisionId: number): Promise<Draft | null> {
   return apiFetch<Draft | null>(`/divisions/${divisionId}/draft`)
@@ -42,4 +52,28 @@ export function autoDraft(divisionId: number): Promise<AutoDraftResult> {
 
 export function undoAutoDraft(divisionId: number): Promise<void> {
   return apiFetch<void>(`/divisions/${divisionId}/auto-draft/undo`, { method: 'POST' })
+}
+
+export function getAutoDraftResults(divisionId: number): Promise<AutoDraftResults> {
+  return apiFetch<AutoDraftResults>(`/divisions/${divisionId}/draft/auto-draft-results`)
+}
+
+export function getDraftNotes(divisionId: number): Promise<{ notes: string }> {
+  return apiFetch(`/divisions/${divisionId}/draft/notes`)
+}
+
+export function saveDraftNotes(divisionId: number, notes: string): Promise<{ notes: string }> {
+  return apiFetch(`/divisions/${divisionId}/draft/notes`, { method: 'PUT', body: JSON.stringify({ notes }) })
+}
+
+export function listDivisionRequests(divisionId: number): Promise<DivisionRequest[]> {
+  return apiFetch<DivisionRequest[]>(`/divisions/${divisionId}/requests`)
+}
+
+export function previewTrade(divisionId: number, body: TradeBody): Promise<TradePreview> {
+  return apiFetch<TradePreview>(`/divisions/${divisionId}/trade/preview`, { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function trade(divisionId: number, body: TradeBody): Promise<void> {
+  return apiFetch<void>(`/divisions/${divisionId}/trade`, { method: 'POST', body: JSON.stringify(body) })
 }

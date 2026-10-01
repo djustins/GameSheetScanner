@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { listDivisionTeams } from '../api/divisions'
 import { DivisionPlayersTable } from '../components/DivisionPlayersTable'
 import { TeamRosterView } from '../components/TeamRosterView'
+import { TradePanel } from '../components/TradePanel'
 import { useWorkingDivision } from '../context/WorkingDivisionContext'
 import { useAccess } from '../auth/access'
 
@@ -43,6 +44,7 @@ export function TeamRostersPage() {
         {canRosters && (
           <Tabs.Panel value="rosters" pt="md">
             <Stack>
+              <TradePanel divisionId={workingDivisionId} />
               <Select
                 label="Select a team"
                 placeholder={teams && teams.length === 0 ? 'No teams in this division yet' : 'Choose a team'}

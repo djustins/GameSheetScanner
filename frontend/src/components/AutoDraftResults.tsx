@@ -52,7 +52,10 @@ export function AutoDraftResults({ divisionId }: { divisionId: number }) {
         Run {data.run.created_at.slice(0, 16)} · {data.rows.length} player(s) placed.
       </Text>
       {data.run.warnings.length > 0 && (
-        <Alert color="yellow" title={`Warnings (${data.run.warnings.length})`}>
+        <Alert color="yellow" title={`Warnings from this Auto-Draft run (${data.run.warnings.length})`}>
+          <Text size="xs" c="dimmed" mb={4}>
+            Saved when the draft ran — trades made since aren&apos;t reflected. The Requests page shows current status.
+          </Text>
           <Stack gap={2}>
             {data.run.warnings.map((w, i) => (
               <Text size="sm" key={i}>

@@ -1423,7 +1423,8 @@ def render_auto_draft_results(conn, division_id: int):
     st.subheader("Auto-Draft results")
     st.caption(f"Run {(run['created_at'] or '')[:16]} · {len(rows)} player(s) placed.")
     if run["warnings"]:
-        with st.expander(f"⚠️ Warnings ({len(run['warnings'])})"):
+        with st.expander(f"⚠️ Warnings from this Auto-Draft run ({len(run['warnings'])})"):
+            st.caption("Saved when the draft ran — trades made since aren't reflected. The Requests tab shows current status.")
             for w in run["warnings"]:
                 st.write(f"- {w}")
 

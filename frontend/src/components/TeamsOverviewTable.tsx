@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Box, Group, Table, Text } from '@mantine/core'
-import { getTeamsOverview } from '../api/divisions'
+import { getStandings, getTeamsOverview } from '../api/divisions'
 import type { Team, TeamOverview } from '../api/types'
 import { formatAge } from '../utils/format'
 import { GRADE_TIERS } from '../utils/grades'
@@ -26,7 +26,13 @@ export function TeamsOverviewTable({
     queryKey: ['teams-overview', divisionId],
     queryFn: () => getTeamsOverview(divisionId),
   })
+  const { data: standings } = useQuery({
+    queryKey: ['standings', divisionId],
+    queryFn: () => getStandings(divisionId),
+  })
   const byId = new Map((overview ?? []).map((o) => [o.team_id, o]))
+  const standingOf = (name: string) =>
+    (standings ?? []).find((s) => s.team.trim().toLowerCase() === name.trim().toLowerCase())
   const anyMoveUps = (overview ?? []).some((o) => Object.keys(o.move_up_grades).length > 0)
 
   return (
@@ -40,6 +46,8 @@ export function TeamsOverviewTable({
             <Table.Th>Avg</Table.Th>
             <Table.Th>Breakdown</Table.Th>
             <Table.Th>Avg age</Table.Th>
+            <Table.Th>Record (W-L-OTW-OTL)</Table.Th>
+            <Table.Th>PTS · GF-GA</Table.Th>
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
@@ -81,6 +89,25 @@ export function TeamsOverviewTable({
                   )}
                 </Table.Td>
                 <Table.Td>{formatAge(t?.avg_age)}</Table.Td>
+                {(() => {
+                  const s = standingOf(team.name)
+                  return s ? (
+                    <>
+                      <Table.Td>
+                        {s.wins}-{s.losses}-{s.ot_wins}-{s.ot_losses}
+                        {s.ties ? ` (${s.ties} T)` : ''}
+                      </Table.Td>
+                      <Table.Td>
+                        <b>{s.points}</b> · {s.goals_for}-{s.goals_against}
+                      </Table.Td>
+                    </>
+                  ) : (
+                    <>
+                      <Table.Td>No games yet</Table.Td>
+                      <Table.Td>—</Table.Td>
+                    </>
+                  )
+                })()}
               </Table.Tr>
             )
           })}

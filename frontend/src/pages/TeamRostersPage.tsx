@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Alert, Select, Stack, Tabs, Title } from '@mantine/core'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { listDivisionTeams } from '../api/divisions'
+import { listTeamCoaches } from '../api/teams'
 import { DivisionPlayersTable } from '../components/DivisionPlayersTable'
 import { TeamRosterView } from '../components/TeamRosterView'
 import { TradePanel } from '../components/TradePanel'
@@ -22,6 +23,15 @@ export function TeamRostersPage() {
     queryFn: () => listDivisionTeams(workingDivisionId!),
     enabled: workingDivisionId != null,
   })
+
+  const coachQueries = useQueries({
+    queries: (teams ?? []).map((t) => ({ queryKey: ['team-coaches', t.id], queryFn: () => listTeamCoaches(t.id) })),
+  })
+  // "Team (Coach)", like the Streamlit app's team pickers.
+  const teamLabel = (index: number, name: string) => {
+    const coaches = coachQueries[index]?.data ?? []
+    return `${name} (${coaches.length ? coaches.map((c) => c.name).join(', ') : 'no coach'})`
+  }
 
   if (workingDivisionId == null) {
     return (
@@ -48,7 +58,7 @@ export function TeamRostersPage() {
               <Select
                 label="Select a team"
                 placeholder={teams && teams.length === 0 ? 'No teams in this division yet' : 'Choose a team'}
-                data={(teams ?? []).map((t) => ({ value: String(t.id), label: t.name }))}
+                data={(teams ?? []).map((t, i) => ({ value: String(t.id), label: teamLabel(i, t.name) }))}
                 value={teamId}
                 onChange={setTeamId}
                 disabled={!teams || teams.length === 0}

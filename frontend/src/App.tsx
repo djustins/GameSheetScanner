@@ -19,6 +19,7 @@ const CoachesPage = lazy(() => import('./pages/CoachesPage').then((m) => ({ defa
 const AllParentsPage = lazy(() => import('./pages/AllParentsPage').then((m) => ({ default: m.AllParentsPage })))
 const DraftPage = lazy(() => import('./pages/DraftPage').then((m) => ({ default: m.DraftPage })))
 const RequestsPage = lazy(() => import('./pages/RequestsPage').then((m) => ({ default: m.RequestsPage })))
+const EvalsPage = lazy(() => import('./pages/EvalsPage').then((m) => ({ default: m.EvalsPage })))
 const UserManagementPage = lazy(() =>
   import('./pages/UserManagementPage').then((m) => ({ default: m.UserManagementPage }))
 )
@@ -55,6 +56,7 @@ function App() {
           <Route path="/parents" element={<PageAccess pages={['parents']}><AllParentsPage /></PageAccess>} />
           <Route path="/draft" element={<PageAccess pages={['draft']}><DraftPage /></PageAccess>} />
           <Route path="/requests" element={<PageAccess pages={['teams']}><RequestsPage /></PageAccess>} />
+          <Route path="/evals" element={<PageAccess pages={['teams']}><EvalsPage /></PageAccess>} />
           <Route path="/games" element={<PageAccess pages={['schedule', 'process', 'edit']}><GamesPage /></PageAccess>} />
           <Route path="/tokens" element={<ApiTokensPage />} />
           <Route

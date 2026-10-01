@@ -992,3 +992,12 @@ def test_react_parity_endpoints(conn, admin_auth, division_id):
     ).json()
     assert pos == {"position": None, "registered": "Forward"}
     assert team_a and team_b
+
+
+def test_division_evaluations_endpoint(conn, admin_auth, division_id):
+    graded = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.add_player(conn, "Wayne", "Gretzky", current_division_id=division_id)
+    core.add_evaluation(conn, graded, division_id, None, "A")
+    body = client.get(f"/divisions/{division_id}/evaluations", auth=admin_auth).json()
+    assert [(e["name"], e["grade"]) for e in body["evaluations"]] == [("Sidney Crosby", "A")]
+    assert [p["name"] for p in body["not_evaluated"]] == ["Wayne Gretzky"]

@@ -477,3 +477,18 @@ export interface PlayerRegistration {
   position: string | null
   main: boolean
 }
+
+export interface DivisionEvaluation {
+  id: number
+  player_id: number
+  name: string
+  grade: string
+  created_at: string | null
+  team_name: string | null
+  number: string | null
+}
+
+export interface DivisionEvaluations {
+  evaluations: DivisionEvaluation[]
+  not_evaluated: { player_id: number; name: string; teams: string[] }[]
+}

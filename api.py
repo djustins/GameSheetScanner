@@ -1188,6 +1188,21 @@ def api_division_requests(division_id: int, conn=Depends(get_conn), user=Depends
     return core.list_division_requests(conn, division_id)
 
 
+@app.get("/divisions/{division_id}/evaluations", tags=["divisions"])
+def api_division_evaluations(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    """The Evals page: every evaluation recorded for exactly this division
+    (no grades carried over from other seasons -- core.list_division_evaluations),
+    plus who in the division hasn't been evaluated yet this season."""
+    evaluations = core.list_division_evaluations(conn, division_id)
+    evaluated = {e["player_id"] for e in evaluations}
+    not_evaluated = [
+        {"player_id": p["id"], "name": p["name"], "teams": p["teams"]}
+        for p in core.list_players_in_division(conn, division_id)
+        if p["id"] not in evaluated and p["name"].strip().lower() != "sub"
+    ]
+    return {"evaluations": evaluations, "not_evaluated": sorted(not_evaluated, key=lambda p: p["name"])}
+
+
 @app.get("/divisions/{division_id}/teams-overview", tags=["divisions"])
 def api_teams_overview(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
     """The Teams page's per-team summary -- see core.teams_overview."""

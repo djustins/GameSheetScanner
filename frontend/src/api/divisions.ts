@@ -2,6 +2,7 @@ import { apiFetch, apiFetchBlob } from './client'
 import type {
   DeletedDivision,
   Division,
+  DivisionEvaluations,
   DivisionPlayer,
   PlayerStatsRow,
   ScheduleRow,
@@ -85,4 +86,8 @@ export async function downloadExportWorkbook(divisionId: number): Promise<void> 
 
 export function getTeamsOverview(divisionId: number): Promise<TeamOverview[]> {
   return apiFetch<TeamOverview[]>(`/divisions/${divisionId}/teams-overview`)
+}
+
+export function getDivisionEvaluations(divisionId: number): Promise<DivisionEvaluations> {
+  return apiFetch<DivisionEvaluations>(`/divisions/${divisionId}/evaluations`)
 }

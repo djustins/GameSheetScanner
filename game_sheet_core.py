@@ -4973,11 +4973,12 @@ def write_team_sheet(book, conn: PGConnection, division: dict) -> None:
 
     teams = sorted(list_teams(conn, division["id"]), key=lambda t: t["name"].lower())
     coaches = list_team_coaches_for_division(conn, division["id"])
+    player_by_id = {p["id"]: p for p in list_players(conn, include_deleted=True)}  # once, not per row
     players_by_team = {}
     for t in teams:
         entries = []
         for e in list_roster(conn, t["id"]):
-            p = get_player(conn, e["player_id"]) if e["player_id"] else None
+            p = player_by_id.get(e["player_id"]) if e["player_id"] else None
             first, last = (p["first_name"], p["last_name"]) if p else split_full_name(e["name"])
             entries.append((display_text(first) or "", display_text(last) or ""))
         players_by_team[t["id"]] = sorted(entries, key=lambda n: (n[1].lower(), n[0].lower()))

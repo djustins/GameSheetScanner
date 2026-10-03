@@ -281,3 +281,27 @@ def test_roster_table_includes_parent_contact_unless_hidden(conn, division_id):
     [hidden] = core.roster_table(conn, division_id, include_contacts=False)
     assert hidden["Parent"] == "Troy Crosby"
     assert "Parent Phone" not in hidden and "Parent Email" not in hidden
+
+
+def test_export_starts_with_team_sheet_tabs_for_the_season(conn, division_id):
+    import io
+    import openpyxl
+    other = core.add_division(conn, 2026, "Summer", "Chipmunk")  # same season as division_id
+    core.add_division(conn, 2025, "Fall", "Beaver")  # different season -- no tab
+    avs = core.add_team(conn, division_id, "Avalanche")
+    core.update_team(conn, avs, color="#FFFF00")
+    core.add_team(conn, other, "Checkers")
+    coach = core.add_coach(conn, "Jared", "Bednar")
+    core.assign_coach_to_team(conn, avs, coach)
+    kid = core.add_player(conn, "Sidney", "Crosby", current_division_id=division_id)
+    core.add_roster_entry(conn, avs, "87", "Sidney Crosby", player_id=kid)
+
+    wb = openpyxl.load_workbook(io.BytesIO(core.export_workbook(conn, division_id)))
+    assert wb.sheetnames[:2] == ["Chipmunk", "Penguin"]
+    ws = wb["Penguin"]
+    assert ws["B2"].value == "TEAM PITTSBURGH BALL HOCKEY - 2026 SUMMER SEASON - PENGUIN DIVISION"
+    assert (ws["B3"].value, ws["B4"].value, ws["B5"].value, ws["C5"].value) == (
+        "AVALANCHE", "HC: Jared Bednar", "Sidney", "Crosby",
+    )
+    assert ws["B3"].fill.fgColor.rgb == "FFFFFF00" and ws["B3"].font.color.rgb == "FF000000"
+    assert ws["D3"].fill.fgColor.rgb == "FF000000"  # unused slot blacked out

@@ -4953,15 +4953,118 @@ def games_table(conn: PGConnection, division_id: int) -> list[dict]:
     return [{labels[k]: v for k, v in row.items()} for row in list_games(conn, division_id)]
 
 
+def _readable_text_color(fill_hex: str) -> str:
+    """Black or white -- whichever reads on a team color (black on yellow,
+    orange, light blue; white on red, blue, black...)."""
+    h = fill_hex.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return "FF000000" if lum > 0.4 else "FFFFFFFF"
+
+
+def write_team_sheet(book, conn: PGConnection, division: dict) -> None:
+    """One tab in the Team Pittsburgh team-sheet format for a division: a
+    black title band ("TEAM PITTSBURGH BALL HOCKEY - 2026 FALL SEASON -
+    PENGUIN DIVISION"), then teams four across, each a name on its team
+    color with an "HC:" line, over first/last-name rows alternating white
+    and light gray. Unused team slots in the last band are blacked out,
+    as on the printed sheet."""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    teams = sorted(list_teams(conn, division["id"]), key=lambda t: t["name"].lower())
+    coaches = list_team_coaches_for_division(conn, division["id"])
+    players_by_team = {}
+    for t in teams:
+        entries = []
+        for e in list_roster(conn, t["id"]):
+            p = get_player(conn, e["player_id"]) if e["player_id"] else None
+            first, last = (p["first_name"], p["last_name"]) if p else split_full_name(e["name"])
+            entries.append((display_text(first) or "", display_text(last) or ""))
+        players_by_team[t["id"]] = sorted(entries, key=lambda n: (n[1].lower(), n[0].lower()))
+
+    ws = book.create_sheet(title=display_text(division["age_group"])[:31])
+    black = PatternFill("solid", fgColor="FF000000")
+    thin = Side(style="thin", color="FF000000")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    first_col, per_band, width = 2, 4, 2  # B.., four teams across, two columns (first, last) each
+    last_col = first_col + per_band * width - 1
+
+    for col in range(first_col, last_col + 1):
+        ws.cell(row=1, column=col).fill = black
+    ws.merge_cells(start_row=2, start_column=first_col, end_row=2, end_column=last_col)
+    title = ws.cell(row=2, column=first_col)
+    title.value = (
+        f"TEAM PITTSBURGH BALL HOCKEY - {division['year']} {display_text(division['season']).upper()} SEASON - "
+        f"{display_text(division['age_group']).upper()} DIVISION"
+    )
+    title.fill = black
+    title.font = Font(name="Calibri", size=16, bold=True, color="FFFFFF00")
+    title.alignment = Alignment(horizontal="center", vertical="center")
+
+    row = 3
+    for band_start in range(0, max(len(teams), 1), per_band):
+        band = teams[band_start:band_start + per_band]
+        slots = max(13, *(len(players_by_team[t["id"]]) for t in band)) if band else 13
+        for slot in range(per_band):
+            c0 = first_col + slot * width
+            team = band[slot] if slot < len(band) else None
+            fill = PatternFill("solid", fgColor="FF" + (team["color"] or "#FFFFFF").lstrip("#").upper()) if team else black
+            text = _readable_text_color(team["color"] or "#FFFFFF") if team else "FFFFFFFF"
+            for col in range(c0, c0 + width):
+                for r in (row, row + 1):
+                    ws.cell(row=r, column=col).fill = fill
+            name_cell = ws.cell(row=row, column=c0, value=team["name"].upper() if team else None)
+            name_cell.font = Font(name="Times New Roman", size=14, bold=True, color=text)
+            ws.merge_cells(start_row=row + 1, start_column=c0, end_row=row + 1, end_column=c0 + width - 1)
+            coach_names = ", ".join(c["name"] for c in coaches.get(team["id"], [])) if team else ""
+            hc = ws.cell(row=row + 1, column=c0, value=f"HC: {coach_names}" if team else None)
+            hc.font = Font(name="Times New Roman", size=13, bold=True, color=text)
+            names = players_by_team.get(team["id"], []) if team else []
+            for i in range(slots):
+                r = row + 2 + i
+                stripe = PatternFill("solid", fgColor="FFFFFFFF" if i % 2 == 0 else "FFF3F3F3")
+                for j, value in enumerate(names[i] if i < len(names) else ("", "")):
+                    cell = ws.cell(row=r, column=c0 + j, value=value or None)
+                    cell.fill, cell.border = stripe, box
+                    cell.font = Font(name="Calibri", size=11, bold=True)
+                    cell.alignment = Alignment(horizontal="left")
+        row += 2 + slots + 1  # name + HC rows, the player rows, one blank row
+
+    for i in range(per_band * width):
+        ws.column_dimensions[chr(ord("A") + first_col - 1 + i)].width = 13
+    ws.column_dimensions["A"].width = 3
+    ws.page_setup.orientation = "landscape"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 1
+
+
 def export_workbook(conn: PGConnection, division_id: int, include_contacts: bool = True) -> bytes:
     """Build an in-memory .xlsx with one sheet per table, matching what's
     shown in the app (Games, Standings, Player Stats, Rosters) for one
     division. include_contacts=False leaves parents' phone and email out
-    of the Rosters sheet (for a role that hides contact details)."""
+    of the Rosters sheet (for a role that hides contact details).
+
+    First come team-sheet tabs (write_team_sheet) for every division in the
+    same season that has teams, youngest age group first -- the printable
+    rosters, like the season's Team Pittsburgh sheet."""
     import pandas as pd
+
+    divisions = list_divisions(conn)
+    this = next((d for d in divisions if d["id"] == division_id), None)
+    age_order = {name: i for i, name in enumerate(AGE_GROUPS)}
+    season_divisions = sorted(
+        (
+            d for d in divisions
+            if this and d["year"] == this["year"] and d["season"].lower() == this["season"].lower()
+            and list_teams(conn, d["id"])
+        ),
+        key=lambda d: (age_order.get(d["age_group"], len(age_order)), d["age_group"]),
+    )
 
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for d in season_divisions:
+            write_team_sheet(writer.book, conn, d)
         sheets = {
             "Games": games_table(conn, division_id),
             "Standings": standings_table(conn, division_id),

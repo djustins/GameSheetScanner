@@ -1313,6 +1313,53 @@ def render_coach_panel(
 
 
 @st.fragment(run_every="5s")
+def render_register_player(conn, division_id: int):
+    """Register one existing player in this division -- e.g. a late signup or
+    a player moving up. Another age group this season is kept; a
+    registration from another season is replaced (see
+    core.register_player_in_division)."""
+    if is_read_only:
+        return
+    with st.expander("➕ Register a player in this division", expanded=False):
+        divisions = {d["id"]: d for d in core.list_divisions(conn)}
+        this = divisions[division_id]
+        label = lambda d: f"{d['year']} {d['season']} — {division_label(d['age_group'])}"
+        same_season = lambda d: d["year"] == this["year"] and d["season"].lower() == this["season"].lower()
+        candidates = {
+            p["id"]: p for p in core.list_players(conn) if division_id not in p["division_ids"]
+        }
+        rcol1, rcol2, rcol3 = st.columns([4, 2, 1])
+        pick = rcol1.selectbox(
+            "Player", options=list(candidates), index=None, placeholder="Search by name…",
+            format_func=lambda i: candidates[i]["name"]
+            + (f" · born {candidates[i]['birth_date']}" if candidates[i]["birth_date"] else "")
+            + (" · now " + ", ".join(label(divisions[d]) for d in candidates[i]["division_ids"] if d in divisions)
+               if candidates[i]["division_ids"] else " · not registered"),
+            key=f"register_player_pick_{division_id}",
+        )
+        position = rcol2.selectbox(
+            "Position (optional)", ["", "Forward", "Defense", "Forward or Defense", "Goalie"],
+            format_func=lambda p: p or "—", key=f"register_player_position_{division_id}",
+        )
+        if pick is not None:
+            others = [divisions[d] for d in candidates[pick]["division_ids"] if d in divisions]
+            kept = [label(d) for d in others if same_season(d)]
+            replaced = [label(d) for d in others if not same_season(d)]
+            if kept:
+                st.caption(f"Stays registered in {', '.join(kept)} too (same season).")
+            if replaced:
+                st.caption(f"⚠️ Replaces their registration in {', '.join(replaced)} (a different season).")
+        rcol3.write("")
+        if rcol3.button("Register", key=f"register_player_btn_{division_id}", type="primary", disabled=pick is None):
+            core.register_player_in_division(conn, pick, division_id)
+            if position:
+                core.set_registration_position(conn, pick, division_id, position)
+            st.toast(f"Registered {candidates[pick]['name']} in {label(this)}.")
+            st.session_state.pop(f"register_player_pick_{division_id}", None)
+            st.rerun()
+        st.caption("For someone new, add them first: All Players → ➕ Add a new player. Then register them here.")
+
+
 def render_trade_panel(conn, division_id: int, teams: list[dict]):
     """Trade players between two of the division's teams in one step, with
     a before/after look at both teams' balance and every play-with request
@@ -4344,6 +4391,7 @@ with tab_teams_group:
                 "Everyone registered in the Working Division — rostered or not. Click a row to open a "
                 "player's full profile, or use the Divisions button for import and other divisions' players."
             )
+            render_register_player(conn, working_division_id)
             render_division_players_table(conn, working_division_id, key_prefix="teams")
 
     elif teams_subpage == "👥 Team Rosters":

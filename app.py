@@ -2524,7 +2524,9 @@ if working_division_id is not None:
     _export_cache_key = f"export_workbook_{working_division_id}"
     if _export_cache_key not in st.session_state:
         if st.sidebar.button("Prepare Excel export", width="stretch"):
-            st.session_state[_export_cache_key] = core.export_workbook(conn, working_division_id)
+            st.session_state[_export_cache_key] = core.export_workbook(
+                conn, working_division_id, include_contacts=not hide_contact_details
+            )
             st.rerun()
     else:
         st.sidebar.download_button(

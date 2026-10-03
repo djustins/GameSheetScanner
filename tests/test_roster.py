@@ -245,7 +245,7 @@ def test_roster_table_includes_coach_birthday_grade_and_requests(conn, division_
     assert rows["87"] == {
         "Team": "Avalanche", "Coach": 'Jared Bednar "Bed"', "Number": "87", "Name": "Sidney Crosby",
         "Birthday": "2019-08-07", "Grade": "A", "Position": None, "Goalie": None,
-        "Play-with Requests": "-> Wayne Gretzky",
+        "Play-with Requests": "-> Wayne Gretzky", "Parent": None, "Parent Phone": None, "Parent Email": None,
     }
     assert rows["99"]["Grade"] == "B"  # same age group (Penguin): no asterisk
     assert rows["99"]["Play-with Requests"] == "-> Sidney Crosby"  # mutual
@@ -264,3 +264,20 @@ def test_roster_table_shows_position_and_flags_goalies(conn, division_id):
     rows = {r["Number"]: r for r in core.roster_table(conn, division_id)}
     assert (rows["29"]["Position"], rows["29"]["Goalie"]) == ("Goalie", "Yes")
     assert (rows["87"]["Position"], rows["87"]["Goalie"]) == ("Center", None)
+
+
+def test_roster_table_includes_parent_contact_unless_hidden(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    kid = core.add_player(
+        conn, "Sidney", "Crosby", current_division_id=division_id,
+        contact_first_name="Troy", contact_last_name="Crosby",
+        contact_phone="412-555-0187", contact_email="troy@example.com",
+    )
+    core.add_roster_entry(conn, team_id, "87", "Sidney Crosby", player_id=kid)
+
+    [row] = core.roster_table(conn, division_id)
+    assert (row["Parent"], row["Parent Phone"], row["Parent Email"]) == ("Troy Crosby", "412-555-0187", "troy@example.com")
+
+    [hidden] = core.roster_table(conn, division_id, include_contacts=False)
+    assert hidden["Parent"] == "Troy Crosby"
+    assert "Parent Phone" not in hidden and "Parent Email" not in hidden

@@ -4860,17 +4860,20 @@ def player_stats_table(conn: PGConnection, division_id: int) -> list[dict]:
     ]
 
 
-def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
+def roster_table(conn: PGConnection, division_id: int, include_contacts: bool = True) -> list[dict]:
     """Every rostered player in the division, per team: team, coach(es),
     jersey number, name, birthday, grade, position (their position on
     this team if set, else the one they registered with), whether they're
-    a goalie, and play-with requests. The grade
+    a goalie, play-with requests, and the parent's name -- plus their phone
+    and email unless include_contacts is False (a role that hides contact
+    details). The grade
     is the player's latest available (this division's, else their most
     recent), marked "*" when from a different age group (grade_display). Requests list both directions: "->
     Name" for one this player made, "<- Name" for one made to them."""
     sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
-        f"""SELECT t.id, t.name, re.number, re.name, re.player_id, p.birth_date
+        f"""SELECT t.id, t.name, re.number, re.name, re.player_id, p.birth_date,
+                  p.contact_first_name, p.contact_last_name, p.contact_phone, p.contact_email
            FROM roster_entries re
            JOIN teams t ON t.id = re.team_id
            LEFT JOIN players p ON p.id = re.player_id
@@ -4914,7 +4917,7 @@ def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
     }
 
     table = []
-    for team_id, team, number, name, player_id, birth_date in rows:
+    for team_id, team, number, name, player_id, birth_date, parent_first, parent_last, phone, email in rows:
         grade_info = grades.get(player_id) if player_id is not None else None
         grade = grade_display(grade_info)
         position = team_positions.get((player_id, team_id)) or registered_positions.get(player_id)
@@ -4931,7 +4934,11 @@ def roster_table(conn: PGConnection, division_id: int) -> list[dict]:
             "Position": position,
             "Goalie": "Yes" if is_goalie(position) else None,
             "Play-with Requests": "; ".join(requests_by_player.get(player_id, [])) or None,
+            "Parent": full_name(parent_first, parent_last) or None,
         })
+        if include_contacts:
+            table[-1]["Parent Phone"] = phone
+            table[-1]["Parent Email"] = email
     return table
 
 
@@ -4946,10 +4953,11 @@ def games_table(conn: PGConnection, division_id: int) -> list[dict]:
     return [{labels[k]: v for k, v in row.items()} for row in list_games(conn, division_id)]
 
 
-def export_workbook(conn: PGConnection, division_id: int) -> bytes:
+def export_workbook(conn: PGConnection, division_id: int, include_contacts: bool = True) -> bytes:
     """Build an in-memory .xlsx with one sheet per table, matching what's
     shown in the app (Games, Standings, Player Stats, Rosters) for one
-    division."""
+    division. include_contacts=False leaves parents' phone and email out
+    of the Rosters sheet (for a role that hides contact details)."""
     import pandas as pd
 
     buf = BytesIO()
@@ -4958,7 +4966,7 @@ def export_workbook(conn: PGConnection, division_id: int) -> bytes:
             "Games": games_table(conn, division_id),
             "Standings": standings_table(conn, division_id),
             "Player Stats": player_stats_table(conn, division_id),
-            "Rosters": roster_table(conn, division_id),
+            "Rosters": roster_table(conn, division_id, include_contacts=include_contacts),
         }
         for sheet_name, rows in sheets.items():
             df = pd.DataFrame(rows)

@@ -439,8 +439,9 @@ def api_clear_schedule(division_id: int, conn=Depends(get_conn), user=Depends(re
 @app.get("/divisions/{division_id}/export.xlsx", tags=["divisions"])
 def api_export_workbook(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)):
     """One .xlsx with a sheet each for Games/Standings/Player Stats/Rosters
-    -- the same workbook the Streamlit app's Export button produces."""
-    workbook = core.export_workbook(conn, division_id)
+    -- the same workbook the Streamlit app's Export button produces. Parents'
+    phone and email are left out for a role that hides contact details."""
+    workbook = core.export_workbook(conn, division_id, include_contacts=not _hides_contacts(user))
     return StreamingResponse(
         iter([workbook]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

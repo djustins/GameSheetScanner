@@ -81,7 +81,8 @@ export async function downloadExportWorkbook(divisionId: number): Promise<void> 
   document.body.appendChild(a)
   a.click()
   a.remove()
-  URL.revokeObjectURL(url)
+  // Revoke after the browser has started the download, not before.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
 export function getTeamsOverview(divisionId: number): Promise<TeamOverview[]> {

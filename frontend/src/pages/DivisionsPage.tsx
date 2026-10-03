@@ -90,6 +90,18 @@ export function DivisionsPage() {
     },
   })
 
+  // Building the workbook takes a while on the server, so the button shows
+  // it's working and any failure is reported rather than nothing happening.
+  const exportMutation = useMutation({
+    mutationFn: downloadExportWorkbook,
+    onSuccess: () => notifications.show({ color: 'green', message: 'Export downloaded.' }),
+    onError: (err) =>
+      notifications.show({
+        color: 'red',
+        message: err instanceof ApiError ? `Export failed: ${err.message}` : 'Export failed — please try again.',
+      }),
+  })
+
   const deleteMutation = useMutation({
     mutationFn: deleteDivision,
     onSuccess: () => {
@@ -144,9 +156,20 @@ export function DivisionsPage() {
             {divisionSeasonLabel(selectedDivision)}
           </Text>
           <Group gap="xs">
-            <Button size="xs" variant="subtle" onClick={() => downloadExportWorkbook(selectedDivision.id)}>
+            <Button
+              size="xs"
+              variant="subtle"
+              loading={exportMutation.isPending}
+              loaderProps={{ type: 'dots' }}
+              onClick={() => exportMutation.mutate(selectedDivision.id)}
+            >
               Export to Excel
             </Button>
+            {exportMutation.isPending && (
+              <Text size="xs" c="dimmed">
+                Preparing export… this can take up to a minute.
+              </Text>
+            )}
             {user?.is_admin && (
               <ActionIcon
                 color="red"

@@ -108,6 +108,8 @@ export interface DraftPoolPlayer {
   nickname: string | null
   birth_date: string | null
   name: string
+  // The position they registered with in this division.
+  position: string | null
 }
 
 export interface DraftOrderEntry {

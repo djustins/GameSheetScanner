@@ -14,6 +14,7 @@ import {
   setSeasonGrade as apiSetSeasonGrade,
 } from '../api/players'
 import { addRosterEntry, listRoster, movePlayer, removeRosterEntry, updateRosterEntry } from '../api/teams'
+import { getDraftPool } from '../api/draft'
 import type { RosterEntry } from '../api/types'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
@@ -77,7 +78,7 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
   const queryClient = useQueryClient()
 
   const [addNumber, setAddNumber] = useState('')
-  const [addName, setAddName] = useState('')
+  const [addPlayerId, setAddPlayerId] = useState<string | null>(null)
   const [editEntry, setEditEntry] = useState<RosterEntry | null>(null)
   const [editNumber, setEditNumber] = useState('')
   const [editName, setEditName] = useState('')
@@ -113,7 +114,25 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
     queryFn: () => listPlayers(),
     enabled: linkEntry != null,
   })
-  const linkablePlayers = (allPlayers ?? []).filter((p) => p.name.trim().toLowerCase() !== 'sub')
+  // Only players registered in this division can be linked to its rosters.
+  const linkablePlayers = (allPlayers ?? []).filter(
+    (p) => p.name.trim().toLowerCase() !== 'sub' && p.division_ids.includes(divisionId)
+  )
+
+  // Who can be added: registered in this division and not on any of its teams
+  // yet (the draft pool).
+  const { data: pool } = useQuery({
+    queryKey: ['draft-pool', divisionId],
+    queryFn: () => getDraftPool(divisionId),
+    enabled: !!divisionId,
+  })
+  // A jersey number left blank gets the next free placeholder, like the draft's.
+  const nextPlaceholder = () => {
+    const taken = new Set((roster ?? []).map((e) => e.number))
+    let n = 1
+    while (taken.has(`TBD${n}`)) n += 1
+    return `TBD${n}`
+  }
 
   const { data: moveNotes } = useQuery({
     queryKey: ['move-notes', moveEntry?.player_id, divisionId],
@@ -126,11 +145,21 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
   const invalidateRoster = () => queryClient.invalidateQueries({ queryKey: ['roster', teamId] })
 
   const addMutation = useMutation({
-    mutationFn: () => addRosterEntry(teamId, { number: addNumber.trim(), name: addName.trim() }),
+    mutationFn: () => {
+      const player = (pool ?? []).find((p) => String(p.id) === addPlayerId)!
+      return addRosterEntry(teamId, {
+        number: addNumber.trim() || nextPlaceholder(),
+        name: player.name,
+        player_id: player.id,
+      })
+    },
     onSuccess: () => {
       invalidateRoster()
+      for (const key of [['draft-pool', divisionId], ['division-players'], ['teams-overview', divisionId], ['division-requests']]) {
+        queryClient.invalidateQueries({ queryKey: key })
+      }
       setAddNumber('')
-      setAddName('')
+      setAddPlayerId(null)
     },
     onError,
   })
@@ -277,15 +306,32 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
         </Text>
       )}
 
-      <Group>
-        <TextInput placeholder="Number" value={addNumber} onChange={(e) => setAddNumber(e.currentTarget.value)} w={100} />
-        <TextInput placeholder="Name" value={addName} onChange={(e) => setAddName(e.currentTarget.value)} flex={1} />
-        <Button
-          disabled={!addNumber.trim() || !addName.trim()}
-          loading={addMutation.isPending}
-          onClick={() => addMutation.mutate()}
-        >
-          Add Player
+      <Group align="flex-end">
+        <Select
+          label="Add a player"
+          placeholder={(pool ?? []).length ? 'Search registered players…' : 'Everyone registered is on a team'}
+          description="Players registered in this division who aren't on a team yet."
+          data={(pool ?? []).map((p) => ({
+            value: String(p.id),
+            label: `${p.name}${p.position ? ` · ${p.position}` : ''}${p.birth_date ? ` · born ${p.birth_date}` : ''}`,
+          }))}
+          value={addPlayerId}
+          onChange={setAddPlayerId}
+          searchable
+          clearable
+          disabled={!(pool ?? []).length}
+          flex={1}
+          miw={260}
+        />
+        <TextInput
+          label="Number"
+          placeholder={nextPlaceholder()}
+          value={addNumber}
+          onChange={(e) => setAddNumber(e.currentTarget.value)}
+          w={110}
+        />
+        <Button disabled={!addPlayerId} loading={addMutation.isPending} onClick={() => addMutation.mutate()}>
+          Add to team
         </Button>
       </Group>
 
@@ -378,12 +424,12 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
       <Modal opened={linkEntry != null} onClose={closeLink} title={`Link ${team?.name ?? ''} #${linkEntry?.number ?? ''}`}>
         <Stack>
           <Text size="sm" c="dimmed">
-            &quot;{linkEntry?.name}&quot; isn&apos;t linked to a player profile yet. Pick the existing player it is, or
-            create a new profile.
+            &quot;{linkEntry?.name}&quot; isn&apos;t linked to a player profile yet. Pick the registered player it is, or
+            create a new profile (registered in this division).
           </Text>
           <Group align="flex-end">
             <Select
-              label="Existing player"
+              label="Player registered in this division"
               placeholder="Search by name"
               data={linkablePlayers.map((p) => ({ value: String(p.id), label: p.name }))}
               value={linkPlayerId}

@@ -32,6 +32,7 @@ import { useAuth } from '../auth/AuthContext'
 import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { CoachCarryoverPanel } from '../components/CoachCarryoverPanel'
 import { DivisionPlayersTable } from '../components/DivisionPlayersTable'
+import { RegisterPlayerPanel } from '../components/RegisterPlayerPanel'
 import { ImportPlayersPanel } from '../components/ImportPlayersPanel'
 import { RecycleBinModal } from '../components/RecycleBinModal'
 import { SchedulePanel } from '../components/SchedulePanel'
@@ -174,6 +175,7 @@ export function DivisionsPage() {
           </Tabs.List>
 
           <Tabs.Panel value="players" pt="md">
+            <RegisterPlayerPanel divisionId={Number(divisionId)} />
             <DivisionPlayersTable divisionId={Number(divisionId)} />
           </Tabs.Panel>
 

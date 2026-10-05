@@ -559,6 +559,7 @@ class RosterEntryUpdate(BaseModel):
     number: str | None = None
     name: str | None = None
     player_id: int | None = None
+    swap_numbers: bool = False  # number already on another entry: trade numbers instead of a 409
 
 
 @app.patch("/teams/{team_id}/roster/{entry_id}", tags=["teams"])
@@ -572,10 +573,10 @@ def api_update_roster_entry(
     existing = next((r for r in core.list_roster(conn, team_id) if r["id"] == entry_id), None)
     if existing is None:
         not_found("Roster entry not found on this team.")
-    fields = {k: v for k, v in body.model_dump().items() if v is not None and k != "player_id"}
+    fields = {k: v for k, v in body.model_dump().items() if v is not None and k in ("number", "name")}
     if fields:
         try:
-            core.update_roster_entry(conn, entry_id, **fields)
+            core.update_roster_entry(conn, entry_id, swap_numbers=body.swap_numbers, **fields)
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     if body.player_id is not None:

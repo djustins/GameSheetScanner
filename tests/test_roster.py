@@ -305,3 +305,50 @@ def test_export_starts_with_team_sheet_tabs_for_the_season(conn, division_id):
     )
     assert ws["B3"].fill.fgColor.rgb == "FFFFFF00" and ws["B3"].font.color.rgb == "FF000000"
     assert ws["D3"].fill.fgColor.rgb == "FF000000"  # unused slot blacked out
+
+
+def test_roster_lists_by_last_then_first_name(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    core.replace_roster(conn, team_id, [
+        {"number": "4", "name": "Bobby Orr"},
+        {"number": "9", "name": "Sidney Crosby"},
+        {"number": "66", "name": "Mario Lemieux"},
+        {"number": "12", "name": "Alain Lemieux"},
+    ])
+    # A linked row sorts by its player profile's name, not the scanned one.
+    entry = next(r for r in core.list_roster(conn, team_id) if r["number"] == "4")
+    core.link_roster_entry_to_player(conn, entry["id"], core.add_player(conn, "Bobby", "Zed"))
+
+    assert [r["name"] for r in core.list_roster(conn, team_id)] == [
+        "Sidney Crosby", "Alain Lemieux", "Mario Lemieux", "Bobby Zed",
+    ]
+    table = [r["Name"] for r in core.roster_table(conn, division_id)]
+    assert table == ["Sidney Crosby", "Alain Lemieux", "Mario Lemieux", "Bobby Orr"]
+
+
+def test_update_roster_entry_swaps_numbers(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    crosby = core.add_roster_entry(conn, team_id, "87", "Sidney Crosby")
+    orr = core.add_roster_entry(conn, team_id, "4", "Bobby Orr")
+    core.update_roster_entry(conn, crosby, swap_numbers=True, number="4")
+    assert {r["name"]: r["number"] for r in core.list_roster(conn, team_id)} == {
+        "Sidney Crosby": "4", "Bobby Orr": "87",
+    }
+    # With nobody on the number, swap_numbers is just a renumber.
+    core.update_roster_entry(conn, orr, swap_numbers=True, number="2")
+    assert {r["name"]: r["number"] for r in core.list_roster(conn, team_id)} == {
+        "Sidney Crosby": "4", "Bobby Orr": "2",
+    }
+
+
+def test_replace_roster_swapping_numbers_keeps_each_players_link(conn, division_id):
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    crosby = core.add_player(conn, "Sidney", "Crosby")
+    orr = core.add_player(conn, "Bobby", "Orr")
+    core.add_roster_entry(conn, team_id, "87", "Sidney Crosby", player_id=crosby)
+    core.add_roster_entry(conn, team_id, "4", "Bobby Orr", player_id=orr)
+    core.replace_roster(conn, team_id, [
+        {"number": "4", "name": "Sidney Crosby"},
+        {"number": "87", "name": "Bobby Orr"},
+    ])
+    assert {r["player_id"]: r["number"] for r in core.list_roster(conn, team_id)} == {crosby: "4", orr: "87"}

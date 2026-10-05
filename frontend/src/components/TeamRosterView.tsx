@@ -164,9 +164,18 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
     onError,
   })
 
+  // The number typed into the edit dialog already belongs to this teammate:
+  // saving trades the two numbers.
+  const swapWith =
+    editEntry == null ? undefined : (roster ?? []).find((e) => e.id !== editEntry.id && e.number === editNumber.trim())
+
   const editMutation = useMutation({
     mutationFn: () =>
-      updateRosterEntry(teamId, editEntry!.id, { number: editNumber.trim(), name: editName.trim() }),
+      updateRosterEntry(teamId, editEntry!.id, {
+        number: editNumber.trim(),
+        name: editName.trim(),
+        swap_numbers: swapWith != null,
+      }),
     onSuccess: () => {
       invalidateRoster()
       setEditEntry(null)
@@ -382,8 +391,14 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
         <Stack>
           <TextInput label="Number" value={editNumber} onChange={(e) => setEditNumber(e.currentTarget.value)} />
           <TextInput label="Name" value={editName} onChange={(e) => setEditName(e.currentTarget.value)} />
+          {swapWith && (
+            <Text size="sm" c="dimmed">
+              #{swapWith.number} is {swapWith.name}&apos;s. Saving swaps the two numbers: {swapWith.name} gets #
+              {editEntry?.number}.
+            </Text>
+          )}
           <Button loading={editMutation.isPending} onClick={() => editMutation.mutate()}>
-            Save
+            {swapWith ? 'Swap numbers' : 'Save'}
           </Button>
         </Stack>
       </Modal>

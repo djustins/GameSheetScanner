@@ -35,7 +35,7 @@ export function addRosterEntry(
 export function updateRosterEntry(
   teamId: number,
   entryId: number,
-  body: { number?: string; name?: string; player_id?: number | null }
+  body: { number?: string; name?: string; player_id?: number | null; swap_numbers?: boolean }
 ): Promise<RosterEntry> {
   return apiFetch<RosterEntry>(`/teams/${teamId}/roster/${entryId}`, {
     method: 'PATCH',

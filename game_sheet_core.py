@@ -1839,8 +1839,17 @@ def list_deleted_teams(conn: PGConnection) -> list[dict]:
 _NUMERIC_SORT_KEY = "CASE WHEN {col} ~ '^[0-9]+$' THEN CAST({col} AS INTEGER) END"
 
 
+def _roster_name_key(first_name: str | None, last_name: str | None, scanned_name: str | None) -> tuple[str, str]:
+    """Sort key putting a roster in last-name, then first-name order. A row
+    not linked to a player profile only has the one scanned name, so that's
+    split best-effort (split_full_name)."""
+    if not (first_name or last_name):
+        first_name, last_name = split_full_name(scanned_name)
+    return ((last_name or "").strip().lower(), (first_name or "").strip().lower())
+
+
 def list_roster(conn: PGConnection, team_id: int) -> list[dict]:
-    """A team's roster. Once a row is linked to a global player profile,
+    """A team's roster, by last then first name. Once a row is linked to a global player profile,
     its name is taken from that profile (kept live if the player is later
     renamed) rather than the name originally auto-extracted from the game
     sheet into roster_entries.name. A row whose linked player has been
@@ -1851,34 +1860,50 @@ def list_roster(conn: PGConnection, team_id: int) -> list[dict]:
     sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
         f"""SELECT re.id, re.number,
-                   COALESCE(NULLIF(TRIM(CONCAT_WS(' ', p.first_name, p.last_name)), ''), re.name), p.id
+                   COALESCE(NULLIF(TRIM(CONCAT_WS(' ', p.first_name, p.last_name)), ''), re.name), p.id,
+                   p.first_name, p.last_name, re.name
            FROM roster_entries re
            LEFT JOIN players p ON p.id = re.player_id AND p.deleted_at IS NULL
            WHERE re.team_id = %s ORDER BY {sort_key}, re.number""",
         (team_id,),
     ).fetchall()
+    rows.sort(key=lambda r: _roster_name_key(r[4], r[5], r[6]))  # stable: ties stay in number order
     return [{"id": r[0], "number": r[1], "name": display_text(r[2]), "player_id": r[3]} for r in rows]
 
 
 def replace_roster(conn: PGConnection, team_id: int, entries: list[dict]):
-    """Replace a team's whole roster with the given (number, name) rows. A
-    row's link to a global player profile is preserved by jersey number
-    match, since the roster editor doesn't expose player_id directly."""
-    existing_player_ids = dict(
-        conn.execute(
-            "SELECT number, player_id FROM roster_entries WHERE team_id = %s", (team_id,)
-        ).fetchall()
-    )
-    conn.execute("DELETE FROM roster_entries WHERE team_id = %s", (team_id,))
+    """Replace a team's whole roster with the given (number, name) rows.
+    The roster editor doesn't expose player_id, so a row's link to a global
+    player profile is carried over by matching its name to the roster as it
+    was shown (so swapping two players' numbers in the grid moves the
+    numbers, not the players), else by jersey number (a row renamed in
+    place keeps its link)."""
+    existing = list_roster(conn, team_id)
+    by_number = {e["number"]: e["player_id"] for e in existing}
+    names = [normalize_text(e["name"]) for e in existing]
+    by_name = {
+        normalize_text(e["name"]): e["player_id"] for e in existing if names.count(normalize_text(e["name"])) == 1
+    }
+    rows = []
     for p in entries:
         number = (p.get("number") or "").strip()
         name = normalize_text(p.get("name")) or ""
-        if not number and not name:
-            continue
+        if number or name:
+            rows.append((number, name))
+    # Name matches claim their player first, so a number fallback can't
+    # hand the same player to a second row.
+    linked = {i: by_name[name] for i, (_, name) in enumerate(rows) if by_name.get(name) is not None}
+    used = set(linked.values())
+    conn.execute("DELETE FROM roster_entries WHERE team_id = %s", (team_id,))
+    for i, (number, name) in enumerate(rows):
+        player_id = linked.get(i)
+        if player_id is None and name not in by_name and by_number.get(number) not in used:
+            player_id = by_number.get(number)
+            used.add(player_id)
         conn.execute(
             "INSERT INTO roster_entries (team_id, number, name, player_id) VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (team_id, number) DO NOTHING",
-            (team_id, number, name, existing_player_ids.get(number)),
+            (team_id, number, name, player_id),
         )
     conn.commit()
 
@@ -1905,31 +1930,39 @@ def add_roster_entry(conn: PGConnection, team_id: int, number: str, name: str, p
     return entry_id
 
 
-def update_roster_entry(conn: PGConnection, roster_entry_id: int, **fields) -> None:
+def update_roster_entry(conn: PGConnection, roster_entry_id: int, swap_numbers: bool = False, **fields) -> None:
     """Update a roster entry's number and/or name directly, e.g. replacing
     a draft's placeholder jersey number ("TBD3"/"AUTO3") with the coach's
     real one, without resending the team's whole roster via replace_roster.
     Raises ValueError if the new number is already taken by a *different*
-    entry on the same team (roster_entries has UNIQUE(team_id, number))."""
+    entry on the same team (roster_entries has UNIQUE(team_id, number)) --
+    unless swap_numbers is set, in which case the two entries trade numbers."""
     allowed = {"number", "name"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
+    swapped = None  # (other entry's id, the number it takes over)
     if "number" in updates:
         updates["number"] = updates["number"].strip()
-        row = conn.execute("SELECT team_id FROM roster_entries WHERE id = %s", (roster_entry_id,)).fetchone()
+        row = conn.execute("SELECT team_id, number FROM roster_entries WHERE id = %s", (roster_entry_id,)).fetchone()
         if row is None:
             raise ValueError("Roster entry not found.")
         conflict = conn.execute(
             "SELECT id FROM roster_entries WHERE team_id = %s AND number = %s AND id != %s",
             (row[0], updates["number"], roster_entry_id),
         ).fetchone()
-        if conflict:
+        if conflict and not swap_numbers:
             raise ValueError(f"Number {updates['number']!r} is already taken on this team.")
+        if conflict:
+            # Park the other entry on a placeholder so neither UPDATE trips the UNIQUE.
+            swapped = (conflict[0], row[1])
+            conn.execute("UPDATE roster_entries SET number = %s WHERE id = %s", (f"__swap_{conflict[0]}__", conflict[0]))
     if "name" in updates:
         updates["name"] = normalize_text(updates["name"]) or ""
     set_clause = ", ".join(f"{k} = %s" for k in updates)
     conn.execute(f"UPDATE roster_entries SET {set_clause} WHERE id = %s", (*updates.values(), roster_entry_id))
+    if swapped:
+        conn.execute("UPDATE roster_entries SET number = %s WHERE id = %s", (swapped[1], swapped[0]))
     conn.commit()
 
 
@@ -4873,7 +4906,8 @@ def roster_table(conn: PGConnection, division_id: int, include_contacts: bool = 
     sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
     rows = conn.execute(
         f"""SELECT t.id, t.name, re.number, re.name, re.player_id, p.birth_date,
-                  p.contact_first_name, p.contact_last_name, p.contact_phone, p.contact_email
+                  p.contact_first_name, p.contact_last_name, p.contact_phone, p.contact_email,
+                  p.first_name, p.last_name
            FROM roster_entries re
            JOIN teams t ON t.id = re.team_id
            LEFT JOIN players p ON p.id = re.player_id
@@ -4881,6 +4915,9 @@ def roster_table(conn: PGConnection, division_id: int, include_contacts: bool = 
            ORDER BY t.name, {sort_key}, re.number""",
         (division_id,),
     ).fetchall()
+    # Teams stay in the query's order; within a team, last then first name.
+    team_order = {team_id: i for i, team_id in reversed(list(enumerate(r[0] for r in rows)))}
+    rows.sort(key=lambda r: (team_order[r[0]], _roster_name_key(r[10], r[11], r[3])))
     player_ids = [r[4] for r in rows if r[4] is not None]
     coaches_by_team = list_team_coaches_for_division(conn, division_id)
     grades = get_latest_grades_with_source(conn, division_id, player_ids)
@@ -4917,7 +4954,7 @@ def roster_table(conn: PGConnection, division_id: int, include_contacts: bool = 
     }
 
     table = []
-    for team_id, team, number, name, player_id, birth_date, parent_first, parent_last, phone, email in rows:
+    for team_id, team, number, name, player_id, birth_date, parent_first, parent_last, phone, email, _, _ in rows:
         grade_info = grades.get(player_id) if player_id is not None else None
         grade = grade_display(grade_info)
         position = team_positions.get((player_id, team_id)) or registered_positions.get(player_id)

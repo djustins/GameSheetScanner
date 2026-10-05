@@ -121,6 +121,15 @@ def test_roster_entry_renumber_lifecycle(conn, admin_auth, division_id):
     )
     assert conflict.status_code == 409
 
+    swapped = client.patch(
+        f"/teams/{team_id}/roster/{other.json()['id']}",
+        json={"number": "87", "swap_numbers": True}, auth=admin_auth,
+    )
+    assert swapped.status_code == 200
+    assert swapped.json()["number"] == "87"
+    numbers = {r["id"]: r["number"] for r in client.get(f"/teams/{team_id}/roster", auth=admin_auth).json()}
+    assert numbers[entry_id] == "9"
+
     missing = client.patch(f"/teams/{team_id}/roster/999999", json={"number": "1"}, auth=admin_auth)
     assert missing.status_code == 404
 

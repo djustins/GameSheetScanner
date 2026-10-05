@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Alert, Button, Paper, PasswordInput, Stack, TextInput, Title } from '@mantine/core'
+import { Alert, Button, Image, Paper, PasswordInput, Stack, TextInput, Title } from '@mantine/core'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { ApiError } from '../api/client'
@@ -31,7 +31,8 @@ export function LoginPage() {
       <Paper withBorder shadow="sm" p="xl" w={360}>
         <form onSubmit={handleSubmit}>
           <Stack>
-            <Title order={2}>GameSheetScanner</Title>
+            <Image src="/logo.png" alt="Team Pittsburgh Ball Hockey" bg="#000000" p={10} radius={16} />
+            <Title order={3}>Team Manager</Title>
             {error && <Alert color="red">{error}</Alert>}
             <TextInput
               label="Email"

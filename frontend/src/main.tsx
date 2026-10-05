@@ -10,12 +10,13 @@ import './index.css'
 import App from './App.tsx'
 import { AuthProvider } from './auth/AuthContext'
 import { WorkingDivisionProvider } from './context/WorkingDivisionContext'
+import { cssVariablesResolver, theme } from './theme'
 
 const queryClient = new QueryClient()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <MantineProvider defaultColorScheme="auto">
+    <MantineProvider theme={theme} cssVariablesResolver={cssVariablesResolver} defaultColorScheme="dark">
       <Notifications />
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>

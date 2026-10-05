@@ -5,6 +5,13 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Team Pittsburgh Team Manager</title>
+    <!-- Apply the saved Dark/Light choice before first paint (Mantine's key; dark by default). -->
+    <script>
+      try {
+        var scheme = localStorage.getItem('mantine-color-scheme-value')
+        document.documentElement.setAttribute('data-mantine-color-scheme', scheme === 'light' ? 'light' : 'dark')
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

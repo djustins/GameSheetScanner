@@ -1,4 +1,16 @@
-import { AppShell, Burger, Group, NavLink, Select, Text, Title } from '@mantine/core'
+import {
+  AppShell,
+  Box,
+  Burger,
+  Group,
+  Image,
+  NavLink,
+  SegmentedControl,
+  Select,
+  Text,
+  Title,
+  useMantineColorScheme,
+} from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
@@ -32,6 +44,7 @@ const SCOPED_NAV_ITEMS: NavItem[] = [
 
 export function AppLayout() {
   const [opened, { toggle }] = useDisclosure()
+  const { colorScheme, setColorScheme } = useMantineColorScheme()
   const { user, logout } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
@@ -55,48 +68,65 @@ export function AppLayout() {
       navbar={{ width: 240, breakpoint: 'sm', collapsed: { mobile: !opened } }}
       padding="md"
     >
-      <AppShell.Header>
+      <AppShell.Header bg="var(--app-secondary-bg)">
         <Group h="100%" px="md" justify="space-between">
           <Group>
             <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
-            <Title order={3}>GameSheetScanner</Title>
+            <Title order={3}>Team Pittsburgh Team Manager</Title>
           </Group>
           <Group>
             <Text size="sm" c="dimmed">
               {user?.display_name}
             </Text>
-            <Text size="sm" c="blue" style={{ cursor: 'pointer' }} onClick={() => navigate('/tokens')}>
+            <Text size="sm" c="var(--app-heading)" style={{ cursor: 'pointer' }} onClick={() => navigate('/tokens')}>
               API Tokens
             </Text>
-            <Text size="sm" c="blue" style={{ cursor: 'pointer' }} onClick={logout}>
+            <Text size="sm" c="var(--app-heading)" style={{ cursor: 'pointer' }} onClick={logout}>
               Log out
             </Text>
           </Group>
         </Group>
       </AppShell.Header>
-      <AppShell.Navbar p="md">
-        <Select
-          label="Working Division"
-          placeholder={divisions.length === 0 ? 'No divisions yet' : 'Choose a division'}
-          data={divisions.map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))}
-          value={workingDivisionId != null ? String(workingDivisionId) : null}
-          onChange={(v) => setWorkingDivisionId(v ? Number(v) : null)}
-          disabled={loading || divisions.length === 0}
-          searchable
-          mb="md"
-          size="sm"
-        />
-        {globalItems.map((item) => (
-          <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
-        ))}
-        {scopedItems.length > 0 && (
-          <Text size="xs" c="dimmed" mt="md" mb={4} tt="uppercase" fw={700}>
-            Working Division
-          </Text>
-        )}
-        {scopedItems.map((item) => (
-          <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
-        ))}
+      <AppShell.Navbar bg="var(--app-secondary-bg)">
+        {/* Scrolls as a block: the navbar itself is a flex column that would squash its children. */}
+        <Box p="md" style={{ overflowY: 'auto' }}>
+          {/* The logo sits on black in both themes, as in the Streamlit sidebar. */}
+          <Image src="/logo.png" alt="Team Pittsburgh Ball Hockey" bg="#000000" p={10} radius={16} maw={200} mx="auto" mb="md" />
+          <SegmentedControl
+            aria-label="Theme"
+            data={[
+              { value: 'dark', label: 'Dark' },
+              { value: 'light', label: 'Light' },
+            ]}
+            value={colorScheme === 'light' ? 'light' : 'dark'}
+            onChange={(v) => setColorScheme(v as 'dark' | 'light')}
+            fullWidth
+            size="xs"
+            mb="md"
+          />
+          <Select
+            label="Working Division"
+            placeholder={divisions.length === 0 ? 'No divisions yet' : 'Choose a division'}
+            data={divisions.map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))}
+            value={workingDivisionId != null ? String(workingDivisionId) : null}
+            onChange={(v) => setWorkingDivisionId(v ? Number(v) : null)}
+            disabled={loading || divisions.length === 0}
+            searchable
+            mb="md"
+            size="sm"
+          />
+          {globalItems.map((item) => (
+            <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
+          ))}
+          {scopedItems.length > 0 && (
+            <Text size="xs" c="dimmed" mt="md" mb={4} tt="uppercase" fw={700}>
+              Working Division
+            </Text>
+          )}
+          {scopedItems.map((item) => (
+            <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
+          ))}
+        </Box>
       </AppShell.Navbar>
       <AppShell.Main>
         <Outlet />

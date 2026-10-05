@@ -1,7 +1,27 @@
 import { useState } from 'react'
-import { ActionIcon, Button, Group, Modal, Select, Stack, Table, Text, TextInput, Title } from '@mantine/core'
+import {
+  ActionIcon,
+  Button,
+  Group,
+  Modal,
+  Select,
+  Stack,
+  Table,
+  Text,
+  TextInput,
+  Title,
+  UnstyledButton,
+} from '@mantine/core'
 import { notifications } from '@mantine/notifications'
-import { IconArrowsExchange, IconLink, IconPencil, IconTrash } from '@tabler/icons-react'
+import {
+  IconArrowsExchange,
+  IconChevronDown,
+  IconChevronUp,
+  IconLink,
+  IconPencil,
+  IconSelector,
+  IconTrash,
+} from '@tabler/icons-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getPlayerStats, listDivisionTeams } from '../api/divisions'
 import {
@@ -73,6 +93,41 @@ function GradeCell({ playerId, divisionId, teamId }: { playerId: number; divisio
   )
 }
 
+type SortKey = 'number' | 'name' | 'position' | 'grade'
+type Sort = { key: SortKey; desc: boolean }
+
+// A column header that sorts the roster: click to sort by it, again to reverse.
+function SortHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+}: {
+  label: string
+  sortKey: SortKey
+  sort: Sort
+  onSort: (sort: Sort) => void
+}) {
+  const active = sort.key === sortKey
+  const Icon = !active ? IconSelector : sort.desc ? IconChevronDown : IconChevronUp
+  return (
+    <Table.Th aria-sort={active ? (sort.desc ? 'descending' : 'ascending') : 'none'}>
+      <UnstyledButton fw={700} fz="sm" onClick={() => onSort({ key: sortKey, desc: active && !sort.desc })}>
+        <Group gap={2} wrap="nowrap">
+          {label}
+          <Icon size={14} />
+        </Group>
+      </UnstyledButton>
+    </Table.Th>
+  )
+}
+
+// Blank values go last whichever way the column is sorted.
+function compareText(a: string, b: string, desc: boolean) {
+  if (!a || !b) return a ? -1 : b ? 1 : 0
+  return (desc ? -1 : 1) * a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+}
+
 export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisionId: number }) {
   const { user } = useAuth()
   const queryClient = useQueryClient()
@@ -89,6 +144,7 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
   const [linkPlayerId, setLinkPlayerId] = useState<string | null>(null)
   const [newFirst, setNewFirst] = useState('')
   const [newLast, setNewLast] = useState('')
+  const [sort, setSort] = useState<Sort>({ key: 'name', desc: false })
 
   const { data: teams } = useQuery({
     queryKey: ['division-teams', divisionId],
@@ -237,6 +293,35 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
     onError,
   })
 
+  // The roster arrives in last-name, first-name order, so sorting by name is
+  // that order (or its reverse). Position and grade are read from what their
+  // cells have already loaded.
+  const nameOrder = new Map((roster ?? []).map((e, i) => [e.id, i]))
+  const sortValue = (e: RosterEntry) => {
+    if (e.player_id == null) return ''
+    if (sort.key === 'position') {
+      const p = queryClient.getQueryData<{ position?: string | null; registered?: string | null }>([
+        'position', e.player_id, divisionId, teamId,
+      ])
+      return p?.position || p?.registered || ''
+    }
+    return queryClient.getQueryData<{ grade?: string | null }>(['season-grade', e.player_id, divisionId])?.grade ?? ''
+  }
+  const sortedRoster = [...(roster ?? [])].sort((a, b) => {
+    const byName = nameOrder.get(a.id)! - nameOrder.get(b.id)!
+    if (sort.key === 'name') return sort.desc ? -byName : byName
+    // Real jersey numbers in numeric order, then placeholders like TBD3.
+    const aNum = /^\d+$/.test(a.number)
+    const bNum = /^\d+$/.test(b.number)
+    const diff =
+      sort.key !== 'number'
+        ? compareText(sortValue(a), sortValue(b), sort.desc)
+        : aNum !== bNum
+          ? aNum ? -1 : 1
+          : compareText(a.number, b.number, sort.desc)
+    return diff || byName
+  })
+
   return (
     <Writable>
     <Stack>
@@ -245,15 +330,15 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
       <Table striped highlightOnHover>
         <Table.Thead>
           <Table.Tr>
-            <Table.Th>#</Table.Th>
-            <Table.Th>Name</Table.Th>
-            <Table.Th>Position</Table.Th>
-            <Table.Th>Grade</Table.Th>
+            <SortHeader label="#" sortKey="number" sort={sort} onSort={setSort} />
+            <SortHeader label="Name" sortKey="name" sort={sort} onSort={setSort} />
+            <SortHeader label="Position" sortKey="position" sort={sort} onSort={setSort} />
+            <SortHeader label="Grade" sortKey="grade" sort={sort} onSort={setSort} />
             <Table.Th />
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
-          {(roster ?? []).map((entry) => (
+          {sortedRoster.map((entry) => (
             <Table.Tr key={entry.id}>
               <Table.Td>{entry.number}</Table.Td>
               <Table.Td>{entry.name}</Table.Td>

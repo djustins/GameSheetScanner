@@ -3461,11 +3461,12 @@ def _swap_to_join_requests(
 
 
 def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
-    """The division's auto-draft run still available to undo — None once
-    undone (undo_auto_draft deletes the row) or if auto_draft has never
-    been run for this division."""
+    """The division's auto-draft run — None once undone (undo_auto_draft
+    deletes the row) or if auto_draft has never been run for this division.
+    "stored" is True once store_auto_draft has locked it in, after which it
+    can no longer be undone or re-run."""
     row = conn.execute(
-        "SELECT id, roster_entry_ids, coach_assignments, created_at, warnings "
+        "SELECT id, roster_entry_ids, coach_assignments, created_at, warnings, stored_at "
         "FROM auto_draft_runs WHERE division_id = %s",
         (division_id,),
     ).fetchone()
@@ -3475,7 +3476,25 @@ def get_auto_draft_run(conn: PGConnection, division_id: int) -> dict | None:
         "id": row[0], "division_id": division_id,
         "roster_entry_ids": json.loads(row[1]), "coach_assignments": json.loads(row[2]),
         "created_at": row[3], "warnings": json.loads(row[4]) if row[4] else [],
+        "stored": row[5] is not None,
     }
+
+
+_AUTO_DRAFT_STORED_MSG = "This division's auto-draft has been stored, so it can't be undone or re-run."
+
+
+def store_auto_draft(conn: PGConnection, division_id: int):
+    """Locks in this division's auto-draft run: undo_auto_draft and
+    auto_draft refuse from then on, so the teams can't be changed by
+    accident (trades and roster edits still work). There is deliberately
+    no way back. Raises ValueError if there's no run to store."""
+    if get_auto_draft_run(conn, division_id) is None:
+        raise ValueError("No auto-draft to store for this division.")
+    conn.execute(
+        "UPDATE auto_draft_runs SET stored_at = CURRENT_TIMESTAMP WHERE division_id = %s AND stored_at IS NULL",
+        (division_id,),
+    )
+    conn.commit()
 
 
 def _draft_tier_rank(grade_info: dict | None) -> int:
@@ -3548,10 +3567,13 @@ def undo_auto_draft(conn: PGConnection, division_id: int):
     rows and coach assignments it created (anything added or changed
     manually afterward is left alone), then clears the run record so the
     pool is back to how it was beforehand — ready for auto_draft() to be
-    run again from scratch. Raises ValueError if there's nothing to undo."""
+    run again from scratch. Raises ValueError if there's nothing to undo,
+    or if the run has been stored (see store_auto_draft)."""
     run = get_auto_draft_run(conn, division_id)
     if run is None:
         raise ValueError("No auto-draft to undo for this division.")
+    if run["stored"]:
+        raise ValueError(_AUTO_DRAFT_STORED_MSG)
     for roster_entry_id in run["roster_entry_ids"]:
         conn.execute("DELETE FROM roster_entries WHERE id = %s", (roster_entry_id,))
     for assignment in run["coach_assignments"]:
@@ -3619,7 +3641,8 @@ def auto_draft(conn: PGConnection, division_id: int) -> dict:
     undoes it (see undo_auto_draft), so re-drafting from scratch is just
     calling this again rather than a separate manual cleanup step.
 
-    Raises ValueError if there are fewer than 2 teams or an empty pool.
+    Raises ValueError if there are fewer than 2 teams or an empty pool, or
+    if the previous run has been stored (see store_auto_draft).
     Returns {"assigned": n, "teams": n, "warnings": [...]}."""
     if get_auto_draft_run(conn, division_id) is not None:
         undo_auto_draft(conn, division_id)

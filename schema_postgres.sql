@@ -355,6 +355,9 @@ CREATE TABLE IF NOT EXISTS auto_draft_runs (
     created_at          TEXT DEFAULT CURRENT_TIMESTAMP
 );
 ALTER TABLE auto_draft_runs ADD COLUMN IF NOT EXISTS warnings TEXT;  -- JSON list of the run's warnings
+-- Set once the run is stored (game_sheet_core.store_auto_draft): from then
+-- on it can't be undone or re-run, so the teams can't change by accident.
+ALTER TABLE auto_draft_runs ADD COLUMN IF NOT EXISTS stored_at TEXT;
 
 -- Official season schedule, uploaded as a CSV and persisted here so it
 -- survives a restart and stays comparable against stored games without

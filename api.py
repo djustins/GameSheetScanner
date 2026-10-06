@@ -1296,6 +1296,16 @@ def api_undo_auto_draft(division_id: int, conn=Depends(get_conn), user=Depends(r
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
 
+@app.post("/divisions/{division_id}/auto-draft/store", status_code=status.HTTP_204_NO_CONTENT, tags=["draft"])
+def api_store_auto_draft(division_id: int, conn=Depends(get_conn), user=Depends(require_writer)):
+    """Lock in the auto-draft so it can no longer be undone or re-run --
+    see core.store_auto_draft."""
+    try:
+        core.store_auto_draft(conn, division_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Game sheets (Claude OCR extraction) & Games
 # ---------------------------------------------------------------------------

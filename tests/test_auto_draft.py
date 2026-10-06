@@ -193,6 +193,35 @@ def test_undo_auto_draft_raises_when_nothing_to_undo(conn, division_id):
         assert "No auto-draft" in str(e)
 
 
+def test_a_stored_auto_draft_cannot_be_undone_or_re_run(conn, division_id):
+    core.add_team(conn, division_id, "Avalanche")
+    core.add_team(conn, division_id, "Wild")
+    for i in range(6):
+        _add_player(conn, division_id, f"Player{i}", "Test")
+    core.auto_draft(conn, division_id)
+    assert core.get_auto_draft_run(conn, division_id)["stored"] is False
+    before = {t["id"]: core.list_roster(conn, t["id"]) for t in core.list_teams(conn, division_id)}
+
+    core.store_auto_draft(conn, division_id)
+    assert core.get_auto_draft_run(conn, division_id)["stored"] is True
+
+    for change in (core.undo_auto_draft, core.auto_draft):
+        try:
+            change(conn, division_id)
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert "stored" in str(e)
+    assert {t["id"]: core.list_roster(conn, t["id"]) for t in core.list_teams(conn, division_id)} == before
+
+
+def test_store_auto_draft_raises_when_there_is_no_run(conn, division_id):
+    try:
+        core.store_auto_draft(conn, division_id)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "No auto-draft" in str(e)
+
+
 def test_re_running_auto_draft_undoes_the_previous_run_first(conn, division_id):
     core.add_team(conn, division_id, "Avalanche")
     core.add_team(conn, division_id, "Wild")

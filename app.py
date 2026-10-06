@@ -1571,9 +1571,19 @@ def render_draft_live(conn, draft_division_id: int):
                     "team. Running this again undoes the previous auto-draft first, so re-drafting from "
                     "scratch is just clicking it again."
                 )
-                acol1, acol2 = st.columns(2)
+                acol1, acol2, acol3 = st.columns(3)
+                if auto_draft_run and auto_draft_run["stored"]:
+                    # Stored: no Re-run or Undo, so the teams can't change by accident.
+                    st.success("Auto-draft stored — the teams are locked in. Use a trade to move a player.")
+                with acol3:
+                    if auto_draft_run and not auto_draft_run["stored"] and st.button(
+                        "💾 Store Auto-Draft", key="draft_tab_store_auto_draft", disabled=is_read_only,
+                        help="Locks the teams in: Re-run and Undo go away for good.",
+                    ):
+                        core.store_auto_draft(conn, draft_division_id)
+                        st.rerun()
                 with acol1:
-                    if st.button(
+                    if not (auto_draft_run and auto_draft_run["stored"]) and st.button(
                         "🔁 Re-run Auto-Draft" if auto_draft_run else "🤖 Auto-Draft",
                         key="draft_tab_auto_draft", type="primary", disabled=is_read_only,
                     ):
@@ -1589,7 +1599,7 @@ def render_draft_live(conn, draft_division_id: int):
                         except ValueError as e:
                             st.error(str(e))
                 with acol2:
-                    if auto_draft_run and st.button(
+                    if auto_draft_run and not auto_draft_run["stored"] and st.button(
                         "↩️ Undo Auto-Draft", key="draft_tab_undo_auto_draft", disabled=is_read_only,
                     ):
                         core.undo_auto_draft(conn, draft_division_id)

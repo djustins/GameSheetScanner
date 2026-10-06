@@ -10,6 +10,7 @@ import {
   getDraftPool,
   listPicks,
   startDraft,
+  storeAutoDraft,
   submitPick,
   undoAutoDraft,
   undoLastPick,
@@ -96,6 +97,15 @@ export function DraftPage() {
   const undoAutoDraftMutation = useMutation({
     mutationFn: () => undoAutoDraft(divId),
     onSuccess: invalidateDraft,
+    onError,
+  })
+
+  const storeAutoDraftMutation = useMutation({
+    mutationFn: () => storeAutoDraft(divId),
+    onSuccess: () => {
+      invalidateDraft()
+      notifications.show({ color: 'green', message: 'Auto-draft stored.' })
+    },
     onError,
   })
 
@@ -206,19 +216,38 @@ export function DraftPage() {
             <Alert color="yellow">Add at least two teams to this division before drafting.</Alert>
           ) : (
             <>
-              <Group>
-                <Button
-                  loading={autoDraftMutation.isPending}
-                  onClick={() => autoDraftMutation.mutate()}
-                >
-                  {autoDraftRun ? 'Re-run Auto-Draft' : 'Auto-Draft'}
-                </Button>
-                {autoDraftRun && (
-                  <Button variant="outline" loading={undoAutoDraftMutation.isPending} onClick={() => undoAutoDraftMutation.mutate()}>
-                    Undo Auto-Draft
+              {autoDraftRun?.stored ? (
+                // Stored: no Re-run or Undo, so the teams can't change by accident.
+                <Alert color="green">
+                  Auto-draft stored — the teams are locked in. Use a trade below to move a player.
+                </Alert>
+              ) : (
+                <Group>
+                  <Button
+                    loading={autoDraftMutation.isPending}
+                    onClick={() => autoDraftMutation.mutate()}
+                  >
+                    {autoDraftRun ? 'Re-run Auto-Draft' : 'Auto-Draft'}
                   </Button>
-                )}
-              </Group>
+                  {autoDraftRun && (
+                    <Button variant="outline" loading={undoAutoDraftMutation.isPending} onClick={() => undoAutoDraftMutation.mutate()}>
+                      Undo Auto-Draft
+                    </Button>
+                  )}
+                  {autoDraftRun && (
+                    <Button
+                      color="green"
+                      loading={storeAutoDraftMutation.isPending}
+                      onClick={() =>
+                        confirm('Store this auto-draft? Re-run and Undo go away for good — after this, teams change only by trades and roster edits.') &&
+                        storeAutoDraftMutation.mutate()
+                      }
+                    >
+                      Store Auto-Draft
+                    </Button>
+                  )}
+                </Group>
+              )}
 
               {(pool?.length ?? 0) > 0 && (
                 <Stack>

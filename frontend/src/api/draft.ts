@@ -54,6 +54,10 @@ export function undoAutoDraft(divisionId: number): Promise<void> {
   return apiFetch<void>(`/divisions/${divisionId}/auto-draft/undo`, { method: 'POST' })
 }
 
+export function storeAutoDraft(divisionId: number): Promise<void> {
+  return apiFetch<void>(`/divisions/${divisionId}/auto-draft/store`, { method: 'POST' })
+}
+
 export function getAutoDraftResults(divisionId: number): Promise<AutoDraftResults> {
   return apiFetch<AutoDraftResults>(`/divisions/${divisionId}/draft/auto-draft-results`)
 }

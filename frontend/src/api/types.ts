@@ -146,6 +146,8 @@ export interface AutoDraftRun {
   roster_entry_ids: number[]
   coach_assignments: { team_id: number; coach_id: number }[]
   created_at: string
+  // Locked in: it can no longer be undone or re-run.
+  stored: boolean
 }
 
 export interface AutoDraftResult {

@@ -1,5 +1,7 @@
+import { useEffect, useRef } from 'react'
 import {
   AppShell,
+  Badge,
   Box,
   Burger,
   Group,
@@ -7,6 +9,7 @@ import {
   NavLink,
   SegmentedControl,
   Select,
+  Tabs,
   Text,
   Title,
   useMantineColorScheme,
@@ -24,6 +27,11 @@ interface NavItem {
   // Page keys (game_sheet_core.PAGES) granting access; omitted = always shown.
   pages?: string[]
 }
+
+// The app works in two modes, picked in the left panel: one division's season
+// (the day-to-day work) or global (setup and reference across all divisions).
+// Each mode's pages are the tabs along the top.
+type Mode = 'division' | 'global'
 
 const GLOBAL_NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Home' },
@@ -43,7 +51,7 @@ const SCOPED_NAV_ITEMS: NavItem[] = [
 ]
 
 export function AppLayout() {
-  const [opened, { toggle }] = useDisclosure()
+  const [opened, { toggle, close }] = useDisclosure()
   const { colorScheme, setColorScheme } = useMantineColorScheme()
   const { user, logout } = useAuth()
   const location = useLocation()
@@ -59,8 +67,30 @@ export function AppLayout() {
   const scopedItems = SCOPED_NAV_ITEMS.filter(allowed)
 
   function isActive(to: string) {
-    return to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
+    if (to === '/') return location.pathname === '/'
+    // A single team's roster page (/teams/:teamId) belongs to the Team Rosters tab.
+    if (to === '/team-rosters' && location.pathname.startsWith('/teams/')) return true
+    return location.pathname.startsWith(to)
   }
+
+  const mode: Mode = scopedItems.some((item) => isActive(item.to)) ? 'division' : 'global'
+  const tabItems = mode === 'division' ? scopedItems : globalItems
+  const activeTab = tabItems.find((item) => isActive(item.to))?.to ?? null
+
+  // Switching modes returns to the page last open in that mode.
+  const lastPath = useRef<Record<Mode, string | null>>({ division: null, global: null })
+  useEffect(() => {
+    lastPath.current[mode] = location.pathname
+  }, [mode, location.pathname])
+
+  function switchMode(next: Mode) {
+    close()
+    if (next === mode) return
+    const items = next === 'division' ? scopedItems : globalItems
+    navigate(lastPath.current[next] ?? items[0]?.to ?? '/')
+  }
+
+  const workingDivision = divisions.find((d) => d.id === workingDivisionId)
 
   return (
     <AppShell
@@ -69,13 +99,19 @@ export function AppLayout() {
       padding="md"
     >
       <AppShell.Header bg="var(--app-secondary-bg)">
-        <Group h="100%" px="md" justify="space-between">
-          <Group>
+        <Group h="100%" px="md" justify="space-between" wrap="nowrap">
+          <Group wrap="nowrap">
             <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
-            <Title order={3}>Team Pittsburgh Team Manager</Title>
+            <Title order={3} visibleFrom="sm">
+              Team Pittsburgh Team Manager
+            </Title>
+            {/* Names the current scope, since the left panel is collapsed on a phone. */}
+            <Badge variant="light">
+              {mode === 'global' ? 'Global' : workingDivision ? divisionSeasonLabel(workingDivision) : 'No division'}
+            </Badge>
           </Group>
-          <Group>
-            <Text size="sm" c="dimmed">
+          <Group wrap="nowrap">
+            <Text size="sm" c="dimmed" visibleFrom="sm">
               {user?.display_name}
             </Text>
             <Text size="sm" c="var(--app-heading)" style={{ cursor: 'pointer' }} onClick={() => navigate('/tokens')}>
@@ -92,6 +128,34 @@ export function AppLayout() {
         <Box p="md" style={{ overflowY: 'auto' }}>
           {/* The logo sits on black in both themes, as in the Streamlit sidebar. */}
           <Image src="/logo.png" alt="Team Pittsburgh Ball Hockey" bg="#000000" p={10} radius={16} maw={200} mx="auto" mb="md" />
+          {scopedItems.length > 0 && (
+            <>
+              <NavLink
+                label="Division"
+                description="One season's rosters, games and stats"
+                active={mode === 'division'}
+                onClick={() => switchMode('division')}
+              />
+              <Select
+                aria-label="Working Division"
+                placeholder={divisions.length === 0 ? 'No divisions yet' : 'Choose a division'}
+                data={divisions.map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))}
+                value={workingDivisionId != null ? String(workingDivisionId) : null}
+                onChange={(v) => setWorkingDivisionId(v ? Number(v) : null)}
+                disabled={loading || divisions.length === 0}
+                searchable
+                mt={4}
+                mb="md"
+                size="sm"
+              />
+            </>
+          )}
+          <NavLink
+            label="Global"
+            description="Setup and reference across all divisions"
+            active={mode === 'global'}
+            onClick={() => switchMode('global')}
+          />
           <SegmentedControl
             aria-label="Theme"
             data={[
@@ -102,33 +166,21 @@ export function AppLayout() {
             onChange={(v) => setColorScheme(v as 'dark' | 'light')}
             fullWidth
             size="xs"
-            mb="md"
+            mt="xl"
           />
-          <Select
-            label="Working Division"
-            placeholder={divisions.length === 0 ? 'No divisions yet' : 'Choose a division'}
-            data={divisions.map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))}
-            value={workingDivisionId != null ? String(workingDivisionId) : null}
-            onChange={(v) => setWorkingDivisionId(v ? Number(v) : null)}
-            disabled={loading || divisions.length === 0}
-            searchable
-            mb="md"
-            size="sm"
-          />
-          {globalItems.map((item) => (
-            <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
-          ))}
-          {scopedItems.length > 0 && (
-            <Text size="xs" c="dimmed" mt="md" mb={4} tt="uppercase" fw={700}>
-              Working Division
-            </Text>
-          )}
-          {scopedItems.map((item) => (
-            <NavLink key={item.to} label={item.label} active={isActive(item.to)} onClick={() => navigate(item.to)} />
-          ))}
         </Box>
       </AppShell.Navbar>
       <AppShell.Main>
+        <Tabs value={activeTab} onChange={(to) => to && navigate(to)} mb="md">
+          {/* One row that scrolls sideways on a phone instead of wrapping. */}
+          <Tabs.List style={{ flexWrap: 'nowrap', overflowX: 'auto' }}>
+            {tabItems.map((item) => (
+              <Tabs.Tab key={item.to} value={item.to} style={{ flexShrink: 0 }}>
+                {item.label}
+              </Tabs.Tab>
+            ))}
+          </Tabs.List>
+        </Tabs>
         <Outlet />
       </AppShell.Main>
     </AppShell>

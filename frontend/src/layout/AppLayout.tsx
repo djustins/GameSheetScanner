@@ -136,18 +136,21 @@ export function AppLayout() {
                 active={mode === 'division'}
                 onClick={() => switchMode('division')}
               />
-              <Select
-                aria-label="Working Division"
-                placeholder={divisions.length === 0 ? 'No divisions yet' : 'Choose a division'}
-                data={divisions.map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))}
-                value={workingDivisionId != null ? String(workingDivisionId) : null}
-                onChange={(v) => setWorkingDivisionId(v ? Number(v) : null)}
-                disabled={loading || divisions.length === 0}
-                searchable
-                mt={4}
-                mb="md"
-                size="sm"
-              />
+              {/* Only the division's own pages obey this, so it is hidden in Global mode. */}
+              {mode === 'division' && (
+                <Select
+                  aria-label="Working Division"
+                  placeholder={divisions.length === 0 ? 'No divisions yet' : 'Choose a division'}
+                  data={divisions.map((d) => ({ value: String(d.id), label: divisionSeasonLabel(d) }))}
+                  value={workingDivisionId != null ? String(workingDivisionId) : null}
+                  onChange={(v) => setWorkingDivisionId(v ? Number(v) : null)}
+                  disabled={loading || divisions.length === 0}
+                  searchable
+                  mt={4}
+                  mb="md"
+                  size="sm"
+                />
+              )}
             </>
           )}
           <NavLink

@@ -251,7 +251,29 @@ def login(body: LoginRequest, conn=Depends(get_conn)) -> dict:
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
     _, raw_token = core.create_api_token(conn, user["id"], "Login")
+    core.record_usage(conn, user["id"], "login")
     return {"token": raw_token, "user": _public_user(user)}
+
+
+# ---------------------------------------------------------------------------
+# Usage log -- who signed in to the React app and which pages they opened,
+# counted here on the server so the numbers don't depend on the browser.
+# ---------------------------------------------------------------------------
+
+class PageView(BaseModel):
+    path: str
+
+
+@app.post("/me/page-views", status_code=status.HTTP_204_NO_CONTENT, tags=["meta"])
+def api_record_page_view(body: PageView, conn=Depends(get_conn), user=Depends(get_current_user)):
+    """The React app calls this each time the signed-in user opens a page."""
+    core.record_usage(conn, user["id"], "page", body.path)
+
+
+@app.get("/usage", tags=["users"])
+def api_usage(days: int = 30, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """The usage log summarised per user, per page and per day (admin only)."""
+    return core.usage_summary(conn, max(1, min(days, 365)))
 
 
 # ---------------------------------------------------------------------------

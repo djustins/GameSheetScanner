@@ -15,6 +15,7 @@ import {
   useMantineColorScheme,
 } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
+import { recordPageView } from '../api/users'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { useAccess } from '../auth/access'
@@ -61,9 +62,17 @@ export function AppLayout() {
   const allowed = (item: NavItem) => !item.pages || canViewAny(item.pages)
 
   const globalItems = (
-    user?.is_admin ? [...GLOBAL_NAV_ITEMS, { to: '/admin/users', label: 'User Management' }] : GLOBAL_NAV_ITEMS
+    user?.is_admin
+      ? [...GLOBAL_NAV_ITEMS, { to: '/admin/users', label: 'User Management' }, { to: '/admin/usage', label: 'Usage' }]
+      : GLOBAL_NAV_ITEMS
   ).filter(allowed)
   const scopedItems = SCOPED_NAV_ITEMS.filter(allowed)
+
+  // Log each page the signed-in user opens (see GET /usage). Never worth an
+  // error message if it fails.
+  useEffect(() => {
+    recordPageView(location.pathname).catch(() => {})
+  }, [location.pathname])
 
   function isActive(to: string) {
     if (to === '/') return location.pathname === '/'

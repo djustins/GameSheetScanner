@@ -496,3 +496,19 @@ export interface DivisionEvaluations {
   evaluations: DivisionEvaluation[]
   not_evaluated: { player_id: number; name: string; teams: string[] }[]
 }
+
+// GET /usage: the server-side usage log, summarised three ways.
+export interface UsageSummary {
+  days: number
+  users: {
+    user_id: number
+    email: string
+    display_name: string | null
+    logins: number
+    page_views: number
+    days_active: number
+    last_seen: string
+  }[]
+  pages: { path: string; views: number; users: number }[]
+  by_day: { date: string; users: number; page_views: number; logins: number }[]
+}

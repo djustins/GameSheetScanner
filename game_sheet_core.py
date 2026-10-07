@@ -862,6 +862,66 @@ def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     return users
 
 
+# --- Usage log: who signed in to the React app and which pages they opened ---
+
+def record_usage(conn: PGConnection, user_id: int, kind: str, path: str | None = None) -> None:
+    """Logs one sign-in (kind "login") or one page opened (kind "page").
+    A page's path is stored as its route, without the query string and with
+    ids collapsed ("/teams/12?division=3" -> "/teams/:id"), so every team's
+    roster page counts as the same page."""
+    if path is not None:
+        path = re.sub(r"/\d+(?=/|$)", "/:id", path.split("?", 1)[0].split("#", 1)[0]).rstrip("/") or "/"
+        path = path[:200]
+    conn.execute("INSERT INTO usage_events (user_id, kind, path) VALUES (%s, %s, %s)", (user_id, kind, path))
+    conn.commit()
+
+
+def usage_summary(conn: PGConnection, days: int = 30) -> dict:
+    """The last `days` days of the usage log, three ways: per user (sign-ins,
+    pages opened, days active, last seen), per page (times opened, by how
+    many different people), and per day (people active, pages opened). Days
+    are Pittsburgh's, not UTC's, so an evening's use isn't split in two."""
+    since = "created_at >= now() - make_interval(days => %s)"
+    local_day = "(created_at AT TIME ZONE 'America/New_York')::date"
+    users = conn.execute(
+        f"""SELECT u.id, u.email, u.display_name,
+                   COUNT(*) FILTER (WHERE e.kind = 'login'),
+                   COUNT(*) FILTER (WHERE e.kind = 'page'),
+                   COUNT(DISTINCT {local_day.replace("created_at", "e.created_at")}),
+                   MAX(e.created_at)
+            FROM usage_events e JOIN users u ON u.id = e.user_id
+            WHERE {since.replace("created_at", "e.created_at")}
+            GROUP BY u.id, u.email, u.display_name
+            ORDER BY MAX(e.created_at) DESC""",
+        (days,),
+    ).fetchall()
+    pages = conn.execute(
+        f"""SELECT path, COUNT(*), COUNT(DISTINCT user_id) FROM usage_events
+            WHERE kind = 'page' AND {since} GROUP BY path ORDER BY COUNT(*) DESC, path""",
+        (days,),
+    ).fetchall()
+    by_day = conn.execute(
+        f"""SELECT {local_day}, COUNT(DISTINCT user_id), COUNT(*) FILTER (WHERE kind = 'page'),
+                   COUNT(*) FILTER (WHERE kind = 'login')
+            FROM usage_events WHERE {since} GROUP BY 1 ORDER BY 1 DESC""",
+        (days,),
+    ).fetchall()
+    return {
+        "days": days,
+        "users": [
+            {
+                "user_id": r[0], "email": r[1], "display_name": r[2], "logins": r[3], "page_views": r[4],
+                "days_active": r[5], "last_seen": r[6].isoformat(),
+            }
+            for r in users
+        ],
+        "pages": [{"path": r[0], "views": r[1], "users": r[2]} for r in pages],
+        "by_day": [
+            {"date": r[0].isoformat(), "users": r[1], "page_views": r[2], "logins": r[3]} for r in by_day
+        ],
+    }
+
+
 def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
     row = conn.execute(
         "SELECT id, email, password_hash, display_name, is_admin, role_id, coach_id, deleted_at "

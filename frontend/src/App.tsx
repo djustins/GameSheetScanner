@@ -19,6 +19,7 @@ const CoachesPage = lazy(() => import('./pages/CoachesPage').then((m) => ({ defa
 const AllParentsPage = lazy(() => import('./pages/AllParentsPage').then((m) => ({ default: m.AllParentsPage })))
 const DraftPage = lazy(() => import('./pages/DraftPage').then((m) => ({ default: m.DraftPage })))
 const EvalsPage = lazy(() => import('./pages/EvalsPage').then((m) => ({ default: m.EvalsPage })))
+const UsagePage = lazy(() => import('./pages/UsagePage').then((m) => ({ default: m.UsagePage })))
 const UserManagementPage = lazy(() =>
   import('./pages/UserManagementPage').then((m) => ({ default: m.UserManagementPage }))
 )
@@ -64,6 +65,14 @@ function App() {
             element={
               <AdminRoute>
                 <UserManagementPage />
+              </AdminRoute>
+            }
+          />
+          <Route
+            path="/admin/usage"
+            element={
+              <AdminRoute>
+                <UsagePage />
               </AdminRoute>
             }
           />

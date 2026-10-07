@@ -1025,3 +1025,22 @@ def test_league_site_sync_is_admin_only(conn, admin_auth, readonly_auth, monkeyp
     assert response.status_code == 200
     assert response.json() == [{"league": "x"}]
     assert calls == [(True, api.league_site_sync.REFRESH_DAYS)]
+
+
+def test_usage_log_counts_logins_and_pages_and_is_admin_only(conn, admin_auth, readonly_auth):
+    assert client.post("/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}).status_code == 200
+    for path in ("/teams/12?division=3", "/teams/7", "/draft"):
+        assert client.post("/me/page-views", json={"path": path}, auth=admin_auth).status_code == 204
+    assert client.post("/me/page-views", json={"path": "/draft"}, auth=readonly_auth).status_code == 204
+
+    assert client.get("/usage", auth=readonly_auth).status_code == 403
+    usage = client.get("/usage?days=7", auth=admin_auth).json()
+    by_email = {u["email"]: u for u in usage["users"]}
+    assert (by_email[ADMIN_EMAIL]["logins"], by_email[ADMIN_EMAIL]["page_views"]) == (1, 3)
+    assert by_email[READONLY_EMAIL]["page_views"] == 1
+    # Ids and query strings collapse, so every team's roster is one page.
+    assert usage["pages"] == [
+        {"path": "/draft", "views": 2, "users": 2},
+        {"path": "/teams/:id", "views": 2, "users": 1},
+    ]
+    assert [(d["users"], d["logins"], d["page_views"]) for d in usage["by_day"]] == [(2, 1, 4)]

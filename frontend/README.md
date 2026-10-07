@@ -48,6 +48,13 @@ visitors (`<Analytics />` in `src/main.tsx`). It only reports from the deployed
 site, not from `npm run dev`, and it has to be switched on once for the project in
 the Vercel dashboard under **Analytics**.
 
+The numbers to trust are on the app's own **Usage** page (admins only, in the
+sidebar): the API records each sign-in and each page opened, so nothing in the
+browser can block it, and it shows who, not just how many. `AppLayout.tsx` reports
+each page change to `POST /me/page-views`; `GET /usage` summarises the log per
+person, per page and per day. Vercel Analytics still adds what the server can't
+see (country, device, referrer).
+
 ## Pages
 
 The sidebar has the league-wide pages (Home, Divisions, All Players, All Coaches,

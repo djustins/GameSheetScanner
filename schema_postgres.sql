@@ -423,6 +423,19 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked_at    TEXT
 );
 
+-- Who used the React app and what they opened: one row per sign-in
+-- ('login') and per page opened ('page'), recorded by the API itself so the
+-- counts don't depend on anything running in the browser. path is the page's
+-- route with ids collapsed ("/teams/:id"), NULL for a login.
+CREATE TABLE IF NOT EXISTS usage_events (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK(kind IN ('login', 'page')),
+    path        TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS usage_events_created_at ON usage_events (created_at);
+
 -- A named bundle of page access (e.g. "Coach", "Scorer") — assigned to
 -- users so an admin configures pages once per role instead of once per
 -- person. Replaces the earlier per-user user_pages table: individual page

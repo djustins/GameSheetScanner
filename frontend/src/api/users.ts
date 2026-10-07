@@ -1,5 +1,13 @@
 import { apiFetch } from './client'
-import type { Role, User } from './types'
+import type { Role, UsageSummary, User } from './types'
+
+export function recordPageView(path: string): Promise<void> {
+  return apiFetch<void>('/me/page-views', { method: 'POST', body: JSON.stringify({ path }) })
+}
+
+export function getUsage(days: number): Promise<UsageSummary> {
+  return apiFetch<UsageSummary>(`/usage?days=${days}`)
+}
 
 export function listRoles(): Promise<Role[]> {
   return apiFetch<Role[]>('/roles')

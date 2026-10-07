@@ -16,11 +16,9 @@
 }
 
 #root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
+  /* Full width: the draft board and the wider tables need the room. */
+  width: 100%;
   text-align: center;
-  border-inline: 1px solid var(--app-secondary-bg);
   min-height: 100svh;
   display: flex;
   flex-direction: column;

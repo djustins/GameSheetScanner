@@ -110,6 +110,8 @@ export interface DraftPoolPlayer {
   name: string
   // The position they registered with in this division.
   position: string | null
+  // Latest grade as shown elsewhere ("B", or "B*" from another age group).
+  grade: string | null
 }
 
 export interface DraftOrderEntry {
@@ -138,6 +140,10 @@ export interface DraftPick {
   nickname: string | null
   picked_at: string
   player_name: string
+  team_id: number
+  player_id: number
+  position: string | null
+  grade: string | null
 }
 
 export interface AutoDraftRun {

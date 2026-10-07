@@ -3037,7 +3037,9 @@ def list_draft_order(conn: PGConnection, draft_id: int) -> list[dict]:
 def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
     """Players eligible to be drafted: registered for this division
     (player_divisions) and not already on any of its teams' rosters.
-    "position" is the one they asked for when registering."""
+    "position" is the one they asked for when registering; "grade" is their
+    latest available one as shown everywhere else (grade_display: "B", or
+    "B*" from a different age group), None if they've never been graded."""
     rows = conn.execute(
         """SELECT p.id, p.first_name, p.last_name, p.nickname, p.birth_date, pd.position
            FROM players p JOIN player_divisions pd ON pd.player_id = p.id AND pd.division_id = %s
@@ -3052,8 +3054,10 @@ def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
     ).fetchall()
     cols = ["id", "first_name", "last_name", "nickname", "birth_date", "position"]
     players = [dict(zip(cols, r)) for r in rows]
+    grades = get_latest_grades_with_source(conn, division_id, [p["id"] for p in players])
     for p in players:
         p["name"] = full_name(p["first_name"], p["last_name"])
+        p["grade"] = grade_display(grades.get(p["id"]))
     return players
 
 
@@ -3173,19 +3177,27 @@ def undo_last_pick(conn: PGConnection, draft_id: int):
 
 
 def list_draft_picks(conn: PGConnection, draft_id: int) -> list[dict]:
+    """The draft's picks in order, each with the player's registered
+    position and latest grade (as in draft_pool), for a draft board."""
     rows = conn.execute(
-        """SELECT dp.pick_number, dp.round, t.name, p.first_name, p.last_name, p.nickname, dp.picked_at
+        """SELECT dp.pick_number, dp.round, t.name, p.first_name, p.last_name, p.nickname, dp.picked_at,
+                  dp.team_id, dp.player_id, pd.position, d.division_id
            FROM draft_picks dp
+           JOIN drafts d ON d.id = dp.draft_id
            JOIN teams t ON t.id = dp.team_id
            JOIN players p ON p.id = dp.player_id
+           LEFT JOIN player_divisions pd ON pd.player_id = dp.player_id AND pd.division_id = d.division_id
            WHERE dp.draft_id = %s ORDER BY dp.pick_number""",
         (draft_id,),
     ).fetchall()
-    cols = ["pick_number", "round", "team_name", "first_name", "last_name", "nickname", "picked_at"]
+    cols = ["pick_number", "round", "team_name", "first_name", "last_name", "nickname", "picked_at",
+            "team_id", "player_id", "position"]
     picks = [dict(zip(cols, r)) for r in rows]
+    grades = get_latest_grades_with_source(conn, rows[0][10], [p["player_id"] for p in picks]) if rows else {}
     for p in picks:
         p["team_name"] = display_text(p["team_name"])
         p["player_name"] = full_name(p["first_name"], p["last_name"])
+        p["grade"] = grade_display(grades.get(p["player_id"]))
     return picks
 
 

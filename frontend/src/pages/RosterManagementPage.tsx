@@ -1,20 +1,16 @@
 import { useState } from 'react'
-import { Alert, Button, Group, MultiSelect, Select, Stack, Tabs, Text, TextInput, Title } from '@mantine/core'
+import { Alert, Button, Group, MultiSelect, Stack, Tabs, Text, Title } from '@mantine/core'
 import { useSearchParams } from 'react-router-dom'
 import { notifications } from '@mantine/notifications'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   autoDraft,
-  deleteDraft,
   getAutoDraftRun,
   getDraft,
   getDraftPool,
-  listPicks,
   startDraft,
   storeAutoDraft,
-  submitPick,
   undoAutoDraft,
-  undoLastPick,
 } from '../api/draft'
 import { listDivisionTeams } from '../api/divisions'
 import { listTeamCoaches } from '../api/teams'
@@ -23,6 +19,7 @@ import { useAuth } from '../auth/AuthContext'
 import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { useWorkingDivision } from '../context/WorkingDivisionContext'
 import { AutoDraftResults, DraftNotes } from '../components/AutoDraftResults'
+import { DraftRoom } from '../components/DraftRoom'
 import { MoveHistory } from '../components/MoveHistory'
 import { TradePanel } from '../components/TradePanel'
 import { UnplacedPlayers } from '../components/UnplacedPlayers'
@@ -98,13 +95,9 @@ export function RosterManagementPage() {
 }
 
 function DraftBoard() {
-  const { user } = useAuth()
-  const { readOnly } = useAccess()
   const { workingDivisionId } = useWorkingDivision()
   const queryClient = useQueryClient()
   const [orderPick, setOrderPick] = useState<string[]>([])
-  const [pickSearch, setPickSearch] = useState('')
-  const [pickPlayerId, setPickPlayerId] = useState<string | null>(null)
   // Kept on the page (not just a toast) since warnings -- e.g. a skipped
   // play-with request -- can be several and worth reading carefully.
   const [autoDraftResult, setAutoDraftResult] = useState<{ divisionId: number; message: string; warnings: string[] } | null>(null)
@@ -134,12 +127,6 @@ function DraftBoard() {
     queryKey: ['auto-draft-run', divId],
     queryFn: () => getAutoDraftRun(divId),
     enabled: workingDivisionId != null && !draft,
-  })
-
-  const { data: currentTeamCoaches } = useQuery({
-    queryKey: ['team-coaches', draft?.current_team_id],
-    queryFn: () => listTeamCoaches(draft!.current_team_id!),
-    enabled: !!draft?.current_team_id,
   })
 
   const onError = (err: unknown) =>
@@ -191,34 +178,6 @@ function DraftBoard() {
     onError,
   })
 
-  const pickMutation = useMutation({
-    mutationFn: () => submitPick(draft!.id, Number(pickPlayerId)),
-    onSuccess: () => {
-      invalidateDraft()
-      setPickPlayerId(null)
-      setPickSearch('')
-    },
-    onError,
-  })
-
-  const undoPickMutation = useMutation({
-    mutationFn: () => undoLastPick(draft!.id),
-    onSuccess: invalidateDraft,
-    onError,
-  })
-
-  const deleteMutation = useMutation({
-    mutationFn: () => deleteDraft(draft!.id),
-    onSuccess: invalidateDraft,
-    onError,
-  })
-
-  const { data: picks } = useQuery({
-    queryKey: ['draft-picks', draft?.id],
-    queryFn: () => listPicks(draft!.id),
-    enabled: !!draft,
-  })
-
   const missingTeams = (teams ?? []).filter((t) => !orderPick.includes(String(t.id)))
 
   const teamCoachQueries = useQueries({
@@ -241,15 +200,6 @@ function DraftBoard() {
     }
     setOrderPick(ids)
   }
-
-  const canPick =
-    !readOnly &&
-    !!draft?.current_team_id &&
-    (user?.is_admin || (user?.coach_id != null && (currentTeamCoaches ?? []).some((c) => c.id === user.coach_id)))
-
-  const poolMatches = (pool ?? []).filter((p) =>
-    pickSearch.trim() ? p.name.toLowerCase().includes(pickSearch.trim().toLowerCase()) : true
-  )
 
   return (
     <Stack>
@@ -353,85 +303,8 @@ function DraftBoard() {
         </Writable>
       )}
 
-      {draft && (
-        <Stack mt="md">
-          {draft.status === 'completed' ? (
-            <Alert color="green">Draft complete!</Alert>
-          ) : (
-            <Alert color="blue">
-              Round {draft.round}, Pick #{draft.current_pick_number} — it&apos;s{' '}
-              <strong>{draft.current_team_name}</strong>&apos;s turn. {pool?.length ?? 0} player(s) left in the
-              pool.
-            </Alert>
-          )}
-
-          {draft.status !== 'completed' && canPick && (
-            <Group align="flex-end">
-              <TextInput
-                label="Search the pool"
-                value={pickSearch}
-                onChange={(e) => setPickSearch(e.currentTarget.value)}
-              />
-              <Select
-                data={poolMatches.map((p) => ({ value: String(p.id), label: p.nickname ? `${p.name} "${p.nickname}"` : p.name }))}
-                value={pickPlayerId}
-                onChange={setPickPlayerId}
-                placeholder="Pool"
-                flex={1}
-              />
-              <Button disabled={!pickPlayerId} loading={pickMutation.isPending} onClick={() => pickMutation.mutate()}>
-                Draft
-              </Button>
-            </Group>
-          )}
-          {draft.status !== 'completed' && !canPick && (
-            <Text size="sm" c="dimmed">
-              Waiting for {draft.current_team_name}&apos;s coach (or an admin) to make this pick.
-            </Text>
-          )}
-
-          {user?.is_admin && picks && picks.length > 0 && (
-            <Button variant="subtle" onClick={() => undoPickMutation.mutate()}>
-              Undo last pick
-            </Button>
-          )}
-
-          <div>
-            <Title order={5}>Draft order ({draft.order.length} teams)</Title>
-            <Text size="sm">{draft.order.map((o) => o.team_name).join(' → ')} → (reverses each round)</Text>
-          </div>
-
-          <div>
-            <Title order={5}>Pick history ({picks?.length ?? 0})</Title>
-            {!picks || picks.length === 0 ? (
-              <Text size="sm" c="dimmed">
-                No picks yet.
-              </Text>
-            ) : (
-              <Stack gap={2}>
-                {picks.map((p, i) => (
-                  <Text size="sm" key={i}>
-                    #{p.pick_number} (Rd {p.round}) — {p.team_name}: {p.player_name}
-                    {p.nickname ? ` "${p.nickname}"` : ''}
-                  </Text>
-                ))}
-              </Stack>
-            )}
-          </div>
-
-          {user?.is_admin && (
-            <Button
-              color="red"
-              variant="outline"
-              onClick={() =>
-                confirm('Delete this draft’s order and pick history? Already-drafted players stay on their roster.') &&
-                deleteMutation.mutate()
-              }
-            >
-              Delete this draft
-            </Button>
-          )}
-        </Stack>
+      {draft && workingDivisionId != null && (
+        <DraftRoom draft={draft} divisionId={divId} teams={teams ?? []} onChanged={invalidateDraft} />
       )}
 
       {workingDivisionId != null && (

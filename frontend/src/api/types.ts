@@ -120,11 +120,27 @@ export interface DraftOrderEntry {
   team_name: string
 }
 
+// One draft's own rules; see DRAFT_SETTING_DEFAULTS in game_sheet_core.py.
+export interface DraftSettings {
+  order_type: 'snake' | 'linear'
+  // Stop after this many rounds; null = until the pool is empty.
+  rounds: number | null
+  // The pick clock, in seconds; null = no clock.
+  pick_seconds: number | null
+  who_picks: 'coaches' | 'admins'
+}
+
 export interface Draft {
   id: number
   division_id: number
   status: 'in_progress' | 'completed'
   current_pick_number: number
+  // A practice draft: its picks change no roster.
+  is_mock: boolean
+  settings: DraftSettings
+  // When the current pick went on the clock, and the server's time when it said so.
+  pick_started_at: string
+  server_now: string
   order: DraftOrderEntry[]
   current_team_id?: number | null
   current_team_name?: string | null

@@ -1,28 +1,28 @@
 import { useState } from 'react'
-import { Alert, Button, Group, MultiSelect, Stack, Tabs, Text, Title } from '@mantine/core'
+import { Alert, Button, Group, SegmentedControl, Stack, Tabs, Text, Title } from '@mantine/core'
 import { useSearchParams } from 'react-router-dom'
 import { notifications } from '@mantine/notifications'
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   autoDraft,
   getAutoDraftRun,
   getDraft,
   getDraftPool,
-  startDraft,
   storeAutoDraft,
   undoAutoDraft,
 } from '../api/draft'
 import { listDivisionTeams } from '../api/divisions'
-import { listTeamCoaches } from '../api/teams'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { useWorkingDivision } from '../context/WorkingDivisionContext'
 import { AutoDraftResults, DraftNotes } from '../components/AutoDraftResults'
 import { DraftRoom } from '../components/DraftRoom'
+import { DraftSetup } from '../components/DraftSetup'
 import { MoveHistory } from '../components/MoveHistory'
 import { TradePanel } from '../components/TradePanel'
 import { UnplacedPlayers } from '../components/UnplacedPlayers'
+import type { Team } from '../api/types'
 import { RequestsPage } from './RequestsPage'
 
 /** Everything that decides who is on which team in the Working Division: the
@@ -97,7 +97,7 @@ export function RosterManagementPage() {
 function DraftBoard() {
   const { workingDivisionId } = useWorkingDivision()
   const queryClient = useQueryClient()
-  const [orderPick, setOrderPick] = useState<string[]>([])
+  const [mode, setMode] = useState<'live' | 'mock'>('live')
   // Kept on the page (not just a toast) since warnings -- e.g. a skipped
   // play-with request -- can be several and worth reading carefully.
   const [autoDraftResult, setAutoDraftResult] = useState<{ divisionId: number; message: string; warnings: string[] } | null>(null)
@@ -135,6 +135,7 @@ function DraftBoard() {
   const invalidateDraft = () => {
     queryClient.invalidateQueries({ queryKey: ['draft', divId] })
     queryClient.invalidateQueries({ queryKey: ['draft-pool', divId] })
+    queryClient.invalidateQueries({ queryKey: ['draft-pool-for'] })
     queryClient.invalidateQueries({ queryKey: ['auto-draft-run', divId] })
     queryClient.invalidateQueries({ queryKey: ['auto-draft-results', divId] })
     queryClient.invalidateQueries({ queryKey: ['roster'] })
@@ -169,38 +170,6 @@ function DraftBoard() {
     onError,
   })
 
-  const startMutation = useMutation({
-    mutationFn: () => startDraft(divId, orderPick.map(Number)),
-    onSuccess: () => {
-      invalidateDraft()
-      setOrderPick([])
-    },
-    onError,
-  })
-
-  const missingTeams = (teams ?? []).filter((t) => !orderPick.includes(String(t.id)))
-
-  const teamCoachQueries = useQueries({
-    queries: (teams ?? []).map((t) => ({
-      queryKey: ['team-coaches', t.id],
-      queryFn: () => listTeamCoaches(t.id),
-    })),
-  })
-  const teamLabel = (teamId: number, name: string) => {
-    const idx = (teams ?? []).findIndex((t) => t.id === teamId)
-    const coaches = teamCoachQueries[idx]?.data ?? []
-    return coaches.length ? `${name} (${coaches.map((c) => c.name).join(', ')})` : name
-  }
-
-  function randomizeOrder() {
-    const ids = (teams ?? []).map((t) => String(t.id))
-    for (let i = ids.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1))
-      ;[ids[i], ids[j]] = [ids[j], ids[i]]
-    }
-    setOrderPick(ids)
-  }
-
   return (
     <Stack>
       <Title order={3}>Draft</Title>
@@ -211,7 +180,24 @@ function DraftBoard() {
 
       {workingDivisionId == null && <Alert color="yellow">Pick a Working Division from the sidebar first.</Alert>}
 
-      {autoDraftResult && autoDraftResult.divisionId === divId && (
+      {workingDivisionId != null && (
+        <SegmentedControl
+          w="fit-content"
+          mx="auto"
+          value={mode}
+          onChange={(v) => setMode(v as 'live' | 'mock')}
+          data={[
+            { value: 'live', label: 'Live draft' },
+            { value: 'mock', label: 'Mock draft' },
+          ]}
+        />
+      )}
+
+      {workingDivisionId != null && mode === 'mock' && (
+        <MockDraft divisionId={divId} teams={teams ?? []} onChanged={invalidateDraft} />
+      )}
+
+      {mode === 'live' && autoDraftResult && autoDraftResult.divisionId === divId && (
         <Alert
           color={autoDraftResult.warnings.length ? 'yellow' : 'green'}
           title={autoDraftResult.message}
@@ -230,7 +216,7 @@ function DraftBoard() {
         </Alert>
       )}
 
-      {workingDivisionId != null && !draft && (
+      {mode === 'live' && workingDivisionId != null && !draft && (
         <Writable>
         <Stack mt="md">
           <Text size="sm">{pool?.length ?? 0} player(s) currently eligible for this division&apos;s pool.</Text>
@@ -273,29 +259,7 @@ function DraftBoard() {
               )}
 
               {(pool?.length ?? 0) > 0 && (
-                <Stack>
-                  <Button variant="subtle" size="xs" w="fit-content" onClick={randomizeOrder}>
-                    🔀 Randomize order
-                  </Button>
-                  <MultiSelect
-                    label="Draft order — pick teams in the order they should draft (round 1; later rounds snake back)"
-                    data={(teams ?? []).map((t) => ({ value: String(t.id), label: teamLabel(t.id, t.name) }))}
-                    value={orderPick}
-                    onChange={setOrderPick}
-                  />
-                  {missingTeams.length > 0 && (
-                    <Text size="sm" c="dimmed">
-                      Still need to add: {missingTeams.map((t) => t.name).join(', ')}
-                    </Text>
-                  )}
-                  <Button
-                    disabled={missingTeams.length > 0}
-                    loading={startMutation.isPending}
-                    onClick={() => startMutation.mutate()}
-                  >
-                    Start Draft
-                  </Button>
-                </Stack>
+                <DraftSetup divisionId={divId} teams={teams ?? []} mock={false} onStarted={invalidateDraft} />
               )}
             </>
           )}
@@ -303,15 +267,45 @@ function DraftBoard() {
         </Writable>
       )}
 
-      {draft && workingDivisionId != null && (
+      {mode === 'live' && draft && workingDivisionId != null && (
         <DraftRoom draft={draft} divisionId={divId} teams={teams ?? []} onChanged={invalidateDraft} />
       )}
 
-      {workingDivisionId != null && (
+      {mode === 'live' && workingDivisionId != null && (
         <Stack mt="lg" gap="lg">
           <AutoDraftResults divisionId={workingDivisionId} />
           <DraftNotes divisionId={workingDivisionId} />
         </Stack>
+      )}
+    </Stack>
+  )
+}
+
+/** A practice draft for the division: same room, same rules, but its picks are
+ * never saved to a roster, so it can be run and thrown away any number of times. */
+function MockDraft({ divisionId, teams, onChanged }: { divisionId: number; teams: Team[]; onChanged: () => void }) {
+  const { readOnly } = useAccess()
+  const { data: draft, isLoading } = useQuery({
+    queryKey: ['draft', divisionId, 'mock'],
+    queryFn: () => getDraft(divisionId, true),
+    refetchInterval: 5000,
+  })
+  if (isLoading) return null
+  if (draft) return <DraftRoom draft={draft} divisionId={divisionId} teams={teams} onChanged={onChanged} />
+  if (teams.length < 2) return <Alert color="yellow">Add at least two teams to this division before drafting.</Alert>
+  return (
+    <Stack>
+      <Alert color="blue" title="Mock draft">
+        A practice run for testing settings or training coaches. Nothing here is saved to a roster, and everyone
+        registered in the division is in the pool, even players already on a team. End it and start over as often as
+        you like; it runs alongside the real draft without touching it.
+      </Alert>
+      {readOnly ? (
+        <Text size="sm" c="dimmed">
+          No mock draft is running.
+        </Text>
+      ) : (
+        <DraftSetup divisionId={divisionId} teams={teams} mock onStarted={onChanged} />
       )}
     </Stack>
   )

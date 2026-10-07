@@ -8,12 +8,28 @@ import type {
   Draft,
   DraftPick,
   DraftPoolPlayer,
+  DraftSettings,
   TradeBody,
   TradePreview,
 } from './types'
 
-export function getDraft(divisionId: number): Promise<Draft | null> {
-  return apiFetch<Draft | null>(`/divisions/${divisionId}/draft`)
+// The division's real draft, or (mock) its practice one; it can have both.
+export function getDraft(divisionId: number, mock = false): Promise<Draft | null> {
+  return apiFetch<Draft | null>(`/divisions/${divisionId}/draft${mock ? '?mock=true' : ''}`)
+}
+
+// Who can still be picked in this draft (a mock's pool ignores real rosters).
+export function getDraftPoolFor(draftId: number): Promise<DraftPoolPlayer[]> {
+  return apiFetch<DraftPoolPlayer[]>(`/drafts/${draftId}/pool`)
+}
+
+export function updateDraftSettings(draftId: number, settings: Partial<DraftSettings>): Promise<Draft> {
+  return apiFetch<Draft>(`/drafts/${draftId}/settings`, { method: 'PATCH', body: JSON.stringify(settings) })
+}
+
+// Mock drafts only: the best player left goes to the team on the clock.
+export function autoPick(draftId: number): Promise<{ player_id: number }> {
+  return apiFetch(`/drafts/${draftId}/auto-pick`, { method: 'POST' })
 }
 
 // Admin-only: every logged move and trade in the division, newest first.
@@ -29,14 +45,18 @@ export function getAutoDraftRun(divisionId: number): Promise<AutoDraftRun | null
   return apiFetch<AutoDraftRun | null>(`/divisions/${divisionId}/draft/auto-draft-run`)
 }
 
-export function startDraft(divisionId: number, teamIdsInOrder: number[]): Promise<Draft> {
+export function startDraft(
+  divisionId: number,
+  teamIdsInOrder: number[],
+  options: { mock?: boolean; settings?: DraftSettings } = {}
+): Promise<Draft> {
   return apiFetch<Draft>(`/divisions/${divisionId}/draft/start`, {
     method: 'POST',
-    body: JSON.stringify({ team_ids_in_order: teamIdsInOrder }),
+    body: JSON.stringify({ team_ids_in_order: teamIdsInOrder, mock: options.mock ?? false, settings: options.settings }),
   })
 }
 
-export function submitPick(draftId: number, playerId: number): Promise<{ roster_entry_id: number }> {
+export function submitPick(draftId: number, playerId: number): Promise<{ roster_entry_id: number | null }> {
   return apiFetch(`/drafts/${draftId}/pick`, { method: 'POST', body: JSON.stringify({ player_id: playerId }) })
 }
 

@@ -312,6 +312,17 @@ CREATE TABLE IF NOT EXISTS drafts (
     UNIQUE(division_id)
 );
 
+-- A division can have one real draft and, alongside it, one mock draft: a
+-- practice run whose picks never touch a roster (see is_mock in
+-- game_sheet_core.submit_draft_pick). settings holds this draft's own rules
+-- (game_sheet_core.DRAFT_SETTING_DEFAULTS); pick_started_at is when the
+-- current pick went on the clock.
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS is_mock BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS pick_started_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE drafts DROP CONSTRAINT IF EXISTS drafts_division_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS drafts_division_mock ON drafts (division_id, is_mock);
+
 -- Round-1 draft order (1-based slot per team); whose turn a given overall
 -- pick number is follows from this plus snake logic (odd rounds go
 -- slot 1..N, even rounds go N..1) — computed in game_sheet_core's draft

@@ -3014,14 +3014,88 @@ def list_evaluated_player_ids(conn: PGConnection, division_id: int) -> set[int]:
 # it (delete_draft) to start over.
 # ---------------------------------------------------------------------------
 
-def get_draft(conn: PGConnection, division_id: int) -> dict | None:
+# A draft's own rules, each changeable per draft (see update_draft_settings):
+#   order_type    "snake" (each round reverses the order) or "linear" (same order every round)
+#   rounds        stop after this many rounds; None = keep going until the pool is empty
+#   pick_seconds  the pick clock shown to everyone; None = no clock. It's a prompt, not
+#                 an enforcer: nothing is picked automatically when it runs out.
+#   who_picks     "coaches" (the team's own coach, or an admin) or "admins" (admins only)
+DRAFT_SETTING_DEFAULTS = {"order_type": "snake", "rounds": None, "pick_seconds": None, "who_picks": "coaches"}
+
+
+def clean_draft_settings(settings: dict | None) -> dict:
+    """The given settings checked and laid over the defaults. Raises
+    ValueError for a value that isn't allowed; unknown keys are dropped."""
+    merged = {**DRAFT_SETTING_DEFAULTS, **{k: v for k, v in (settings or {}).items() if k in DRAFT_SETTING_DEFAULTS}}
+    if merged["order_type"] not in ("snake", "linear"):
+        raise ValueError("Draft order must be snake or linear.")
+    if merged["who_picks"] not in ("coaches", "admins"):
+        raise ValueError("Who picks must be coaches or admins.")
+    for key, low, high in (("rounds", 1, 99), ("pick_seconds", 5, 3600)):
+        if merged[key] in ("", 0):
+            merged[key] = None
+        if merged[key] is not None:
+            merged[key] = int(merged[key])
+            if not low <= merged[key] <= high:
+                raise ValueError(f"{key.replace('_', ' ').capitalize()} must be between {low} and {high}.")
+    return merged
+
+
+_DRAFT_COLS = "id, division_id, status, current_pick_number, is_mock, settings, pick_started_at, now()"
+
+
+def _draft_row(row) -> dict:
+    return {
+        "id": row[0], "division_id": row[1], "status": row[2], "current_pick_number": row[3],
+        "is_mock": bool(row[4]), "settings": clean_draft_settings(row[5]),
+        # When this pick went on the clock, and the server's own time to measure it against.
+        "pick_started_at": row[6].isoformat(), "server_now": row[7].isoformat(),
+    }
+
+
+def get_draft(conn: PGConnection, division_id: int, mock: bool = False) -> dict | None:
+    """The division's draft -- its real one, or with mock=True its mock
+    (practice) draft; a division can have one of each at once."""
     row = conn.execute(
-        "SELECT id, division_id, status, current_pick_number FROM drafts WHERE division_id = %s",
-        (division_id,),
+        f"SELECT {_DRAFT_COLS} FROM drafts WHERE division_id = %s AND is_mock = %s", (division_id, mock)
     ).fetchone()
-    if row is None:
-        return None
-    return {"id": row[0], "division_id": row[1], "status": row[2], "current_pick_number": row[3]}
+    return _draft_row(row) if row else None
+
+
+def get_draft_by_id(conn: PGConnection, draft_id: int) -> dict | None:
+    row = conn.execute(f"SELECT {_DRAFT_COLS} FROM drafts WHERE id = %s", (draft_id,)).fetchone()
+    return _draft_row(row) if row else None
+
+
+def update_draft_settings(conn: PGConnection, draft_id: int, settings: dict) -> dict:
+    """Changes some of a draft's settings, even mid-draft. The order type
+    can only change before the first pick, since it decides whose pick each
+    one already made was. Lowering `rounds` to at or below what's been
+    played finishes the draft; raising it reopens one that ended on rounds."""
+    draft = get_draft_by_id(conn, draft_id)
+    if draft is None:
+        raise ValueError("Draft not found.")
+    merged = clean_draft_settings({**draft["settings"], **settings})
+    picks_made = conn.execute("SELECT COUNT(*) FROM draft_picks WHERE draft_id = %s", (draft_id,)).fetchone()[0]
+    if merged["order_type"] != draft["settings"]["order_type"] and picks_made:
+        raise ValueError("The draft order can't change once picks have been made — undo them first.")
+    conn.execute("UPDATE drafts SET settings = %s WHERE id = %s", (json.dumps(merged), draft_id))
+    _refresh_draft_status(conn, draft_id)
+    conn.commit()
+    return merged
+
+
+def _refresh_draft_status(conn: PGConnection, draft_id: int) -> None:
+    """Sets the draft completed or in progress from where it stands: done
+    when its pool is empty or its rounds are used up. Doesn't commit."""
+    draft = get_draft_by_id(conn, draft_id)
+    teams = conn.execute("SELECT COUNT(*) FROM draft_order WHERE draft_id = %s", (draft_id,)).fetchone()[0]
+    rounds = draft["settings"]["rounds"]
+    out_of_rounds = rounds is not None and teams and draft["current_pick_number"] > rounds * teams
+    done = out_of_rounds or not draft_pool_for(conn, draft)
+    conn.execute(
+        "UPDATE drafts SET status = %s WHERE id = %s", ("completed" if done else "in_progress", draft_id)
+    )
 
 
 def list_draft_order(conn: PGConnection, draft_id: int) -> list[dict]:
@@ -3061,13 +3135,39 @@ def draft_pool(conn: PGConnection, division_id: int) -> list[dict]:
     return players
 
 
-def _snake_team_id(order: list[dict], pick_number: int) -> tuple[int, int]:
+def draft_pool_for(conn: PGConnection, draft: dict) -> list[dict]:
+    """Who can still be picked in this draft. A real draft's pool is
+    draft_pool. A mock draft never touches rosters, so its pool is everyone
+    registered in the division -- on a team already or not -- minus whoever
+    the mock itself has picked; that way a mock can be run for practice even
+    after the real teams are set."""
+    if not draft["is_mock"]:
+        return draft_pool(conn, draft["division_id"])
+    rows = conn.execute(
+        """SELECT p.id, p.first_name, p.last_name, p.nickname, p.birth_date, pd.position
+           FROM players p JOIN player_divisions pd ON pd.player_id = p.id AND pd.division_id = %s
+           WHERE p.deleted_at IS NULL
+             AND p.id NOT IN (SELECT player_id FROM draft_picks WHERE draft_id = %s)
+           ORDER BY p.last_name, p.first_name""",
+        (draft["division_id"], draft["id"]),
+    ).fetchall()
+    cols = ["id", "first_name", "last_name", "nickname", "birth_date", "position"]
+    players = [dict(zip(cols, r)) for r in rows]
+    grades = get_latest_grades_with_source(conn, draft["division_id"], [p["id"] for p in players])
+    for p in players:
+        p["name"] = full_name(p["first_name"], p["last_name"])
+        p["grade"] = grade_display(grades.get(p["id"]))
+    return players
+
+
+def _snake_team_id(order: list[dict], pick_number: int, linear: bool = False) -> tuple[int, int]:
     """(team_id, round) for a 1-based overall pick_number, given round-1
-    order — odd rounds go slot 1..N, even rounds reverse to N..1."""
+    order — odd rounds go slot 1..N, even rounds reverse to N..1 (or, for a
+    linear draft, every round goes 1..N)."""
     n = len(order)
     round_num = (pick_number - 1) // n + 1
     pos_in_round = (pick_number - 1) % n
-    if round_num % 2 == 0:
+    if round_num % 2 == 0 and not linear:
         pos_in_round = n - 1 - pos_in_round
     return order[pos_in_round]["team_id"], round_num
 
@@ -3076,23 +3176,31 @@ def current_pick_team_id(conn: PGConnection, draft_id: int) -> int | None:
     """The team whose turn the current pick is — None if the draft has no
     team order (shouldn't happen once started) or has finished."""
     order = list_draft_order(conn, draft_id)
-    draft = conn.execute(
-        "SELECT status, current_pick_number FROM drafts WHERE id = %s", (draft_id,)
-    ).fetchone()
-    if not order or draft is None or draft[0] != "in_progress":
+    draft = get_draft_by_id(conn, draft_id)
+    if not order or draft is None or draft["status"] != "in_progress":
         return None
-    team_id, _ = _snake_team_id(order, draft[1])
+    team_id, _ = _snake_team_id(order, draft["current_pick_number"], draft["settings"]["order_type"] == "linear")
     return team_id
 
 
-def start_draft(conn: PGConnection, division_id: int, team_ids_in_order: list[int]) -> int:
-    """Create a new draft for a division with the given round-1 team order.
-    Raises ValueError if one's already active for this division."""
-    if get_draft(conn, division_id) is not None:
-        raise ValueError("A draft already exists for this division — delete it first to start over.")
+def start_draft(
+    conn: PGConnection, division_id: int, team_ids_in_order: list[int],
+    mock: bool = False, settings: dict | None = None,
+) -> int:
+    """Create a new draft for a division with the given round-1 team order
+    and settings (see DRAFT_SETTING_DEFAULTS) -- its real draft, or with
+    mock=True a practice one whose picks change no roster. Raises ValueError
+    if one of that kind already exists for this division."""
+    if get_draft(conn, division_id, mock) is not None:
+        raise ValueError(
+            f"A {'mock ' if mock else ''}draft already exists for this division — delete it first to start over."
+        )
     if not team_ids_in_order:
         raise ValueError("Need at least one team to draft into.")
-    cur = conn.execute("INSERT INTO drafts (division_id) VALUES (%s) RETURNING id", (division_id,))
+    cur = conn.execute(
+        "INSERT INTO drafts (division_id, is_mock, settings) VALUES (%s, %s, %s) RETURNING id",
+        (division_id, mock, json.dumps(clean_draft_settings(settings))),
+    )
     draft_id = cur.fetchone()[0]
     for slot, team_id in enumerate(team_ids_in_order, start=1):
         conn.execute(
@@ -3105,7 +3213,8 @@ def start_draft(conn: PGConnection, division_id: int, team_ids_in_order: list[in
 def delete_draft(conn: PGConnection, draft_id: int):
     """Deletes the draft's own tracking (order/pick history) only — NOT the
     roster rows its picks already created, which by now are just normal
-    roster entries like any other (edit/remove those from Team Rosters)."""
+    roster entries like any other (edit/remove those from Team Rosters).
+    A mock draft never made any, so deleting one leaves nothing behind."""
     conn.execute("DELETE FROM drafts WHERE id = %s", (draft_id,))
     conn.commit()
 
@@ -3114,46 +3223,77 @@ def submit_draft_pick(conn: PGConnection, draft_id: int, player_id: int) -> int:
     """Records the next pick for whichever team's turn it is, and creates a
     roster row for that player on that team — jersey number left as a
     placeholder ("TBD<n>") for the coach to fill in later via Team Rosters,
-    same as any other roster row. Raises ValueError if the draft isn't in
+    same as any other roster row. A mock draft records the pick only: no
+    roster row, nothing real changes. Raises ValueError if the draft isn't in
     progress or the player isn't in its pool. Returns the new roster row's
-    id."""
-    draft = conn.execute(
-        "SELECT status, current_pick_number, division_id FROM drafts WHERE id = %s", (draft_id,)
-    ).fetchone()
+    id (None for a mock)."""
+    draft = get_draft_by_id(conn, draft_id)
     if draft is None:
         raise ValueError("Draft not found.")
-    status, pick_number, division_id = draft
-    if status != "in_progress":
+    pick_number = draft["current_pick_number"]
+    if draft["status"] != "in_progress":
         raise ValueError("This draft has already finished.")
 
     order = list_draft_order(conn, draft_id)
-    team_id, round_num = _snake_team_id(order, pick_number)
+    team_id, round_num = _snake_team_id(order, pick_number, draft["settings"]["order_type"] == "linear")
 
-    pool = draft_pool(conn, division_id)
-    pool_ids = {p["id"] for p in pool}
-    if player_id not in pool_ids:
+    if player_id not in {p["id"] for p in draft_pool_for(conn, draft)}:
         raise ValueError(
+            "That player isn't in this draft's pool (already picked, or not registered for this division)."
+            if draft["is_mock"] else
             "That player isn't in this draft's pool (already rostered, or not registered for this division)."
         )
 
-    already_on_team = conn.execute(
-        "SELECT COUNT(*) FROM roster_entries WHERE team_id = %s AND number LIKE 'TBD%%'", (team_id,)
-    ).fetchone()[0]
-    player = get_player(conn, player_id)
-    roster_entry_id = add_roster_entry(conn, team_id, f"TBD{already_on_team + 1}", player["name"], player_id=player_id)
+    roster_entry_id = None
+    if not draft["is_mock"]:
+        already_on_team = conn.execute(
+            "SELECT COUNT(*) FROM roster_entries WHERE team_id = %s AND number LIKE 'TBD%%'", (team_id,)
+        ).fetchone()[0]
+        player = get_player(conn, player_id)
+        roster_entry_id = add_roster_entry(
+            conn, team_id, f"TBD{already_on_team + 1}", player["name"], player_id=player_id
+        )
 
     conn.execute(
         """INSERT INTO draft_picks (draft_id, pick_number, round, team_id, player_id, roster_entry_id)
            VALUES (%s, %s, %s, %s, %s, %s)""",
         (draft_id, pick_number, round_num, team_id, player_id, roster_entry_id),
     )
-    new_status = "completed" if len(pool_ids) <= 1 else "in_progress"
     conn.execute(
-        "UPDATE drafts SET current_pick_number = %s, status = %s WHERE id = %s",
-        (pick_number + 1, new_status, draft_id),
+        "UPDATE drafts SET current_pick_number = %s, pick_started_at = now() WHERE id = %s",
+        (pick_number + 1, draft_id),
     )
+    _refresh_draft_status(conn, draft_id)
     conn.commit()
     return roster_entry_id
+
+
+_GRADE_ORDER = "ABCD"
+
+
+def auto_pick(conn: PGConnection, draft_id: int) -> int:
+    """Makes the current pick for whoever is on the clock: the best player
+    left, by grade (A first; a move-up grade just behind the plain one;
+    ungraded last), then by name. Mock drafts only -- it's there so one
+    person can run a practice draft without playing every team. Returns the
+    player picked."""
+    draft = get_draft_by_id(conn, draft_id)
+    if draft is None:
+        raise ValueError("Draft not found.")
+    if not draft["is_mock"]:
+        raise ValueError("Auto-pick is only for mock drafts.")
+    pool = draft_pool_for(conn, draft)
+    if not pool:
+        raise ValueError("Nobody is left to pick.")
+
+    def rank(p: dict) -> tuple:
+        grade = p["grade"] or ""
+        tier = _GRADE_ORDER.find(grade[:1].upper()) if grade else -1
+        return (tier if tier >= 0 else 9, "*" in grade, (p["last_name"] or "").lower(), p["first_name"].lower())
+
+    best = min(pool, key=rank)
+    submit_draft_pick(conn, draft_id, best["id"])
+    return best["id"]
 
 
 def undo_last_pick(conn: PGConnection, draft_id: int):
@@ -3170,7 +3310,7 @@ def undo_last_pick(conn: PGConnection, draft_id: int):
     if roster_entry_id is not None:
         conn.execute("DELETE FROM roster_entries WHERE id = %s", (roster_entry_id,))
     conn.execute(
-        "UPDATE drafts SET current_pick_number = %s, status = 'in_progress' WHERE id = %s",
+        "UPDATE drafts SET current_pick_number = %s, status = 'in_progress', pick_started_at = now() WHERE id = %s",
         (pick_number, draft_id),
     )
     conn.commit()

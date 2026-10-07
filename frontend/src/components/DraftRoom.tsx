@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -19,13 +19,22 @@ import {
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { deleteDraft, getDraftPool, listDivisionRequests, listPicks, submitPick, undoLastPick } from '../api/draft'
+import {
+  autoPick,
+  deleteDraft,
+  getDraftPoolFor,
+  listDivisionRequests,
+  listPicks,
+  submitPick,
+  undoLastPick,
+} from '../api/draft'
 import { getTeamsOverview } from '../api/divisions'
 import { listTeamCoaches } from '../api/teams'
 import { ApiError } from '../api/client'
 import type { Draft, DraftOrderEntry, DraftPick, DraftPoolPlayer, Team } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { useAccess } from '../auth/access'
+import { DraftSettingsModal } from './DraftSetup'
 
 // Other coaches are picking at the same time, so everything here re-reads on this beat.
 const LIVE_MS = 5000
@@ -73,13 +82,33 @@ function age(birthDate: string | null): number | null {
 const lastFirst = (p: { first_name: string; last_name: string | null }) =>
   p.last_name ? `${p.last_name}, ${p.first_name}` : p.first_name
 
-// Whose pick a given overall pick number is: odd rounds run the order, even rounds run it back.
-function slotForPick(order: DraftOrderEntry[], pickNumber: number): DraftOrderEntry {
+// Whose pick a given overall pick number is: a snake draft runs the order on
+// odd rounds and back on even ones; a linear draft runs it the same way every round.
+function slotForPick(order: DraftOrderEntry[], pickNumber: number, linear: boolean): DraftOrderEntry {
   const n = order.length
   const round = Math.ceil(pickNumber / n)
   const pos = (pickNumber - 1) % n
-  return order[round % 2 === 0 ? n - 1 - pos : pos]
+  return order[round % 2 === 0 && !linear ? n - 1 - pos : pos]
 }
+
+// Seconds left on the pick clock (negative once it has run out), or null when
+// the draft has no clock. Measured against the server's time, not this device's.
+function usePickClock(draft: Draft): number | null {
+  // The server's time, ticked forward locally between refreshes of the draft.
+  const [serverNow, setServerNow] = useState(() => Date.parse(draft.server_now))
+  const running = draft.status === 'in_progress' && draft.settings.pick_seconds != null
+  useEffect(() => {
+    if (!running) return
+    const skew = Date.now() - Date.parse(draft.server_now)
+    const timer = setInterval(() => setServerNow(Date.now() - skew), 1000)
+    return () => clearInterval(timer)
+  }, [running, draft.server_now])
+  if (!running) return null
+  const elapsed = (serverNow - Date.parse(draft.pick_started_at)) / 1000
+  return Math.ceil(draft.settings.pick_seconds! - elapsed)
+}
+
+const clockText = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 
 type PoolSort = 'grade' | 'name' | 'age'
 
@@ -101,13 +130,17 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
   const [position, setPosition] = useState<string | null>(null)
   const [sort, setSort] = useState<PoolSort>('grade')
   const [teamId, setTeamId] = useState<number | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
+  const mock = draft.is_mock
+  const linear = draft.settings.order_type === 'linear'
+  const secondsLeft = usePickClock(draft)
   const live = draft.status === 'in_progress'
   const refetchInterval = live ? LIVE_MS : false
 
   const { data: pool } = useQuery({
-    queryKey: ['draft-pool', divisionId],
-    queryFn: () => getDraftPool(divisionId),
+    queryKey: ['draft-pool-for', draft.id],
+    queryFn: () => getDraftPoolFor(draft.id),
     refetchInterval,
   })
   const { data: picks } = useQuery({
@@ -119,6 +152,8 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
     queryKey: ['teams-overview', divisionId],
     queryFn: () => getTeamsOverview(divisionId),
     refetchInterval,
+    // A mock's teams exist only as its picks; see teamSummary below.
+    enabled: !mock,
   })
   const { data: requests } = useQuery({
     queryKey: ['division-requests', divisionId],
@@ -141,27 +176,35 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
     },
     onError,
   })
+  const autoPickMutation = useMutation({ mutationFn: () => autoPick(draft.id), onSuccess: onChanged, onError })
   const undoMutation = useMutation({ mutationFn: () => undoLastPick(draft.id), onSuccess: onChanged, onError })
   const deleteMutation = useMutation({ mutationFn: () => deleteDraft(draft.id), onSuccess: onChanged, onError })
 
+  // A mock is practice: whoever is running it picks for every team.
   const canPick =
     !readOnly &&
     live &&
     !!draft.current_team_id &&
-    (user?.is_admin || (user?.coach_id != null && (currentTeamCoaches ?? []).some((c) => c.id === user.coach_id)))
+    (mock ||
+      user?.is_admin ||
+      (draft.settings.who_picks === 'coaches' &&
+        user?.coach_id != null &&
+        (currentTeamCoaches ?? []).some((c) => c.id === user.coach_id)))
+  const canManage = mock ? !readOnly : !!user?.is_admin
 
   const order = draft.order
   const n = order.length
   const allPicks = picks ?? []
-  const totalPicks = allPicks.length + (pool?.length ?? 0)
-  const rounds = Math.max(1, Math.ceil(totalPicks / n), draft.round ?? 1)
+  const available = allPicks.length + (pool?.length ?? 0)
+  const totalPicks = draft.settings.rounds != null ? Math.min(available, draft.settings.rounds * n) : available
+  const rounds = Math.max(1, Math.ceil(totalPicks / n))
   const pickByNumber = new Map(allPicks.map((p) => [p.pick_number, p]))
   const colorOf = (id: number) => teams.find((t) => t.id === id)?.color ?? null
   const upNext = live
     ? [1, 2, 3]
         .map((ahead) => draft.current_pick_number + ahead)
         .filter((num) => num <= totalPicks)
-        .map((num) => slotForPick(order, num).team_name)
+        .map((num) => slotForPick(order, num, linear).team_name)
     : []
 
   // What each pool player has asked for, and where that teammate already is.
@@ -193,10 +236,31 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
 
   const shownTeamId = teamId ?? draft.current_team_id ?? order[0]?.team_id
   const shownTeamPicks = allPicks.filter((p) => p.team_id === shownTeamId)
-  const overviewOf = (id: number) => (overview ?? []).find((o) => o.team_id === id)
+  // Players, average grade (A 4 ... D 1) and goalies per team: from the real
+  // rosters for a real draft, from the mock's own picks for a mock.
+  const teamSummary = (id: number) => {
+    if (!mock) {
+      const t = (overview ?? []).find((o) => o.team_id === id)
+      return { players: t?.players, average: t?.average ?? null, goalies: t?.goalies }
+    }
+    const mine = allPicks.filter((p) => p.team_id === id)
+    const values = mine.map((p) => 4 - 'ABCD'.indexOf((p.grade ?? ' ')[0].toUpperCase())).filter((v) => v <= 4)
+    return {
+      players: mine.length,
+      average: values.length ? values.reduce((a, b) => a + b, 0) / values.length : null,
+      goalies: mine.filter((p) => shortPosition(p.position) === 'G').length,
+    }
+  }
 
   return (
     <Stack ta="left">
+      {mock && (
+        <Alert color="blue" title="Mock draft">
+          Practice only. Picks here are not saved to any roster, and everyone registered in the division is in the
+          pool, whether or not they are on a team already. Anyone who can edit can pick for every team.
+        </Alert>
+      )}
+
       {/* On the clock */}
       <Paper p="md" radius="md" bg="var(--app-panel-bg)" style={{ borderLeft: '6px solid var(--mantine-color-gold-4)' }}>
         {live ? (
@@ -226,10 +290,27 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
               )}
               {!canPick && (
                 <Text size="xs" c="dimmed">
-                  Waiting for {draft.current_team_name}&apos;s coach or an admin to pick.
+                  Waiting for {draft.settings.who_picks === 'admins' ? 'an admin' : `${draft.current_team_name}'s coach or an admin`}{' '}
+                  to pick.
                 </Text>
               )}
             </div>
+            {secondsLeft != null && (
+              <div style={{ textAlign: 'center', minWidth: 96 }}>
+                <Text size="xs" fw={700} tt="uppercase" c="dimmed" style={{ letterSpacing: 1 }}>
+                  Pick clock
+                </Text>
+                <Text
+                  fz={34}
+                  fw={800}
+                  lh={1.1}
+                  c={secondsLeft <= 0 ? 'red' : secondsLeft <= 10 ? 'orange' : undefined}
+                  style={{ fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {secondsLeft <= 0 ? "Time's up" : clockText(secondsLeft)}
+                </Text>
+              </div>
+            )}
           </Group>
         ) : (
           <Group justify="space-between">
@@ -268,11 +349,11 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
                 <Table.Tr key={round}>
                   <Table.Td>
                     <Text size="sm" fw={700}>
-                      {round} {round % 2 === 0 ? '←' : '→'}
+                      {round} {round % 2 === 0 && !linear ? '←' : '→'}
                     </Text>
                   </Table.Td>
                   {order.map((o, slot) => {
-                    const pickNumber = (round - 1) * n + (round % 2 === 0 ? n - slot : slot + 1)
+                    const pickNumber = (round - 1) * n + (round % 2 === 0 && !linear ? n - slot : slot + 1)
                     if (pickNumber > totalPicks) return <Table.Td key={o.team_id} />
                     const pick = pickByNumber.get(pickNumber)
                     const onClock = live && pickNumber === draft.current_pick_number
@@ -410,7 +491,7 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
                 </Table.Thead>
                 <Table.Tbody>
                   {order.map((o) => {
-                    const t = overviewOf(o.team_id)
+                    const t = teamSummary(o.team_id)
                     return (
                       <Table.Tr
                         key={o.team_id}
@@ -429,9 +510,9 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
                             </Group>
                           </UnstyledButton>
                         </Table.Td>
-                        <Table.Td ta="right">{t?.players ?? '—'}</Table.Td>
-                        <Table.Td ta="right">{t?.average != null ? t.average.toFixed(2) : '—'}</Table.Td>
-                        <Table.Td ta="right">{t?.goalies ?? '—'}</Table.Td>
+                        <Table.Td ta="right">{t.players ?? '—'}</Table.Td>
+                        <Table.Td ta="right">{t.average != null ? t.average.toFixed(2) : '—'}</Table.Td>
+                        <Table.Td ta="right">{t.goalies ?? '—'}</Table.Td>
                       </Table.Tr>
                     )
                   })}
@@ -505,25 +586,45 @@ export function DraftRoom({ draft, divisionId, teams, onChanged }: Props) {
         </Grid.Col>
       </Grid>
 
-      {user?.is_admin && (
+      {canManage && (
         <Group>
+          {mock && live && (
+            <Button loading={autoPickMutation.isPending} onClick={() => autoPickMutation.mutate()}>
+              Auto-pick for {draft.current_team_name}
+            </Button>
+          )}
           {allPicks.length > 0 && (
             <Button variant="default" loading={undoMutation.isPending} onClick={() => undoMutation.mutate()}>
               Undo last pick
             </Button>
           )}
+          <Button variant="default" onClick={() => setSettingsOpen(true)}>
+            Draft settings
+          </Button>
           <Button
             color="red"
             variant="outline"
             loading={deleteMutation.isPending}
             onClick={() =>
-              confirm('Delete this draft’s order and pick history? Already-drafted players stay on their roster.') &&
-              deleteMutation.mutate()
+              confirm(
+                mock
+                  ? 'End this mock draft and clear its picks? No roster is affected.'
+                  : 'Delete this draft’s order and pick history? Already-drafted players stay on their roster.'
+              ) && deleteMutation.mutate()
             }
           >
-            Delete this draft
+            {mock ? 'End mock draft' : 'Delete this draft'}
           </Button>
         </Group>
+      )}
+      {settingsOpen && (
+        <DraftSettingsModal
+          draft={draft}
+          picksMade={allPicks.length}
+          opened
+          onClose={() => setSettingsOpen(false)}
+          onSaved={onChanged}
+        />
       )}
       {!live && allPicks.length === 0 && <Alert color="blue">This draft finished without any picks.</Alert>}
     </Stack>

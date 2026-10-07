@@ -1136,14 +1136,10 @@ def api_set_season_grade(
 # Draft
 # ---------------------------------------------------------------------------
 
-@app.get("/divisions/{division_id}/draft", tags=["draft"])
-def api_get_draft(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict | None:
-    """None if no draft exists yet for this division. Otherwise also
-    includes "order" (the snake draft's team sequence) and, while
+def _draft_with_state(conn, draft: dict | None) -> dict | None:
+    """A draft plus its "order" (the round-1 team sequence) and, while
     in_progress, "current_team_id"/"current_team_name"/"round" -- so the
-    frontend doesn't need to reimplement the snake-order math client-side
-    just to show whose turn it is."""
-    draft = core.get_draft(conn, division_id)
+    frontend doesn't have to work out whose turn it is."""
     if draft is None:
         return None
     order = core.list_draft_order(conn, draft["id"])
@@ -1158,6 +1154,61 @@ def api_get_draft(division_id: int, conn=Depends(get_conn), user=Depends(get_cur
     return draft
 
 
+@app.get("/divisions/{division_id}/draft", tags=["draft"])
+def api_get_draft(
+    division_id: int, mock: bool = False, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> dict | None:
+    """The division's draft, or None if it has none yet. mock=true asks for
+    its mock (practice) draft instead of the real one."""
+    return _draft_with_state(conn, core.get_draft(conn, division_id, mock))
+
+
+def _draft_or_404(conn, draft_id: int) -> dict:
+    draft = core.get_draft_by_id(conn, draft_id)
+    if draft is None:
+        not_found("Draft not found.")
+    return draft
+
+
+@app.get("/drafts/{draft_id}/pool", tags=["draft"])
+def api_draft_pool_for(draft_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> list[dict]:
+    """Who can still be picked in this draft. For a mock that's everyone
+    registered in the division the mock hasn't picked, on a team or not."""
+    return core.draft_pool_for(conn, _draft_or_404(conn, draft_id))
+
+
+class DraftSettings(BaseModel):
+    order_type: str | None = None
+    rounds: int | None = None
+    pick_seconds: int | None = None
+    who_picks: str | None = None
+
+
+@app.patch("/drafts/{draft_id}/settings", tags=["draft"])
+def api_update_draft_settings(
+    draft_id: int, body: DraftSettings, conn=Depends(get_conn), user=Depends(get_current_user)
+) -> dict:
+    """Changes this draft's settings, mid-draft included: only the fields
+    sent change, and null clears rounds or pick_seconds. A real draft's
+    settings are an admin's to change; a mock's, any writer's."""
+    draft = _draft_or_404(conn, draft_id)
+    require_writer(user) if draft["is_mock"] else require_admin(user)
+    try:
+        core.update_draft_settings(conn, draft_id, body.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return _draft_with_state(conn, core.get_draft_by_id(conn, draft_id))
+
+
+@app.post("/drafts/{draft_id}/auto-pick", tags=["draft"])
+def api_auto_pick(draft_id: int, conn=Depends(get_conn), user=Depends(require_writer)) -> dict:
+    """Mock drafts only: picks the best player left for the team on the clock."""
+    try:
+        return {"player_id": core.auto_pick(conn, draft_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
 @app.get("/divisions/{division_id}/draft/auto-draft-run", tags=["draft"])
 def api_get_auto_draft_run(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict | None:
     return core.get_auto_draft_run(conn, division_id)
@@ -1170,6 +1221,8 @@ def api_draft_pool(division_id: int, conn=Depends(get_conn), user=Depends(get_cu
 
 class DraftStartRequest(BaseModel):
     team_ids_in_order: list[int]
+    mock: bool = False
+    settings: DraftSettings | None = None
 
 
 @app.post("/divisions/{division_id}/draft/start", status_code=status.HTTP_201_CREATED, tags=["draft"])
@@ -1177,10 +1230,13 @@ def api_start_draft(
     division_id: int, body: DraftStartRequest, conn=Depends(get_conn), user=Depends(require_writer)
 ) -> dict:
     try:
-        draft_id = core.start_draft(conn, division_id, body.team_ids_in_order)
+        draft_id = core.start_draft(
+            conn, division_id, body.team_ids_in_order, mock=body.mock,
+            settings=body.settings.model_dump(exclude_unset=True) if body.settings else None,
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    return core.get_draft(conn, division_id) or {"id": draft_id}
+    return core.get_draft_by_id(conn, draft_id)
 
 
 class DraftPickRequest(BaseModel):
@@ -1212,7 +1268,13 @@ def api_list_picks(draft_id: int, conn=Depends(get_conn), user=Depends(get_curre
 
 
 @app.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["draft"])
-def api_delete_draft(draft_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
+def api_delete_draft(draft_id: int, conn=Depends(get_conn), user=Depends(get_current_user)):
+    """A real draft is an admin's to delete; a mock, any writer's -- it never
+    changed anything real."""
+    draft = core.get_draft_by_id(conn, draft_id)
+    if draft is None:
+        return
+    require_writer(user) if draft["is_mock"] else require_admin(user)
     core.delete_draft(conn, draft_id)
 
 

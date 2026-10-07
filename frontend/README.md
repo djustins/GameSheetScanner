@@ -72,6 +72,34 @@ pages scoped to the division picked at the top of the sidebar:
 What a user sees follows their role's pages and read-only setting, the same as in
 the Streamlit app (`src/auth/access.tsx`).
 
+### The draft
+
+The Draft section of Roster Management has two modes, switched at the top:
+
+- **Live draft** is the real one: each pick puts the player on that team's roster.
+  Auto-Draft, its results and the draft notes are here too.
+- **Mock draft** is a practice run for testing settings or training coaches. Its
+  picks are never saved to a roster, its pool is everyone registered in the
+  division (on a team already or not), anyone who can edit picks for every team,
+  and **Auto-pick** fills the current pick with the best player left. It runs
+  alongside the real draft without touching it; end it and start again freely.
+
+Either way a running draft shows as a draft room (`src/components/DraftRoom.tsx`):
+who is on the clock and who is next, the round-by-team board, the player pool
+(search, filter by position, sort by grade, name or age, with each player's
+play-with requests), every team's picks and balance, and the pick history. It
+refreshes every five seconds.
+
+Each draft has its own settings, chosen when it starts and changeable from **Draft
+settings** while it runs (`src/components/DraftSetup.tsx`):
+
+| Setting | Choices |
+|---|---|
+| Order | Snake (each round reverses) or linear. Fixed once a pick has been made. |
+| Rounds | A number, or blank to draft until the pool is empty |
+| Pick clock | Off, or a countdown everyone sees. It prompts; it never picks for anyone. |
+| Who makes picks | Each team's own coach, or admins only (real drafts; admins can always pick) |
+
 ### Team roster table
 
 - Opens sorted by last name, then first name.

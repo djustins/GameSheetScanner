@@ -1070,3 +1070,38 @@ def test_division_moves_and_blank_roster_number(conn, admin_auth, readonly_auth,
     assert [(m["player"], m["from_team"], m["to_team"], m["note"]) for m in moves] == [
         ("Sidney Crosby", "Avalanche", "Wild", "Balancing"),
     ]
+
+
+def test_mock_draft_and_settings_over_the_api(conn, admin_auth, readonly_auth, division_id):
+    teams = [core.add_team(conn, division_id, name) for name in ("Avalanche", "Wild")]
+    for i in range(3):
+        core.add_player(conn, f"P{i}", "Test", current_division_id=division_id)
+
+    started = client.post(
+        f"/divisions/{division_id}/draft/start",
+        json={"team_ids_in_order": teams, "mock": True, "settings": {"order_type": "linear", "pick_seconds": 60}},
+        auth=admin_auth,
+    )
+    assert started.status_code == 201
+    draft_id = started.json()["id"]
+    assert client.get(f"/divisions/{division_id}/draft", auth=admin_auth).json() is None  # no real draft
+
+    mock = client.get(f"/divisions/{division_id}/draft?mock=true", auth=admin_auth).json()
+    assert mock["is_mock"] and mock["settings"]["order_type"] == "linear" and mock["settings"]["pick_seconds"] == 60
+    assert mock["current_team_id"] == teams[0] and mock["pick_started_at"] and mock["server_now"]
+    assert len(client.get(f"/drafts/{draft_id}/pool", auth=admin_auth).json()) == 3
+
+    assert client.post(f"/drafts/{draft_id}/auto-pick", auth=readonly_auth).status_code == 403
+    assert client.post(f"/drafts/{draft_id}/auto-pick", auth=admin_auth).status_code == 200
+    assert core.list_roster(conn, teams[0]) == []
+
+    changed = client.patch(f"/drafts/{draft_id}/settings", json={"pick_seconds": None, "rounds": 1}, auth=admin_auth)
+    assert changed.status_code == 200
+    assert changed.json()["settings"] == {
+        "order_type": "linear", "rounds": 1, "pick_seconds": None, "who_picks": "coaches",
+    }
+    assert client.patch(f"/drafts/{draft_id}/settings", json={"order_type": "snake"}, auth=admin_auth).status_code == 409
+    assert client.patch(f"/drafts/{draft_id}/settings", json={"rounds": 2}, auth=readonly_auth).status_code == 403
+
+    assert client.delete(f"/drafts/{draft_id}", auth=admin_auth).status_code == 204
+    assert client.get(f"/divisions/{division_id}/draft?mock=true", auth=admin_auth).json() is None

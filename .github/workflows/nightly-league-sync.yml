@@ -22,13 +22,20 @@ jobs:
     steps:
       - name: Sync from the league site
         env:
-          API_BASE_URL: ${{ secrets.API_BASE_URL }}
-          LEAGUE_SYNC_TOKEN: ${{ secrets.LEAGUE_SYNC_TOKEN }}
+          # Read from either the Secrets tab or the Variables tab.
+          API_BASE_URL: ${{ secrets.API_BASE_URL || vars.API_BASE_URL }}
+          LEAGUE_SYNC_TOKEN: ${{ secrets.LEAGUE_SYNC_TOKEN || vars.LEAGUE_SYNC_TOKEN }}
         run: |
-          if [ -z "$API_BASE_URL" ] || [ -z "$LEAGUE_SYNC_TOKEN" ]; then
-            echo "::error::Set the API_BASE_URL and LEAGUE_SYNC_TOKEN repository secrets."
-            exit 1
-          fi
+          missing=0
+          for name in API_BASE_URL LEAGUE_SYNC_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is empty. Add it under Settings > Secrets and variables > Actions > Repository secrets, spelled exactly like that."
+              missing=1
+            else
+              echo "$name is set."
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
           # The API is on a free plan and may be asleep: wake it before the real request.
           curl --silent --show-error --max-time 180 --retry 5 --retry-all-errors --retry-delay 20 \
             --output /dev/null "${API_BASE_URL%/}/"

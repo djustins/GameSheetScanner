@@ -41,6 +41,13 @@ work with client-side routing. The API deploys separately on Render and usually
 finishes a little later than the front end, so for a minute or two after a push the
 new front end can be talking to the old API.
 
+### Analytics
+
+[Vercel Web Analytics](https://vercel.com/docs/analytics) counts page views and
+visitors (`<Analytics />` in `src/main.tsx`). It only reports from the deployed
+site, not from `npm run dev`, and it has to be switched on once for the project in
+the Vercel dashboard under **Analytics**.
+
 ## Pages
 
 The sidebar has the league-wide pages (Home, Divisions, All Players, All Coaches,

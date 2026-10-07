@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Alert, Button, Group, MultiSelect, Select, Stack, Text, TextInput, Title } from '@mantine/core'
+import { Alert, Button, Group, MultiSelect, Select, Stack, Tabs, Text, TextInput, Title } from '@mantine/core'
+import { useSearchParams } from 'react-router-dom'
 import { notifications } from '@mantine/notifications'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -23,8 +24,38 @@ import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { useWorkingDivision } from '../context/WorkingDivisionContext'
 import { AutoDraftResults, DraftNotes } from '../components/AutoDraftResults'
 import { TradePanel } from '../components/TradePanel'
+import { RequestsPage } from './RequestsPage'
 
+/** The Draft tab: the draft itself, plus the division's play-with requests
+ * (which feed Auto-Draft) as a second section. ?tab=requests opens that one. */
 export function DraftPage() {
+  const { canView } = useAccess()
+  const [params, setParams] = useSearchParams()
+  if (!canView('teams')) return <DraftBoard />
+  if (!canView('draft')) return <RequestsPage />
+  return (
+    // keepMounted off so the draft's polling stops while Requests is open.
+    <Tabs
+      variant="outline"
+      keepMounted={false}
+      value={params.get('tab') === 'requests' ? 'requests' : 'draft'}
+      onChange={(tab) => setParams(tab === 'requests' ? { tab } : {})}
+    >
+      <Tabs.List mb="md">
+        <Tabs.Tab value="draft">Draft</Tabs.Tab>
+        <Tabs.Tab value="requests">Requests</Tabs.Tab>
+      </Tabs.List>
+      <Tabs.Panel value="draft">
+        <DraftBoard />
+      </Tabs.Panel>
+      <Tabs.Panel value="requests">
+        <RequestsPage />
+      </Tabs.Panel>
+    </Tabs>
+  )
+}
+
+function DraftBoard() {
   const { user } = useAuth()
   const { readOnly } = useAccess()
   const { workingDivisionId } = useWorkingDivision()

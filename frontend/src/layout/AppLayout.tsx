@@ -43,11 +43,10 @@ const GLOBAL_NAV_ITEMS: NavItem[] = [
 
 const SCOPED_NAV_ITEMS: NavItem[] = [
   { to: '/team-rosters', label: 'Team Rosters', pages: ['rosters', 'teams'] },
-  { to: '/requests', label: 'Requests', pages: ['teams'] },
   { to: '/evals', label: 'Evals', pages: ['teams'] },
   { to: '/games', label: 'Games', pages: ['schedule', 'process', 'edit'] },
   { to: '/stats-standings', label: 'Stats & Standings', pages: ['standings', 'stats'] },
-  { to: '/draft', label: 'Draft', pages: ['draft'] },
+  { to: '/draft', label: 'Draft', pages: ['draft', 'teams'] },
 ]
 
 export function AppLayout() {

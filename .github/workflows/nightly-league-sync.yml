@@ -1,0 +1,52 @@
+# Every night, asks the deployed API to pull the schedule and any newly
+# finished games from the league stats site (teampgh-statsandstandings.web.app)
+# -- see league_site_sync.py and POST /league-site/sync in api.py. The sync
+# itself runs on the API server, which already has database access; this job
+# only makes the request.
+#
+# Needs two repository secrets (Settings -> Secrets and variables -> Actions):
+#   API_BASE_URL       the deployed API's address, e.g. https://<name>.onrender.com
+#   LEAGUE_SYNC_TOKEN  an API token created by an admin on the app's API Tokens page
+name: Nightly league site sync
+
+on:
+  schedule:
+    # 06:30 UTC = 1:30 or 2:30 am in Pittsburgh, after the night's games are entered.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Sync from the league site
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          LEAGUE_SYNC_TOKEN: ${{ secrets.LEAGUE_SYNC_TOKEN }}
+        run: |
+          if [ -z "$API_BASE_URL" ] || [ -z "$LEAGUE_SYNC_TOKEN" ]; then
+            echo "::error::Set the API_BASE_URL and LEAGUE_SYNC_TOKEN repository secrets."
+            exit 1
+          fi
+          # The API is on a free plan and may be asleep: wake it before the real request.
+          curl --silent --show-error --max-time 180 --retry 5 --retry-all-errors --retry-delay 20 \
+            --output /dev/null "${API_BASE_URL%/}/"
+          curl --silent --show-error --fail-with-body --max-time 1500 \
+            --request POST --header "Authorization: Bearer $LEAGUE_SYNC_TOKEN" \
+            "${API_BASE_URL%/}/league-site/sync" | tee report.json
+          echo
+          # A game the app refused (e.g. a tie) fails the run, so it gets noticed.
+          python3 - <<'EOF'
+          import json, sys
+          reports = json.load(open("report.json"))
+          for r in reports:
+              if r["skipped"]:
+                  print(f"{r['league']}: skipped -- {r['skipped']}")
+                  continue
+              print(f"{r['league']}: {len(r['added'])} added, {len(r['refreshed'])} refreshed, "
+                    f"{len(r['already_here'])} already here, {len(r['failed'])} failed")
+              for line in r["added"] + [f"FAILED {f}" for f in r["failed"]]:
+                  print("   ", line)
+          sys.exit(1 if any(r["failed"] for r in reports) else 0)
+          EOF

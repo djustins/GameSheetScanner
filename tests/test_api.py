@@ -1010,3 +1010,18 @@ def test_division_evaluations_endpoint(conn, admin_auth, division_id):
     body = client.get(f"/divisions/{division_id}/evaluations", auth=admin_auth).json()
     assert [(e["name"], e["grade"]) for e in body["evaluations"]] == [("Sidney Crosby", "A")]
     assert [p["name"] for p in body["not_evaluated"]] == ["Wayne Gretzky"]
+
+
+def test_league_site_sync_is_admin_only(conn, admin_auth, readonly_auth, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api.league_site_sync, "sync",
+        lambda conn, dry_run=False, refresh_days=None: calls.append((dry_run, refresh_days)) or [{"league": "x"}],
+    )
+    assert client.post("/league-site/sync", auth=readonly_auth).status_code == 403
+    assert calls == []
+
+    response = client.post("/league-site/sync?dry_run=true", auth=admin_auth)
+    assert response.status_code == 200
+    assert response.json() == [{"league": "x"}]
+    assert calls == [(True, api.league_site_sync.REFRESH_DAYS)]

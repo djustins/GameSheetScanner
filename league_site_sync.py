@@ -24,7 +24,8 @@ What lands where:
 
 Stats here are attributed by jersey number per team, so before a team's
 games are saved its roster is lined up with the site's: a rostered player
-still on a draft placeholder ("TBD3") gets their real number, and a number
+still on a draft placeholder ("TBD3") gets their real number (matched by
+name, or by nickname and last name), and a number
 nobody on the roster wears is added under the site's name for that player
 (unlinked, like a number first seen on a scanned sheet).
 """
@@ -32,11 +33,16 @@ nobody on the roster wears is added under the site's name for that player
 import json
 import re
 import urllib.request
+from datetime import date, timedelta
 
 import game_sheet_core as core
 
 API_BASE = "https://usabh-consolidated-backend-2377de64bd11.herokuapp.com/teampitt/api/"
 SOURCE_PREFIX = "teampgh-site:"
+# An imported game is re-read from the site for this many days after it was
+# played (scorekeepers do fix sheets after the fact), then left alone, so a
+# nightly run late in the season isn't re-reading every game since week one.
+REFRESH_DAYS = 7
 
 
 def fetch_json(path: str) -> dict:
@@ -169,6 +175,14 @@ def _line_up_roster(conn, division_id: int, team_name: str, site_players: list[d
     team_id = teams.get(_name_key(matched))
     roster = core.list_roster(conn, team_id) if team_id is not None else []
     by_name = {_name_key(e["name"]): e for e in roster}
+    # The site may list a player by nickname ("Teddy Davis" for Theodore Davis).
+    linked = {e["player_id"]: e for e in roster if e["player_id"] is not None}
+    if linked:
+        for player_id, nickname, last_name in conn.execute(
+            "SELECT id, nickname, last_name FROM players WHERE id = ANY(%s) AND nickname IS NOT NULL",
+            (list(linked),),
+        ).fetchall():
+            by_name.setdefault(_name_key(f"{nickname} {last_name or ''}"), linked[player_id])
     taken = {e["number"] for e in roster}
 
     for p in site_players:
@@ -197,13 +211,15 @@ def _line_up_roster(conn, division_id: int, team_name: str, site_players: list[d
             taken.add(number)
 
 
-def sync_league(conn, league: dict, fetch=fetch_json, dry_run: bool = False) -> dict:
+def sync_league(conn, league: dict, fetch=fetch_json, dry_run: bool = False,
+                refresh_days: int | None = REFRESH_DAYS) -> dict:
     """Syncs one of the site's leagues (an entry of admin/leagues/current)
     into its division here. Returns a report of what was (or, with dry_run,
-    would be) done."""
+    would be) done. refresh_days=None re-reads every imported game, however
+    old (see REFRESH_DAYS)."""
     label = f"{league['leagueName']} - {league['session']} - {league['year']}"
     report = {
-        "league": label, "skipped": None, "scheduled": 0, "added": [], "refreshed": [],
+        "league": label, "skipped": None, "scheduled": 0, "added": [], "refreshed": [], "unchanged": 0,
         "already_here": [], "failed": [], "numbers_set": 0, "number_mismatches": [], "roster_added": [],
     }
     age_group = next((n for n in core.AGE_GROUPS if n.lower() == league["leagueName"].strip().lower()), None)
@@ -238,8 +254,13 @@ def sync_league(conn, league: dict, fetch=fetch_json, dry_run: bool = False) -> 
     ).fetchall()
     by_source = {row[4]: row[0] for row in stored}
 
+    stale_before = None if refresh_days is None else (date.today() - timedelta(days=refresh_days)).isoformat()
     converted = []
     for g in played:
+        imported = SOURCE_PREFIX + g["_id"] in by_source
+        if imported and stale_before and (site_date_to_iso(g.get("date")) or "") < stale_before:
+            report["unchanged"] += 1
+            continue
         data, overtime = convert_game(fetch(f"admin/game/{g['_id']}"))
         converted.append((g, data, overtime))
 
@@ -286,12 +307,13 @@ def sync_league(conn, league: dict, fetch=fetch_json, dry_run: bool = False) -> 
     return report
 
 
-def sync(conn, league_names: list[str] | None = None, fetch=fetch_json, dry_run: bool = False) -> list[dict]:
+def sync(conn, league_names: list[str] | None = None, fetch=fetch_json, dry_run: bool = False,
+         refresh_days: int | None = REFRESH_DAYS) -> list[dict]:
     """Syncs the site's current leagues -- all of them, or just those named."""
     wanted = {n.strip().lower() for n in league_names or []}
     leagues = fetch("admin/leagues/current").get("currentLeagues") or []
     return [
-        sync_league(conn, league, fetch=fetch, dry_run=dry_run)
+        sync_league(conn, league, fetch=fetch, dry_run=dry_run, refresh_days=refresh_days)
         for league in leagues
         if not wanted or league["leagueName"].strip().lower() in wanted
     ]
@@ -308,6 +330,7 @@ def format_report(report: dict, dry_run: bool = False) -> str:
     lines.append(f"  {report['scheduled']} scheduled games {would}saved")
     lines.append(
         f"  games: {len(report['added'])} {would}added, {len(report['refreshed'])} {would}refreshed, "
+        f"{report['unchanged']} older ones left as imported, "
         f"{len(report['already_here'])} already here from a scoresheet, {len(report['failed'])} failed"
     )
     lines.append(

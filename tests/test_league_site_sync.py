@@ -96,6 +96,7 @@ def test_sync_imports_schedule_games_and_standings_and_is_repeatable(conn):
         {"teamName": "Avalanche", "number": "8", "firstName": "Nicholas", "lastName": "Elm"},
         {"teamName": "Kings", "number": "2", "firstName": "Camryn", "lastName": "Seitz"},
         {"teamName": "Kings", "number": "9", "firstName": "Bench", "lastName": "Warmer"},
+        {"teamName": "Avalanche", "number": "14", "firstName": "Teddy", "lastName": "Davis"},
     ]
     fetch = _fake_site(games, details, players)
 
@@ -103,25 +104,35 @@ def test_sync_imports_schedule_games_and_standings_and_is_repeatable(conn):
     division_id = core.add_division(conn, 2026, "Fall", "Penguin")
     avalanche = core.add_team(conn, division_id, "Avalanche")
     core.add_roster_entry(conn, avalanche, "TBD1", "Nicholas Elm", player_id=core.add_player(conn, "Nicholas", "Elm"))
+    # The site lists Theodore Davis by his nickname.
+    teddy = core.add_player(conn, "Theodore", "Davis")
+    core.update_player(conn, teddy, nickname="Teddy")
+    core.add_roster_entry(conn, avalanche, "TBD2", "Theodore Davis", player_id=teddy)
 
     reports = league_site_sync.sync(conn, fetch=fetch)
     report, skipped = reports
     assert skipped["skipped"]  # "Super League" isn't an age group here
     assert report["scheduled"] == 2 and len(report["added"]) == 1 and not report["failed"]
-    assert report["numbers_set"] == 1
+    assert report["numbers_set"] == 2
     assert report["roster_added"] == ["Kings: #2 Camryn Seitz"]  # only numbers that appear in a game
 
     assert len(core.list_schedule(conn, division_id)) == 2
-    assert [(r["number"], r["name"]) for r in core.list_roster(conn, avalanche)] == [("8", "Nicholas Elm")]
+    assert [(r["number"], r["name"]) for r in core.list_roster(conn, avalanche)] == [
+        ("14", "Theodore Davis"), ("8", "Nicholas Elm"),
+    ]
     # Overtime: 2 points to the winner, 1 to the loser.
     standings = {s["team"]: s["points"] for s in core.get_standings(conn, division_id)}
     assert standings == {"avalanche": 2, "kings": 1}
 
     # Running it again refreshes the same game rather than adding another.
-    again = league_site_sync.sync(conn, fetch=fetch)[0]
+    again = league_site_sync.sync(conn, fetch=fetch, refresh_days=None)[0]
     assert (len(again["added"]), len(again["refreshed"])) == (0, 1)
     assert len(core.list_games(conn, division_id)) == 1
     assert {s["team"]: s["points"] for s in core.get_standings(conn, division_id)} == standings
+
+    # Past the refresh window, an imported game isn't re-read at all.
+    old = league_site_sync.sync(conn, fetch=fetch, refresh_days=-1)[0]
+    assert (len(old["added"]), len(old["refreshed"]), old["unchanged"]) == (0, 0, 1)
 
 
 def test_sync_leaves_a_scanned_game_alone_and_dry_run_saves_nothing(conn):

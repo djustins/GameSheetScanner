@@ -42,6 +42,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicC
 from pydantic import BaseModel
 
 import game_sheet_core as core
+import league_site_sync
 
 load_dotenv()
 
@@ -1401,6 +1402,26 @@ def api_update_game(game_id: int, body: GameUpdate, conn=Depends(get_conn), user
 @app.delete("/games/{game_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["games"])
 def api_delete_game(game_id: int, conn=Depends(get_conn), user=Depends(require_writer)):
     core.delete_game(conn, game_id)
+
+
+# ---------------------------------------------------------------------------
+# League stats site -- pull its schedule and finished games into this app
+# ---------------------------------------------------------------------------
+
+@app.post("/league-site/sync", tags=["games"])
+def api_sync_league_site(
+    dry_run: bool = False, refresh_all: bool = False, conn=Depends(get_conn), user=Depends(require_admin)
+) -> list[dict]:
+    """Syncs every current league from teampgh-statsandstandings.web.app
+    (see league_site_sync.py), returning one report per league. Called
+    nightly by .github/workflows/nightly-league-sync.yml with an admin's
+    API token; safe to call again at any time."""
+    try:
+        return league_site_sync.sync(
+            conn, dry_run=dry_run, refresh_days=None if refresh_all else league_site_sync.REFRESH_DAYS
+        )
+    except OSError as e:  # the stats site itself is down or unreachable
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not read the league site: {e}")
 
 
 # ---------------------------------------------------------------------------

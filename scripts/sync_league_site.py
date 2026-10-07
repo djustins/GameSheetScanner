@@ -17,6 +17,10 @@ Usage:
     python scripts/sync_league_site.py --dry-run            # show what would change
     python scripts/sync_league_site.py                      # every current league
     python scripts/sync_league_site.py --league Penguin     # just one (repeatable)
+    python scripts/sync_league_site.py --refresh-all        # re-read every imported game
+
+The deployed API runs the same sync nightly: see POST /league-site/sync in
+api.py and .github/workflows/nightly-league-sync.yml.
 """
 
 import argparse
@@ -34,6 +38,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--league", action="append", help="Only this league, e.g. Penguin (repeatable)")
     parser.add_argument("--dry-run", action="store_true", help="Report what would change without saving anything")
+    parser.add_argument(
+        "--refresh-all", action="store_true",
+        help=f"Re-read every imported game, not just those from the last {league_site_sync.REFRESH_DAYS} days",
+    )
     args = parser.parse_args()
 
     dsn = os.environ.get("DATABASE_URL")
@@ -41,7 +49,10 @@ def main():
         sys.exit("Error: set the DATABASE_URL environment variable first.")
     conn = core.init_db(dsn)
 
-    reports = league_site_sync.sync(conn, league_names=args.league, dry_run=args.dry_run)
+    reports = league_site_sync.sync(
+        conn, league_names=args.league, dry_run=args.dry_run,
+        refresh_days=None if args.refresh_all else league_site_sync.REFRESH_DAYS,
+    )
     if not reports:
         sys.exit("No matching current leagues on the site.")
     for report in reports:

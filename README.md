@@ -6,6 +6,18 @@ the stats — goals, assists, penalties, shootout results — in a PostgreSQL da
 **This is a Streamlit web app.** Run it with `streamlit run app.py`, not as a
 standalone Python script — running `app.py` directly with `python` will not work.
 
+There are three ways in, all over the same database and the same logic in
+`game_sheet_core.py`:
+
+| Piece | What it is | Where to read more |
+|---|---|---|
+| `app.py` | The Streamlit app | this file |
+| `api.py` | An HTTP API (FastAPI), deployed on Render | [Running the API](#running-the-api) |
+| `frontend/` | A React app that talks to the API, deployed on Vercel | [frontend/README.md](frontend/README.md) |
+
+Finished games can also be pulled in automatically from the league's stats site
+instead of scanned — see [Syncing from the league stats site](#syncing-from-the-league-stats-site).
+
 ## How it works
 
 1. In the app, you upload one or more scanned game sheet files (PDF, PNG, or JPG) —
@@ -220,6 +232,82 @@ anywhere: `pip install -r requirements-api.txt`, `DATABASE_URL` set, and
 `uvicorn api:app --host 0.0.0.0 --port $PORT` (or that host's equivalent) as
 the start command.
 
+## Syncing from the league stats site
+
+The league publishes its schedule, scores, goals and penalties at
+<https://teampgh-statsandstandings.web.app>. `league_site_sync.py` reads the JSON
+API behind that site (the same read-only endpoints its public pages use — no HTML
+scraping) and saves the data here, so those games don't have to be scanned.
+
+What it does, per current league on the site:
+
+- **Division** — "Penguin - Fall - 2026" on the site is the division with the same
+  year, season and age group here, created if it doesn't exist yet. A league whose
+  name isn't one of the app's age groups (`AGE_GROUPS` in `game_sheet_core.py`) is
+  skipped and reported — currently "Super League".
+- **Schedule** — every scheduled game is upserted into `schedule_games`, the same
+  table a schedule CSV upload fills. Practices are left out.
+- **Played games** — every game with a final score is saved with its goals and
+  penalties, under a `source_file` of `teampgh-site:<game id>`. Running it again
+  refreshes that game in place rather than adding a second copy.
+- **Standings and stats** — not copied. The app computes both from the games, and
+  its points rules match the site's (3 for a win, 2 / 1 for an overtime or shootout
+  win / loss).
+
+Things worth knowing:
+
+- **A scanned game wins.** If a game between the same two teams on the same date is
+  already stored from a scoresheet, the site's copy is skipped and reported as
+  "already here".
+- **Jersey numbers.** Stats attach by jersey number per team, so before a team's
+  games are saved its roster is lined up with the site's: a rostered player still on
+  a draft placeholder (`TBD3`) gets their real number, matched by name, or by
+  nickname and last name ("Teddy Davis" finds Theodore "Teddy" Davis). A real number
+  that disagrees with the site is reported and left alone. A number nobody on the
+  roster wears is added under the site's name for that player, unlinked.
+- **Shootouts.** The site records only who won a shootout, so it's stored as one
+  round with unknown shooters ("?") — enough to count as a shootout win/loss.
+- **Ties.** The app doesn't store tied games, so a tie on the site is reported as
+  failed rather than saved.
+- **Refresh window.** An imported game is re-read for 7 days after it was played
+  (scorekeepers correct sheets), then left as imported. `--refresh-all` re-reads
+  everything.
+
+### Running it by hand
+
+```bash
+export DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+python scripts/sync_league_site.py --dry-run          # report what would change, save nothing
+python scripts/sync_league_site.py                    # every current league
+python scripts/sync_league_site.py --league Penguin   # just one (repeatable)
+python scripts/sync_league_site.py --refresh-all      # re-read every imported game
+```
+
+It prints one block per league: games added / refreshed / already here / failed,
+how many roster numbers were set, and anything it couldn't resolve.
+
+### Running it nightly
+
+`POST /league-site/sync` on the API (admin only; `?dry_run=true` and
+`?refresh_all=true` are supported) runs the same sync on the API server, which
+already has database access. `.github/workflows/nightly-league-sync.yml` calls it
+every night at 06:30 UTC (1:30 or 2:30 am in Pittsburgh), and fails the run — so
+GitHub emails you — if any game was refused.
+
+One-time setup:
+
+1. Sign in to the app as an admin, open **API Tokens**, create a token and copy it.
+2. In the GitHub repo: **Settings → Secrets and variables → Actions**, add
+   - `LEAGUE_SYNC_TOKEN` — the token from step 1, as a repository **secret**
+   - `API_BASE_URL` — the deployed API's address, e.g.
+     `https://gamesheetscanner-api.onrender.com`, as a repository secret *or*
+     variable (the workflow reads either tab)
+3. Test it: **Actions → Nightly league site sync → Run workflow**.
+
+If a run fails with "… is empty", that name isn't set on this repository, or is
+misspelled. To retry after changing the workflow file, start a new run with **Run
+workflow** — **Re-run jobs** replays the old commit's version of the workflow.
+
 ## Running tests
 
 Tests run against `TEST_DATABASE_URL` — a separate *database* on the same Aiven
@@ -256,7 +344,8 @@ regression test for a `list_schedule()` crash that reached production once — s
 "Fix crash in list_schedule()" in git log), standings, player stats, divisions/teams/
 roster CRUD, players/coaches, users/roles/permissions, and the player-list importer
 (column detection, name/birth-date matching, ambiguous/conflict resolution, team/
-roster/coach assignment). Not yet covered: the draft flow, Excel export, and anything
+roster/coach assignment), and the league-site sync (`tests/test_league_site_sync.py`,
+against a stand-in for the site — the tests never call the real one). Not yet covered: the draft flow, Excel export, and anything
 Streamlit-UI-specific (widget layout, the Home page's card navigation) — those need
 driving an actual browser, not `pytest`.
 
@@ -277,6 +366,13 @@ driving an actual browser, not `pytest`.
   here — it's computed live against `games` every time the Schedule tab is viewed.
 
 ## Notes / things to watch for
+
+- Team rosters list by last name, then first name, in both apps and on the Excel
+  export's Rosters sheet.
+- Two players' jersey numbers can be swapped: in the React app, edit one player's
+  number to the other's and the dialog offers "Swap numbers"; in the Streamlit
+  roster grid, swap the two numbers and save. Stats are attributed by jersey number
+  per team, so a player's existing goals and penalties follow the number.
 
 - Handwriting extraction won't be perfect every time — that's what the review step
   is for. If a field is unreadable, the script will fill in `"?"` rather than guess.

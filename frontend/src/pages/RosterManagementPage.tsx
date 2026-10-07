@@ -26,32 +26,59 @@ import { AutoDraftResults, DraftNotes } from '../components/AutoDraftResults'
 import { TradePanel } from '../components/TradePanel'
 import { RequestsPage } from './RequestsPage'
 
-/** The Draft tab: the draft itself, plus the division's play-with requests
- * (which feed Auto-Draft) as a second section. ?tab=requests opens that one. */
-export function DraftPage() {
+/** Everything that decides who is on which team in the Working Division: the
+ * draft, the play-with requests that feed Auto-Draft, and trades afterwards.
+ * Each section shows only to roles with its page; ?tab=requests (or trades)
+ * opens that section directly. */
+export function RosterManagementPage() {
   const { canView } = useAccess()
+  const { workingDivisionId } = useWorkingDivision()
   const [params, setParams] = useSearchParams()
-  if (!canView('teams')) return <DraftBoard />
-  if (!canView('draft')) return <RequestsPage />
+  const tabs = [
+    canView('draft') && { value: 'draft', label: 'Draft' },
+    canView('teams') && { value: 'requests', label: 'Requests' },
+    // Trades used to sit on both the Draft and the Team Rosters pages.
+    (canView('draft') || canView('rosters')) && { value: 'trades', label: 'Trades' },
+  ].filter((t) => !!t)
+  const tab = tabs.find((t) => t.value === params.get('tab'))?.value ?? tabs[0]?.value
+
   return (
-    // keepMounted off so the draft's polling stops while Requests is open.
-    <Tabs
-      variant="outline"
-      keepMounted={false}
-      value={params.get('tab') === 'requests' ? 'requests' : 'draft'}
-      onChange={(tab) => setParams(tab === 'requests' ? { tab } : {})}
-    >
-      <Tabs.List mb="md">
-        <Tabs.Tab value="draft">Draft</Tabs.Tab>
-        <Tabs.Tab value="requests">Requests</Tabs.Tab>
-      </Tabs.List>
-      <Tabs.Panel value="draft">
-        <DraftBoard />
-      </Tabs.Panel>
-      <Tabs.Panel value="requests">
-        <RequestsPage />
-      </Tabs.Panel>
-    </Tabs>
+    <Stack>
+      <Title order={2}>Roster Management</Title>
+      {/* keepMounted off so the draft's polling stops while another section is open. */}
+      <Tabs
+        keepMounted={false}
+        value={tab}
+        onChange={(next) => setParams(next && next !== tabs[0]?.value ? { tab: next } : {})}
+      >
+        <Tabs.List mb="md">
+          {tabs.map((t) => (
+            <Tabs.Tab key={t.value} value={t.value}>
+              {t.label}
+            </Tabs.Tab>
+          ))}
+        </Tabs.List>
+        <Tabs.Panel value="draft">
+          <DraftBoard />
+        </Tabs.Panel>
+        <Tabs.Panel value="requests">
+          <RequestsPage />
+        </Tabs.Panel>
+        <Tabs.Panel value="trades">
+          <Stack>
+            <Text size="sm" c="dimmed">
+              Swap players between two teams in one step, with a before-and-after look at both teams and every
+              request or sibling pair the trade joins or splits.
+            </Text>
+            {workingDivisionId == null ? (
+              <Alert color="yellow">Pick a Working Division from the sidebar first.</Alert>
+            ) : (
+              <TradePanel divisionId={workingDivisionId} open />
+            )}
+          </Stack>
+        </Tabs.Panel>
+      </Tabs>
+    </Stack>
   )
 }
 
@@ -211,7 +238,7 @@ function DraftBoard() {
 
   return (
     <Stack>
-      <Title order={2}>Draft</Title>
+      <Title order={3}>Draft</Title>
       <Text size="sm" c="dimmed">
         A live, snake-order draft of a division&apos;s registered-but-unrostered players onto its teams.
       </Text>
@@ -395,7 +422,6 @@ function DraftBoard() {
       {workingDivisionId != null && (
         <Stack mt="lg" gap="lg">
           <AutoDraftResults divisionId={workingDivisionId} />
-          <TradePanel divisionId={workingDivisionId} />
           <DraftNotes divisionId={workingDivisionId} />
         </Stack>
       )}

@@ -40,7 +40,7 @@ function effectLabel(e: TradeEffect): string {
 /** Swap players between two of the division's teams in one step, with a
  * before/after look at both teams and every request or sibling pair the trade
  * joins or splits. Mirrors the Streamlit app's trade panel. */
-export function TradePanel({ divisionId }: { divisionId: number }) {
+export function TradePanel({ divisionId, open = false }: { divisionId: number; open?: boolean }) {
   const { user } = useAuth()
   const { readOnly } = useAccess()
   const queryClient = useQueryClient()
@@ -117,7 +117,7 @@ export function TradePanel({ divisionId }: { divisionId: number }) {
     (roster ?? []).filter((e) => e.player_id != null).map((e) => ({ value: String(e.player_id), label: e.name }))
 
   return (
-    <Accordion variant="contained">
+    <Accordion variant="contained" defaultValue={open ? 'trade' : null}>
       <Accordion.Item value="trade">
         <Accordion.Control>🔁 Trade players between teams</Accordion.Control>
         <Accordion.Panel>

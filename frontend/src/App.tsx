@@ -17,7 +17,9 @@ const TeamRosterPage = lazy(() => import('./pages/TeamRosterPage').then((m) => (
 const TeamRostersPage = lazy(() => import('./pages/TeamRostersPage').then((m) => ({ default: m.TeamRostersPage })))
 const CoachesPage = lazy(() => import('./pages/CoachesPage').then((m) => ({ default: m.CoachesPage })))
 const AllParentsPage = lazy(() => import('./pages/AllParentsPage').then((m) => ({ default: m.AllParentsPage })))
-const DraftPage = lazy(() => import('./pages/DraftPage').then((m) => ({ default: m.DraftPage })))
+const RosterManagementPage = lazy(() =>
+  import('./pages/RosterManagementPage').then((m) => ({ default: m.RosterManagementPage }))
+)
 const EvalsPage = lazy(() => import('./pages/EvalsPage').then((m) => ({ default: m.EvalsPage })))
 const UsagePage = lazy(() => import('./pages/UsagePage').then((m) => ({ default: m.UsagePage })))
 const UserManagementPage = lazy(() =>
@@ -54,9 +56,13 @@ function App() {
           <Route path="/team-rosters" element={<PageAccess pages={['rosters', 'teams']}><TeamRostersPage /></PageAccess>} />
           <Route path="/coaches" element={<PageAccess pages={['coaches']}><CoachesPage /></PageAccess>} />
           <Route path="/parents" element={<PageAccess pages={['parents']}><AllParentsPage /></PageAccess>} />
-          <Route path="/draft" element={<PageAccess pages={['draft', 'teams']}><DraftPage /></PageAccess>} />
-          {/* Requests moved under Draft; keep old links working. */}
-          <Route path="/requests" element={<Navigate to="/draft?tab=requests" replace />} />
+          <Route
+            path="/roster-management"
+            element={<PageAccess pages={['draft', 'teams', 'rosters']}><RosterManagementPage /></PageAccess>}
+          />
+          {/* Draft and Requests are sections of Roster Management now; keep old links working. */}
+          <Route path="/draft" element={<Navigate to="/roster-management" replace />} />
+          <Route path="/requests" element={<Navigate to="/roster-management?tab=requests" replace />} />
           <Route path="/evals" element={<PageAccess pages={['teams']}><EvalsPage /></PageAccess>} />
           <Route path="/games" element={<PageAccess pages={['schedule', 'process', 'edit']}><GamesPage /></PageAccess>} />
           <Route path="/tokens" element={<ApiTokensPage />} />

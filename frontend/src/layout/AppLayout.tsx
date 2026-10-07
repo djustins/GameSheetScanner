@@ -47,7 +47,7 @@ const SCOPED_NAV_ITEMS: NavItem[] = [
   { to: '/evals', label: 'Evals', pages: ['teams'] },
   { to: '/games', label: 'Games', pages: ['schedule', 'process', 'edit'] },
   { to: '/stats-standings', label: 'Stats & Standings', pages: ['standings', 'stats'] },
-  { to: '/draft', label: 'Draft', pages: ['draft', 'teams'] },
+  { to: '/roster-management', label: 'Roster Management', pages: ['draft', 'teams', 'rosters'] },
 ]
 
 export function AppLayout() {

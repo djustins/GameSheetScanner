@@ -63,11 +63,11 @@ pages scoped to the division picked at the top of the sidebar:
 
 | Page | What's there |
 |---|---|
-| Team Rosters | Each team's roster, coaches and stats; trades between teams |
+| Team Rosters | Each team's roster, coaches and stats, and everyone registered in the division |
 | Evals | This season's evaluations |
 | Games | Schedule & Results, Import Scoresheets (the game sheet scanner), Manage Games |
 | Stats & Standings | Standings and player stats, computed from stored games |
-| Draft | The draft and Auto-Draft, with play-with Requests as a second tab |
+| Roster Management | Three sections: Draft (live or Auto-Draft), Requests (play-with requests), Trades |
 
 What a user sees follows their role's pages and read-only setting, the same as in
 the Streamlit app (`src/auth/access.tsx`).

@@ -35,10 +35,10 @@ const PAGE_GUIDES: PageGuide[] = [
     pages: ['rosters', 'teams'],
   },
   {
-    to: '/draft',
-    title: 'Draft',
-    description: 'A live snake-order draft, or auto-draft the whole pool at once.',
-    pages: ['draft'],
+    to: '/roster-management',
+    title: 'Roster Management',
+    description: 'Draft the division (live or Auto-Draft), review play-with requests, and trade players between teams.',
+    pages: ['draft', 'teams', 'rosters'],
   },
   {
     to: '/divisions',
@@ -93,7 +93,7 @@ export function HomePage() {
       ) : (
         <Alert color="blue">
           👉 <strong>Start here:</strong> choose your <strong>Working Division</strong> in the sidebar — Team
-          Rosters, Games, Stats & Standings and Draft all show that division. It&apos;s shared with the Streamlit
+          Rosters, Games, Stats & Standings and Roster Management all show that division. It&apos;s shared with the Streamlit
           app, which picks it up the next time it&apos;s opened.
         </Alert>
       )}

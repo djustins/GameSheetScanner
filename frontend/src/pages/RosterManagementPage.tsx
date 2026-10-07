@@ -23,15 +23,19 @@ import { useAuth } from '../auth/AuthContext'
 import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
 import { useWorkingDivision } from '../context/WorkingDivisionContext'
 import { AutoDraftResults, DraftNotes } from '../components/AutoDraftResults'
+import { MoveHistory } from '../components/MoveHistory'
 import { TradePanel } from '../components/TradePanel'
+import { UnplacedPlayers } from '../components/UnplacedPlayers'
 import { RequestsPage } from './RequestsPage'
 
 /** Everything that decides who is on which team in the Working Division: the
- * draft, the play-with requests that feed Auto-Draft, and trades afterwards.
+ * draft, the play-with requests that feed Auto-Draft, trades (with the move
+ * history, for admins), and the players not on a team yet.
  * Each section shows only to roles with its page; ?tab=requests (or trades)
  * opens that section directly. */
 export function RosterManagementPage() {
   const { canView } = useAccess()
+  const { user } = useAuth()
   const { workingDivisionId } = useWorkingDivision()
   const [params, setParams] = useSearchParams()
   const tabs = [
@@ -39,6 +43,7 @@ export function RosterManagementPage() {
     canView('teams') && { value: 'requests', label: 'Requests' },
     // Trades used to sit on both the Draft and the Team Rosters pages.
     (canView('draft') || canView('rosters')) && { value: 'trades', label: 'Trades' },
+    (canView('draft') || canView('rosters')) && { value: 'unplaced', label: 'Unplaced Players' },
   ].filter((t) => !!t)
   const tab = tabs.find((t) => t.value === params.get('tab'))?.value ?? tabs[0]?.value
 
@@ -73,9 +78,19 @@ export function RosterManagementPage() {
             {workingDivisionId == null ? (
               <Alert color="yellow">Pick a Working Division from the sidebar first.</Alert>
             ) : (
-              <TradePanel divisionId={workingDivisionId} open />
+              <>
+                <TradePanel divisionId={workingDivisionId} open />
+                {user?.is_admin && <MoveHistory divisionId={workingDivisionId} />}
+              </>
             )}
           </Stack>
+        </Tabs.Panel>
+        <Tabs.Panel value="unplaced">
+          {workingDivisionId == null ? (
+            <Alert color="yellow">Pick a Working Division from the sidebar first.</Alert>
+          ) : (
+            <UnplacedPlayers divisionId={workingDivisionId} />
+          )}
         </Tabs.Panel>
       </Tabs>
     </Stack>

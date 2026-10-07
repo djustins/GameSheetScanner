@@ -37,7 +37,8 @@ const PAGE_GUIDES: PageGuide[] = [
   {
     to: '/roster-management',
     title: 'Roster Management',
-    description: 'Draft the division (live or Auto-Draft), review play-with requests, and trade players between teams.',
+    description:
+      'Draft the division (live or Auto-Draft), review play-with requests, trade players between teams, and place anyone not on a team yet.',
     pages: ['draft', 'teams', 'rosters'],
   },
   {

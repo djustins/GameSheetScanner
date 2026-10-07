@@ -449,7 +449,8 @@ def test_move_player_note_is_dropped_for_non_admin(conn, division_id):
         auth=coach_auth,
     )
     assert response.status_code == 204
-    assert core.list_player_move_notes(conn, player_id) == []
+    # The move is logged, but a non-admin's reason isn't kept.
+    assert [n["note"] for n in core.list_player_move_notes(conn, player_id)] == [None]
 
 
 def test_role_lifecycle(conn, admin_auth):
@@ -1044,3 +1045,28 @@ def test_usage_log_counts_logins_and_pages_and_is_admin_only(conn, admin_auth, r
         {"path": "/teams/:id", "views": 2, "users": 1},
     ]
     assert [(d["users"], d["logins"], d["page_views"]) for d in usage["by_day"]] == [(2, 1, 4)]
+
+
+def test_division_moves_and_blank_roster_number(conn, admin_auth, readonly_auth, division_id):
+    team1 = core.add_team(conn, division_id, "Avalanche")
+    team2 = core.add_team(conn, division_id, "Wild")
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+
+    # Adding to a team without a number gives the next free placeholder.
+    core.add_roster_entry(conn, team1, "TBD1", "Someone Else")
+    added = client.post(
+        f"/teams/{team1}/roster", json={"number": "", "name": "Sidney Crosby", "player_id": player_id}, auth=admin_auth
+    )
+    assert added.status_code == 201
+    assert added.json()["number"] == "TBD2"
+
+    moved = client.post(
+        f"/players/{player_id}/move",
+        json={"division_id": division_id, "new_team_id": team2, "note": "Balancing"}, auth=admin_auth,
+    )
+    assert moved.status_code == 204
+    assert client.get(f"/divisions/{division_id}/moves", auth=readonly_auth).status_code == 403
+    moves = client.get(f"/divisions/{division_id}/moves", auth=admin_auth).json()
+    assert [(m["player"], m["from_team"], m["to_team"], m["note"]) for m in moves] == [
+        ("Sidney Crosby", "Avalanche", "Wild", "Balancing"),
+    ]

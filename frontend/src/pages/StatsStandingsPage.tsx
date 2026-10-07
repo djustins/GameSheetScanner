@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { Alert, Select, Stack, Table, Tabs, Text, Title } from '@mantine/core'
 import { useQuery } from '@tanstack/react-query'
-import { getPlayerStats, getStandings } from '../api/divisions'
+import { getPlayerStats, getStandings, listDivisionTeams } from '../api/divisions'
 import { listPlayers } from '../api/players'
 import type { Player } from '../api/types'
 import { PlayerDetailDrawer } from '../components/PlayerDetailDrawer'
+import { TeamsOverviewTable } from '../components/TeamsOverviewTable'
 import { useWorkingDivision } from '../context/WorkingDivisionContext'
 import { useAccess } from '../auth/access'
 
@@ -17,6 +18,12 @@ export function StatsStandingsPage() {
   const { data: standings } = useQuery({
     queryKey: ['standings', workingDivisionId],
     queryFn: () => getStandings(workingDivisionId!),
+    enabled: workingDivisionId != null && canStandings,
+  })
+
+  const { data: teams } = useQuery({
+    queryKey: ['division-teams', workingDivisionId],
+    queryFn: () => listDivisionTeams(workingDivisionId!),
     enabled: workingDivisionId != null && canStandings,
   })
 
@@ -93,6 +100,14 @@ export function StatsStandingsPage() {
                 No completed games yet.
               </Text>
             )}
+
+            <Title order={4} mt="xl" mb={4}>
+              Team balance
+            </Title>
+            <Text size="xs" c="dimmed" mb="sm">
+              How evenly the teams are built: roster size, average grade and the grade breakdown, and average age.
+            </Text>
+            <TeamsOverviewTable divisionId={workingDivisionId} teams={teams ?? []} />
           </Tabs.Panel>
 
           <Tabs.Panel value="stats" pt="md">

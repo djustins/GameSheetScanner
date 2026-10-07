@@ -102,7 +102,7 @@ export function TradePanel({ divisionId, open = false }: { divisionId: number; o
       setFromB([])
       setNote('')
       setAnyway(false)
-      for (const key of [['roster'], ['auto-draft-results'], ['teams-overview'], ['division-requests'], ['trade-preview']]) {
+      for (const key of [['roster'], ['auto-draft-results'], ['teams-overview'], ['division-requests'], ['trade-preview'], ['division-moves']]) {
         queryClient.invalidateQueries({ queryKey: key })
       }
     },

@@ -322,6 +322,16 @@ export interface Evaluation {
   created_at: string
 }
 
+export interface DivisionMove {
+  id: number
+  player_id: number
+  player: string
+  from_team: string | null
+  to_team: string | null
+  note: string | null
+  created_at: string
+}
+
 export interface PlayerMoveNote {
   id: number
   division_id: number

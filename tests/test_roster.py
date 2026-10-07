@@ -142,21 +142,29 @@ def test_move_player_to_team_updates_roster_entry(conn, division_id):
     assert [r["player_id"] for r in core.list_roster(conn, team2)] == [player_id]
 
 
-def test_move_player_to_team_records_a_note_only_when_given(conn, division_id):
+def test_move_player_to_team_logs_every_move_with_its_note_if_given(conn, division_id):
     team1 = core.add_team(conn, division_id, "Avalanche")
     team2 = core.add_team(conn, division_id, "Wild")
     player_id = core.add_player(conn, "Sidney", "Crosby")
     core.add_roster_entry(conn, team1, "9", "Sidney Crosby", player_id=player_id)
 
     core.move_player_to_team(conn, player_id, division_id, team2)
-    assert core.list_player_move_notes(conn, player_id) == []
+    [first] = core.list_player_move_notes(conn, player_id)
+    assert (first["from_team"], first["to_team"], first["note"]) == ("Avalanche", "Wild", None)
 
     core.move_player_to_team(conn, player_id, division_id, team1, note="Balancing rosters")
     notes = core.list_player_move_notes(conn, player_id)
-    assert len(notes) == 1
+    assert len(notes) == 2
     assert notes[0]["from_team"] == "Wild"
     assert notes[0]["to_team"] == "Avalanche"
     assert notes[0]["note"] == "Balancing rosters"
+
+    # The division-wide history names the player.
+    moves = core.list_division_moves(conn, division_id)
+    assert [(m["player"], m["from_team"], m["to_team"], m["note"]) for m in moves] == [
+        ("Sidney Crosby", "Wild", "Avalanche", "Balancing rosters"),
+        ("Sidney Crosby", "Avalanche", "Wild", None),
+    ]
 
 
 def test_move_player_to_team_is_a_noop_for_the_same_team(conn, division_id):

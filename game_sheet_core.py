@@ -2045,9 +2045,10 @@ def move_player_to_team(
     placeholder number.
     A no-op if they're already on new_team_id.
 
-    A given `note` is recorded in player_move_notes as this move's reason
-    (see list_player_move_notes) — admin-only in the UI, since a coach can
-    move a player but isn't shown why past moves happened. Raises
+    Every move is logged in player_move_notes, with `note` as its reason
+    when one is given (see list_player_move_notes, list_division_moves) —
+    admin-only in the UI, since a coach can move a player but isn't shown
+    why past moves happened. Raises
     ValueError if the player has no roster row in this division, or if
     new_team_id isn't a team in it."""
     entry = conn.execute(
@@ -2082,12 +2083,11 @@ def move_player_to_team(
     conn.execute(
         "UPDATE roster_entries SET team_id = %s, number = %s WHERE id = %s", (new_team_id, number, roster_entry_id)
     )
-    if note and note.strip():
-        conn.execute(
-            "INSERT INTO player_move_notes (player_id, division_id, from_team_id, to_team_id, note) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (player_id, division_id, from_team_id, new_team_id, note.strip()),
-        )
+    conn.execute(
+        "INSERT INTO player_move_notes (player_id, division_id, from_team_id, to_team_id, note) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (player_id, division_id, from_team_id, new_team_id, (note or "").strip() or None),
+    )
     conn.commit()
 
 
@@ -2284,6 +2284,31 @@ def list_player_move_notes(conn: PGConnection, player_id: int, division_id: int 
             "id": r[0], "division_id": r[1],
             "from_team": display_text(r[2]) if r[2] else None, "to_team": display_text(r[3]) if r[3] else None,
             "note": r[4], "created_at": r[5],
+        }
+        for r in rows
+    ]
+
+
+def list_division_moves(conn: PGConnection, division_id: int) -> list[dict]:
+    """Every logged move in the division, newest first: who went from which
+    team to which, when, and the reason if one was given. A trade shows as
+    one row per player, each carrying the trade's summary as its note (see
+    trade_players). Admin-only in the UI, like list_player_move_notes."""
+    rows = conn.execute(
+        """SELECT mn.id, mn.player_id, p.first_name, p.last_name, ft.name, tt.name, mn.note, mn.created_at
+           FROM player_move_notes mn
+           JOIN players p ON p.id = mn.player_id
+           LEFT JOIN teams ft ON ft.id = mn.from_team_id
+           LEFT JOIN teams tt ON tt.id = mn.to_team_id
+           WHERE mn.division_id = %s
+           ORDER BY mn.created_at DESC, mn.id DESC""",
+        (division_id,),
+    ).fetchall()
+    return [
+        {
+            "id": r[0], "player_id": r[1], "player": full_name(r[2], r[3]),
+            "from_team": display_text(r[4]) if r[4] else None, "to_team": display_text(r[5]) if r[5] else None,
+            "note": r[6], "created_at": r[7],
         }
         for r in rows
     ]

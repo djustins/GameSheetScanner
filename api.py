@@ -565,7 +565,7 @@ def api_team_roster(team_id: int, conn=Depends(get_conn), user=Depends(get_curre
 
 
 class RosterEntryCreate(BaseModel):
-    number: str
+    number: str = ""
     name: str
     player_id: int | None = None
 
@@ -574,7 +574,12 @@ class RosterEntryCreate(BaseModel):
 def api_add_roster_entry(
     team_id: int, body: RosterEntryCreate, conn=Depends(get_conn), user=Depends(require_writer)
 ) -> dict:
-    entry_id = core.add_roster_entry(conn, team_id, body.number, body.name, player_id=body.player_id)
+    number = body.number.strip()
+    if not number:
+        # No number yet: the next free placeholder, like a draft pick gets.
+        taken = {r["number"] for r in core.list_roster(conn, team_id)}
+        number = next(f"TBD{n}" for n in range(1, len(taken) + 2) if f"TBD{n}" not in taken)
+    entry_id = core.add_roster_entry(conn, team_id, number, body.name, player_id=body.player_id)
     return next(r for r in core.list_roster(conn, team_id) if r["id"] == entry_id)
 
 
@@ -1025,6 +1030,12 @@ def api_player_move_notes(
     """Admin-only, matching the Streamlit app — a coach can call
     POST .../move but never sees why a player was moved before."""
     return core.list_player_move_notes(conn, player_id, division_id)
+
+
+@app.get("/divisions/{division_id}/moves", tags=["draft"])
+def api_division_moves(division_id: int, conn=Depends(get_conn), user=Depends(require_admin)) -> list[dict]:
+    """Every logged move and trade in the division, newest first (admin only)."""
+    return core.list_division_moves(conn, division_id)
 
 
 @app.get("/players/{player_id}/position", tags=["players"])

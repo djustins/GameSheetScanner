@@ -279,10 +279,12 @@ CREATE TABLE IF NOT EXISTS player_positions (
     PRIMARY KEY (player_id, division_id, team_id)
 );
 
--- One row per post-draft move.move_player_to_team (Team Rosters) writes a
--- row here whenever a reason is given for moving a player to a different
--- team in the same division -- history, not a single overwritable note,
--- since a player can be moved more than once in a season. Admin-only in
+-- One row per post-draft move. move_player_to_team (Team Rosters, and each
+-- player in a trade) writes a row here whenever a player goes to a different
+-- team in the same division, with the reason in `note` when one was given
+-- -- history, not a single overwritable note, since a player can be moved
+-- more than once in a season. Rows from before October 2026 exist only for
+-- moves that had a reason. Admin-only in
 -- the UI (see list_player_move_notes) -- coaches can move a player but
 -- don't see why past moves happened.
 CREATE TABLE IF NOT EXISTS player_move_notes (

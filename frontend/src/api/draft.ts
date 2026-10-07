@@ -3,6 +3,7 @@ import type {
   AutoDraftResult,
   AutoDraftResults,
   AutoDraftRun,
+  DivisionMove,
   DivisionRequest,
   Draft,
   DraftPick,
@@ -13,6 +14,11 @@ import type {
 
 export function getDraft(divisionId: number): Promise<Draft | null> {
   return apiFetch<Draft | null>(`/divisions/${divisionId}/draft`)
+}
+
+// Admin-only: every logged move and trade in the division, newest first.
+export function getDivisionMoves(divisionId: number): Promise<DivisionMove[]> {
+  return apiFetch<DivisionMove[]>(`/divisions/${divisionId}/moves`)
 }
 
 export function getDraftPool(divisionId: number): Promise<DraftPoolPlayer[]> {

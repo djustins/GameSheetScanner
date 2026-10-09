@@ -302,6 +302,12 @@ panel has **Sync now**. Changing the minute of the hour means editing the `cron`
 line in the workflow file, and GitHub often starts scheduled jobs several minutes
 late.
 
+GitHub's scheduler is not dependable for this: it has started this job hours late
+and skipped runs entirely. So the API also keeps time itself — whenever a signed-in
+person opens a page, it checks whether a sync is due and, if so, runs one in the
+background (`SYNC_ON_VISIT` in `api.py`; on by default on Render, `SYNC_ON_VISIT=0`
+turns it off). The GitHub job remains as a second trigger for quiet periods.
+
 Each team page shows a **Last updated** banner with the time its division was
 last synced (`GET /divisions/{id}/league-sync`).
 
@@ -318,6 +324,22 @@ One-time setup:
 If a run fails with "… is empty", that name isn't set on this repository, or is
 misspelled. To retry after changing the workflow file, start a new run with **Run
 workflow** — **Re-run jobs** replays the old commit's version of the workflow.
+
+## Services page
+
+Admins have a **Services** page in the React app showing, in one place, the state
+of everything the app runs on (`services_status.py`, `GET /services`):
+
+- **Outside services** — Render, Vercel, Aiven, GitHub, Resend and Claude, each read
+  from its own public status page: whether it's operational, any open incident, and
+  any maintenance it has scheduled, with the times in your time zone and links to its
+  status page and dashboard.
+- **This app's own checks** — the database answers, email is set up and its sending
+  domain verified, the league sync is running on schedule, the league stats site is
+  answering, and the scoresheet-reading key is set.
+
+It refreshes every two minutes; **Check again** asks every service afresh. A status
+page that can't be read shows as "Unknown" rather than breaking the page.
 
 ## Email
 

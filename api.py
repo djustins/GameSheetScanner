@@ -36,7 +36,7 @@ from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
@@ -46,6 +46,7 @@ from pydantic import BaseModel
 import game_sheet_core as core
 import league_site_sync
 import mailer
+import services_status
 
 load_dotenv()
 
@@ -326,13 +327,54 @@ class PageView(BaseModel):
     path: str
 
 
+# GitHub's scheduler turned out to start the hourly sync job hours late, or
+# skip it. So the app also checks whenever someone opens a page: if a sync is
+# due by the schedule set in the app, it runs in the background, and what
+# people are looking at is never staler than the schedule allows. On by
+# default on Render (which sets RENDER=true); SYNC_ON_VISIT=0 turns it off,
+# =1 turns it on elsewhere.
+SYNC_ON_VISIT = os.environ.get("SYNC_ON_VISIT", os.environ.get("RENDER", "")).strip().lower() in ("1", "true")
+
+
+def _run_due_league_sync() -> None:
+    """A full league-site sync on its own database connection, for running
+    after the response has gone out. Emails the admins what came in, as the
+    scheduled job does."""
+    log = logging.getLogger("uvicorn.error")
+    try:
+        conn = core.connect(DATABASE_URL)
+    except Exception:
+        log.exception("League sync on visit: could not connect to the database")
+        return
+    try:
+        notice = mailer.league_sync_notice(league_site_sync.sync(conn))
+        if notice:
+            mailer.notify_admins(conn, *notice)
+    except Exception:
+        log.exception("League sync on visit failed")
+    finally:
+        conn.close()
+
+
 @app.post("/me/page-views", status_code=status.HTTP_204_NO_CONTENT, tags=["meta"])
-def api_record_page_view(body: PageView, conn=Depends(get_conn), user=Depends(get_current_user)):
-    """The React app calls this each time the signed-in user opens a page."""
+def api_record_page_view(
+    body: PageView, background: BackgroundTasks, conn=Depends(get_conn), user=Depends(get_current_user)
+):
+    """The React app calls this each time the signed-in user opens a page.
+    It's also the app's own clock for the league sync (see SYNC_ON_VISIT)."""
     try:
         core.record_usage(conn, user["id"], "page", body.path)
     except Exception:
         logging.getLogger("uvicorn.error").exception("Could not record the page view")
+    if SYNC_ON_VISIT:
+        try:
+            due, _ = league_site_sync.scheduled_sync_due(conn)
+            if due:
+                # Marked first, so the next page view doesn't start a second one.
+                league_site_sync.mark_scheduled_run(conn)
+                background.add_task(_run_due_league_sync)
+        except Exception:
+            logging.getLogger("uvicorn.error").exception("Could not check whether a league sync is due")
 
 
 @app.get("/usage", tags=["users"])
@@ -1665,6 +1707,14 @@ def api_league_sync_status(division_id: int, conn=Depends(get_conn), user=Depend
 # Email -- messages to a division's parents and coaches, and the send log.
 # Account emails (invitations, password resets) are with Roles & Users below.
 # ---------------------------------------------------------------------------
+
+@app.get("/services", tags=["meta"])
+def api_services(refresh: bool = False, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """The state of every service the app depends on -- each one's own
+    incident and maintenance notices -- and the app's own health checks
+    (see services_status.py). Kept for two minutes unless refresh=true."""
+    return services_status.snapshot(conn, refresh=refresh)
+
 
 @app.get("/email/status", tags=["email"])
 def api_email_status(user=Depends(require_admin)) -> dict:

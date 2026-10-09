@@ -22,6 +22,7 @@ const PAGE_NAMES: Record<string, string> = {
   '/admin/users': 'User Management',
   '/admin/usage': 'Usage',
   '/admin/email': 'Email',
+  '/admin/services': 'Services',
 }
 
 const when = (iso: string) =>

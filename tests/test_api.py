@@ -1151,6 +1151,26 @@ def test_player_photo_upload_fetch_replace_and_remove(conn, admin_auth, readonly
     assert core.list_roster(conn, team_id)[0]["photo_version"] is None
 
 
+def test_opening_a_page_runs_a_due_league_sync_once(conn, admin_auth, monkeypatch):
+    runs = []
+    monkeypatch.setattr(api, "_run_due_league_sync", lambda: runs.append(1))
+
+    # Off (as in every other test): opening pages never syncs.
+    client.post("/me/page-views", json={"path": "/"}, auth=admin_auth)
+    assert runs == []
+
+    monkeypatch.setattr(api, "SYNC_ON_VISIT", True)
+    client.post("/me/page-views", json={"path": "/"}, auth=admin_auth)
+    client.post("/me/page-views", json={"path": "/games"}, auth=admin_auth)
+    assert runs == [1]  # due once; the second page view finds it already run
+    assert api.league_site_sync.get_schedule(conn)["last_run"] is not None
+
+    api.league_site_sync.set_schedule(conn, 0)
+    conn.execute("DELETE FROM app_settings WHERE key = 'league_sync_last_run'")
+    client.post("/me/page-views", json={"path": "/"}, auth=admin_auth)
+    assert runs == [1]  # automatic syncing turned off
+
+
 def test_user_agreement_is_recorded_once_accepted(conn, admin_auth):
     assert client.get("/me", auth=admin_auth).json()["terms_accepted"] is False
     assert client.post("/me/accept-terms").status_code == 401

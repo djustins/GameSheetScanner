@@ -27,6 +27,7 @@ const ForgotPasswordPage = lazy(() =>
 )
 const ResetPasswordPage = lazy(() => import('./pages/PasswordPages').then((m) => ({ default: m.ResetPasswordPage })))
 const AccountPage = lazy(() => import('./pages/AccountPage').then((m) => ({ default: m.AccountPage })))
+const ServicesPage = lazy(() => import('./pages/ServicesPage').then((m) => ({ default: m.ServicesPage })))
 const UsagePage = lazy(() => import('./pages/UsagePage').then((m) => ({ default: m.UsagePage })))
 const UserManagementPage = lazy(() =>
   import('./pages/UserManagementPage').then((m) => ({ default: m.UserManagementPage }))
@@ -88,6 +89,14 @@ function App() {
             element={
               <AdminRoute>
                 <EmailPage />
+              </AdminRoute>
+            }
+          />
+          <Route
+            path="/admin/services"
+            element={
+              <AdminRoute>
+                <ServicesPage />
               </AdminRoute>
             }
           />

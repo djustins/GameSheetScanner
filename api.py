@@ -38,7 +38,7 @@ import anthropic
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -877,6 +877,39 @@ def api_delete_player(player_id: int, conn=Depends(get_conn), user=Depends(requi
 @app.post("/players/{player_id}/restore", status_code=status.HTTP_204_NO_CONTENT, tags=["players"])
 def api_restore_player(player_id: int, conn=Depends(get_conn), user=Depends(require_admin)):
     core.restore_player(conn, player_id)
+
+
+@app.get("/players/{player_id}/photo", tags=["players"])
+def api_get_player_photo(player_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> Response:
+    """The player's photo, to any signed-in user. 404 if they have none."""
+    photo = core.get_player_photo(conn, player_id)
+    if photo is None:
+        not_found("This player has no photo.")
+    data, content_type = photo
+    # Private: a browser may keep it, a shared cache must not. Clients ask
+    # again only when the player's photo_version changes.
+    return Response(content=data, media_type=content_type, headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.post("/players/{player_id}/photo", tags=["players"])
+async def api_set_player_photo(
+    player_id: int, file: UploadFile = File(...), conn=Depends(get_conn), user=Depends(require_writer)
+) -> dict:
+    """Saves or replaces the player's photo. The React app shrinks the image
+    first; anything over 1 MB, or not a JPEG/PNG/WebP, is refused."""
+    if core.get_player(conn, player_id) is None:
+        not_found("Player not found.")
+    data = await file.read(core.MAX_PLAYER_PHOTO_BYTES + 1)
+    try:
+        version = core.set_player_photo(conn, player_id, data, file.content_type or "")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"photo_version": version}
+
+
+@app.delete("/players/{player_id}/photo", status_code=status.HTTP_204_NO_CONTENT, tags=["players"])
+def api_delete_player_photo(player_id: int, conn=Depends(get_conn), user=Depends(require_writer)):
+    core.delete_player_photo(conn, player_id)
 
 
 @app.get("/players/{player_id}/siblings", tags=["players"])

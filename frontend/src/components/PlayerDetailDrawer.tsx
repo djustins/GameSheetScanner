@@ -34,6 +34,7 @@ import { linkSiblings, listParents, setPlayerParent } from '../api/parents'
 import { listDivisions } from '../api/divisions'
 import type { Player } from '../api/types'
 import { ApiError } from '../api/client'
+import { PlayerPhotoEditor } from './PlayerPhoto'
 import { RegistrationsEditor } from './RegistrationsEditor'
 import { useAuth } from '../auth/AuthContext'
 import { ReadOnlyNotice, useAccess, Writable } from '../auth/access'
@@ -49,7 +50,7 @@ interface Props {
 
 export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Props) {
   const { user } = useAuth()
-  const { hideContactDetails } = useAccess()
+  const { hideContactDetails, readOnly } = useAccess()
   const queryClient = useQueryClient()
   const [parentPickId, setParentPickId] = useState<string | null>(null)
   const [siblingPickId, setSiblingPickId] = useState<string | null>(null)
@@ -228,6 +229,7 @@ export function PlayerDetailDrawer({ player, onClose, navList, onNavigate }: Pro
         <Writable key={player.id}>
         <Stack>
           <ReadOnlyNotice />
+          <PlayerPhotoEditor playerId={player.id} name={player.name} version={player.photo_version} canEdit={!readOnly} />
           <div>
             <Title order={5} mb="xs">
               Profile

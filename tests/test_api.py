@@ -1105,3 +1105,47 @@ def test_mock_draft_and_settings_over_the_api(conn, admin_auth, readonly_auth, d
 
     assert client.delete(f"/drafts/{draft_id}", auth=admin_auth).status_code == 204
     assert client.get(f"/divisions/{division_id}/draft?mock=true", auth=admin_auth).json() is None
+
+
+def test_player_photo_upload_fetch_replace_and_remove(conn, admin_auth, readonly_auth, division_id):
+    player_id = core.add_player(conn, "Sidney", "Crosby")
+    team_id = core.add_team(conn, division_id, "Avalanche")
+    core.add_roster_entry(conn, team_id, "87", "Sidney Crosby", player_id=player_id)
+    jpeg = b"\xff\xd8\xff\xe0" + b"photo-bytes"
+
+    assert client.get(f"/players/{player_id}/photo", auth=admin_auth).status_code == 404
+    assert core.get_player(conn, player_id)["photo_version"] is None
+
+    denied = client.post(
+        f"/players/{player_id}/photo", files={"file": ("p.jpg", jpeg, "image/jpeg")}, auth=readonly_auth
+    )
+    assert denied.status_code == 403
+    not_image = client.post(
+        f"/players/{player_id}/photo", files={"file": ("p.pdf", b"%PDF", "application/pdf")}, auth=admin_auth
+    )
+    assert not_image.status_code == 422
+    too_big = client.post(
+        f"/players/{player_id}/photo",
+        files={"file": ("p.jpg", b"x" * (core.MAX_PLAYER_PHOTO_BYTES + 1), "image/jpeg")}, auth=admin_auth,
+    )
+    assert too_big.status_code == 422
+
+    saved = client.post(f"/players/{player_id}/photo", files={"file": ("p.jpg", jpeg, "image/jpeg")}, auth=admin_auth)
+    assert saved.status_code == 200
+    version = saved.json()["photo_version"]
+    assert version and core.get_player(conn, player_id)["photo_version"] == version
+    assert client.get(f"/teams/{team_id}/roster", auth=admin_auth).json()[0]["photo_version"] == version
+
+    # Anyone signed in can see it, including a read-only account.
+    fetched = client.get(f"/players/{player_id}/photo", auth=readonly_auth)
+    assert fetched.status_code == 200 and fetched.content == jpeg
+    assert fetched.headers["content-type"] == "image/jpeg"
+    assert client.get(f"/players/{player_id}/photo").status_code == 401
+
+    png = b"\x89PNG" + b"new"
+    client.post(f"/players/{player_id}/photo", files={"file": ("p.png", png, "image/png")}, auth=admin_auth)
+    assert client.get(f"/players/{player_id}/photo", auth=admin_auth).content == png
+
+    assert client.delete(f"/players/{player_id}/photo", auth=admin_auth).status_code == 204
+    assert client.get(f"/players/{player_id}/photo", auth=admin_auth).status_code == 404
+    assert core.list_roster(conn, team_id)[0]["photo_version"] is None

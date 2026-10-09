@@ -436,6 +436,17 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked_at    TEXT
 );
 
+-- One photo per player, stored already shrunk (the React app scales it to
+-- 400px and re-encodes it as a JPEG before uploading), so a row is a few
+-- tens of kilobytes. updated_at doubles as the photo's version: clients
+-- re-fetch the image only when it changes.
+CREATE TABLE IF NOT EXISTS player_photos (
+    player_id     INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+    content_type  TEXT NOT NULL,
+    data          BYTEA NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Who used the React app and what they opened: one row per sign-in
 -- ('login') and per page opened ('page'), recorded by the API itself so the
 -- counts don't depend on anything running in the browser. path is the page's

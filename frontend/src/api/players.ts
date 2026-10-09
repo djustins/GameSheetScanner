@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { apiFetch, apiFetchBlob, apiFetchMultipart } from './client'
 import type {
   Evaluation,
   Player,
@@ -75,6 +75,21 @@ export function setPlayerRequestHard(playerId: number, requestId: number, hard: 
 
 export function removePlayerRequest(playerId: number, requestId: number): Promise<void> {
   return apiFetch<void>(`/players/${playerId}/requests/${requestId}`, { method: 'DELETE' })
+}
+
+// The photo itself, fetched with the sign-in token (an <img src> can't send one).
+export async function fetchPlayerPhoto(playerId: number): Promise<Blob> {
+  return (await apiFetchBlob(`/players/${playerId}/photo`)).blob
+}
+
+export function uploadPlayerPhoto(playerId: number, image: Blob): Promise<{ photo_version: number }> {
+  const formData = new FormData()
+  formData.append('file', image, 'photo.jpg')
+  return apiFetchMultipart(`/players/${playerId}/photo`, formData)
+}
+
+export function deletePlayerPhoto(playerId: number): Promise<void> {
+  return apiFetch<void>(`/players/${playerId}/photo`, { method: 'DELETE' })
 }
 
 export function getMoveNotes(playerId: number, divisionId: number): Promise<PlayerMoveNote[]> {

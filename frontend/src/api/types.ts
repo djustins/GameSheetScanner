@@ -34,6 +34,8 @@ export interface Player {
   current_division_id: number | null
   // Every division they're registered in this season, main division first.
   division_ids: number[]
+  // null = no photo; changes whenever the photo does.
+  photo_version?: number | null
   contact_first_name: string | null
   contact_last_name: string | null
   contact_phone: string | null
@@ -85,6 +87,8 @@ export interface RosterEntry {
   number: string
   name: string
   player_id: number | null
+  // null = the player has no photo; changes whenever their photo does.
+  photo_version?: number | null
 }
 
 export interface PlayerHistoryEntry {

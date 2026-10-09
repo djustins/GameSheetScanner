@@ -1918,17 +1918,21 @@ def list_roster(conn: PGConnection, team_id: int) -> list[dict]:
     roster_entries.player_id FK itself is left alone, so restoring the
     player re-links it automatically."""
     sort_key = _NUMERIC_SORT_KEY.format(col="re.number")
+    photo_version = _PHOTO_VERSION_SQL.format("p.id")
     rows = conn.execute(
         f"""SELECT re.id, re.number,
                    COALESCE(NULLIF(TRIM(CONCAT_WS(' ', p.first_name, p.last_name)), ''), re.name), p.id,
-                   p.first_name, p.last_name, re.name
+                   p.first_name, p.last_name, re.name, {photo_version}
            FROM roster_entries re
            LEFT JOIN players p ON p.id = re.player_id AND p.deleted_at IS NULL
            WHERE re.team_id = %s ORDER BY {sort_key}, re.number""",
         (team_id,),
     ).fetchall()
     rows.sort(key=lambda r: _roster_name_key(r[4], r[5], r[6]))  # stable: ties stay in number order
-    return [{"id": r[0], "number": r[1], "name": display_text(r[2]), "player_id": r[3]} for r in rows]
+    return [
+        {"id": r[0], "number": r[1], "name": display_text(r[2]), "player_id": r[3], "photo_version": r[7]}
+        for r in rows
+    ]
 
 
 def replace_roster(conn: PGConnection, team_id: int, entries: list[dict]):
@@ -2318,17 +2322,57 @@ def list_division_moves(conn: PGConnection, division_id: int) -> list[dict]:
 # Global players (identity persists across every division/season)
 # ---------------------------------------------------------------------------
 
+# A player photo as stored is already small (see player_photos); this only
+# stops something that plainly isn't one from being saved.
+MAX_PLAYER_PHOTO_BYTES = 1_000_000
+PLAYER_PHOTO_TYPES = ("image/jpeg", "image/png", "image/webp")
+
+# A photo's version: when it was last set, as whole seconds. NULL = no photo.
+_PHOTO_VERSION_SQL = "(SELECT EXTRACT(EPOCH FROM ph.updated_at)::bigint FROM player_photos ph WHERE ph.player_id = {})"
+
+
+def set_player_photo(conn: PGConnection, player_id: int, data: bytes, content_type: str) -> int:
+    """Saves (or replaces) a player's photo and returns its new version.
+    Raises ValueError if it isn't a JPEG/PNG/WebP image or is too large."""
+    if content_type not in PLAYER_PHOTO_TYPES:
+        raise ValueError("A photo must be a JPEG, PNG or WebP image.")
+    if not data or len(data) > MAX_PLAYER_PHOTO_BYTES:
+        raise ValueError("That photo is too large — it should be under 1 MB once shrunk.")
+    row = conn.execute(
+        """INSERT INTO player_photos (player_id, content_type, data) VALUES (%s, %s, %s)
+           ON CONFLICT (player_id) DO UPDATE
+               SET content_type = excluded.content_type, data = excluded.data, updated_at = now()
+           RETURNING EXTRACT(EPOCH FROM updated_at)::bigint""",
+        (player_id, content_type, psycopg2.Binary(data)),
+    ).fetchone()
+    conn.commit()
+    return row[0]
+
+
+def get_player_photo(conn: PGConnection, player_id: int) -> tuple[bytes, str] | None:
+    """(image bytes, content type), or None if the player has no photo."""
+    row = conn.execute("SELECT data, content_type FROM player_photos WHERE player_id = %s", (player_id,)).fetchone()
+    return (bytes(row[0]), row[1]) if row else None
+
+
+def delete_player_photo(conn: PGConnection, player_id: int) -> None:
+    conn.execute("DELETE FROM player_photos WHERE player_id = %s", (player_id,))
+    conn.commit()
+
+
 def list_players(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(
         f"""SELECT id, first_name, last_name, nickname, birth_date, current_division_id,
                    contact_first_name, contact_last_name, contact_phone, contact_email, deleted_at,
-                   parent_id, usa_ball_hockey_id
+                   parent_id, usa_ball_hockey_id, {_PHOTO_VERSION_SQL.format("players.id")}
             FROM players {where} ORDER BY last_name, first_name"""
     ).fetchall()
+    # "photo_version": None when the player has no photo; otherwise it changes
+    # whenever the photo does (see player_photos).
     cols = ["id", "first_name", "last_name", "nickname", "birth_date", "current_division_id",
             "contact_first_name", "contact_last_name", "contact_phone", "contact_email", "deleted_at",
-            "parent_id", "usa_ball_hockey_id"]
+            "parent_id", "usa_ball_hockey_id", "photo_version"]
     players = [dict(zip(cols, r)) for r in rows]
     division_ids: dict[int, list[int]] = {}
     for player_id, division_id in conn.execute(

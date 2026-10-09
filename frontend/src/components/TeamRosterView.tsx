@@ -41,6 +41,7 @@ import type { RosterEntry } from '../api/types'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { CoachManager } from './CoachManager'
+import { PlayerAvatar } from './PlayerPhoto'
 import { ReadOnlyNotice, Writable } from '../auth/access'
 
 const POSITION_OPTIONS = ['', 'Forward', 'Defense', 'Forward or Defense', 'Goalie']
@@ -154,11 +155,13 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
       key: `r${entry.id}`,
       number: entry.number,
       name: entry.name,
+      playerId: entry.player_id,
+      photoVersion: entry.photo_version,
       ...(teamStats.find((st) => st.number === entry.number) ?? blank),
     })),
     ...teamStats
       .filter((st) => !(roster ?? []).some((entry) => entry.number === st.number))
-      .map((st) => ({ ...st, key: `s${st.number}` })),
+      .map((st) => ({ ...st, key: `s${st.number}`, playerId: null, photoVersion: null })),
   ]
     .map((row, index) => ({ ...row, index }))
     .sort((x, y) => y.points - x.points || x.index - y.index)
@@ -195,6 +198,8 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
 function PlayerCard(row: {
   number: string
   name: string
+  playerId: number | null
+  photoVersion?: number | null
   goals: number
   assists: number
   points: number
@@ -213,14 +218,17 @@ function PlayerCard(row: {
   return (
     <Card withBorder radius="md" padding="md" ta="left" bg="var(--app-panel-bg)">
       <Group justify="space-between" align="flex-start" wrap="nowrap">
-        <div style={{ minWidth: 0 }}>
-          <Text size="sm" fw={700} c="var(--app-heading)">
-            #{row.number}
-          </Text>
-          <Text fw={700} size="lg" lh={1.2} truncate title={row.name}>
-            {row.name}
-          </Text>
-        </div>
+        <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
+          <PlayerAvatar playerId={row.playerId} version={row.photoVersion} name={row.name} size={52} />
+          <div style={{ minWidth: 0 }}>
+            <Text size="sm" fw={700} c="var(--app-heading)">
+              #{row.number}
+            </Text>
+            <Text fw={700} size="lg" lh={1.2} truncate title={row.name}>
+              {row.name}
+            </Text>
+          </div>
+        </Group>
         <div style={{ textAlign: 'right' }}>
           <Text fz={28} fw={800} lh={1}>
             {row.points}

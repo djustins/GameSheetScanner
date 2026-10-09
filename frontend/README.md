@@ -72,6 +72,16 @@ pages scoped to the division picked at the top of the sidebar:
 What a user sees follows their role's pages and read-only setting, the same as in
 the Streamlit app (`src/auth/access.tsx`).
 
+### Player photos
+
+A player's profile (the drawer that opens from any player list) has **Upload
+photo** / **Replace photo** / **Remove** for anyone who can edit. The photo shows
+there and on the Team Rosters (Stats) cards; players without one show their
+initials. `src/components/PlayerPhoto.tsx` shrinks the chosen image to 400px and a
+JPEG in the browser before uploading, so any phone photo works and what's stored is
+small. Photos live in the database (`player_photos`), are served only to signed-in
+users (`GET /players/{id}/photo`), and are deleted with the player.
+
 ### The draft
 
 The Draft section of Roster Management has two modes, switched at the top:

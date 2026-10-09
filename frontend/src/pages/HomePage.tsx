@@ -1,9 +1,12 @@
-import { Alert, Card, Stack, Text, Title } from '@mantine/core'
+import { Alert, Anchor, Card, Stack, Text, Title } from '@mantine/core'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { listDivisions } from '../api/divisions'
 import { useAuth } from '../auth/AuthContext'
 import { useAccess } from '../auth/access'
+
+// A video walk-through of what's new in the app.
+const LATEST_UPDATES_URL = 'https://youtu.be/5NCeMgRYGO8'
 
 interface PageGuide {
   to: string
@@ -29,7 +32,7 @@ const PAGE_GUIDES: PageGuide[] = [
   },
   {
     to: '/team-rosters',
-    title: 'Team Rosters (Stats)',
+    title: 'Team Rosters',
     description:
       "Each team's players and their stats in the Working Division, plus everyone registered in it.",
     pages: ['rosters', 'teams'],
@@ -83,6 +86,14 @@ export function HomePage() {
       <Text size="sm" c="dimmed">
         This app turns handwritten game sheets into stored stats, standings, and rosters — here&apos;s what each
         page does.
+      </Text>
+      <Text size="sm">
+        <Anchor href={LATEST_UPDATES_URL} target="_blank" rel="noopener noreferrer" fw={600}>
+          ▶ Latest updates
+        </Anchor>{' '}
+        <Text span c="dimmed">
+          (video, opens in a new tab)
+        </Text>
       </Text>
 
       {divisions && divisions.length === 0 ? (

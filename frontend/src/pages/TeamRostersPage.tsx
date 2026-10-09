@@ -37,7 +37,7 @@ export function TeamRostersPage() {
   if (workingDivisionId == null) {
     return (
       <Stack>
-        <Title order={2}>Team Rosters (Stats)</Title>
+        <Title order={2}>Team Rosters</Title>
         <Alert color="yellow">Pick a Working Division from the sidebar first.</Alert>
       </Stack>
     )
@@ -45,7 +45,7 @@ export function TeamRostersPage() {
 
   return (
     <Stack>
-      <Title order={2}>Team Rosters (Stats)</Title>
+      <Title order={2}>Team Rosters</Title>
       <Tabs defaultValue={canRosters ? 'rosters' : 'players'}>
         <Tabs.List>
           {canRosters && <Tabs.Tab value="rosters">Rosters</Tabs.Tab>}

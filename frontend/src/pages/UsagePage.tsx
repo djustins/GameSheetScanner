@@ -10,7 +10,7 @@ const PAGE_NAMES: Record<string, string> = {
   '/players': 'All Players',
   '/coaches': 'All Coaches',
   '/parents': 'All Parents',
-  '/team-rosters': 'Team Rosters (Stats)',
+  '/team-rosters': 'Team Rosters',
   '/teams/:id': 'Team roster (one team)',
   '/evals': 'Evals',
   '/games': 'Games',

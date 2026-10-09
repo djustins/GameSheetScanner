@@ -63,7 +63,7 @@ pages scoped to the division picked at the top of the sidebar:
 
 | Page | What's there |
 |---|---|
-| Team Rosters (Stats) | A tab per team (alphabetical, the first one open), each showing its players as cards with their stats, for everyone; admins get a **Bulk edit team** button that opens the roster editor (numbers, positions, grades, adding and moving players, coaches). Also everyone registered in the division. |
+| Team Rosters | A tab per team (alphabetical, the first one open), each showing its players as cards with their stats, for everyone; admins get a **Bulk edit team** button that opens the roster editor (numbers, positions, grades, adding and moving players, coaches). Also everyone registered in the division. |
 | Evals | This season's evaluations |
 | Games | Schedule & Results, Import Scoresheets (the game sheet scanner), Manage Games |
 | Stats & Standings | Standings (with a Team balance section below them) and player stats, computed from stored games |
@@ -83,7 +83,7 @@ link in the header, to the page for emailing parents and coaches.
 
 A player's profile (the drawer that opens from any player list) has **Upload
 photo** / **Replace photo** / **Remove** for anyone who can edit. The photo shows
-there and on the Team Rosters (Stats) cards; players without one show their
+there and on the Team Rosters cards; players without one show their
 initials. `src/components/PlayerPhoto.tsx` shrinks the chosen image to 400px and a
 JPEG in the browser before uploading, so any phone photo works and what's stored is
 small. Photos live in the database (`player_photos`), are served only to signed-in

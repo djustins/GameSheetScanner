@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import {
   ActionIcon,
-  Alert,
   Button,
   Card,
   Group,
@@ -175,20 +174,17 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
   return (
     <Stack>
       {leagueSync?.synced_at && (
-        <Alert color="blue" py="xs" ta="left">
-          Last updated{' '}
-          <b>
-            {new Date(leagueSync.synced_at).toLocaleString(undefined, {
-              weekday: 'long',
-              month: 'long',
-              day: 'numeric',
-              year: 'numeric',
-              hour: 'numeric',
-              minute: '2-digit',
-            })}
-          </b>{' '}
-          from the league stats site.
-        </Alert>
+        <Text size="xs" c="dimmed" ta="left">
+          Stats updated{' '}
+          {new Date(leagueSync.synced_at).toLocaleString(undefined, {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+          })}{' '}
+          from the league stats site
+        </Text>
       )}
       <Group justify="space-between" align="flex-end">
         <Title order={4}>Roster</Title>

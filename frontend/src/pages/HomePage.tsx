@@ -29,9 +29,9 @@ const PAGE_GUIDES: PageGuide[] = [
   },
   {
     to: '/team-rosters',
-    title: 'Team Rosters',
+    title: 'Team Rosters (Stats)',
     description:
-      "Each team's roster, positions, grades and coaches in the Working Division, plus everyone registered in it.",
+      "Each team's players and their stats in the Working Division, plus everyone registered in it.",
     pages: ['rosters', 'teams'],
   },
   {

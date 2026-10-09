@@ -63,7 +63,7 @@ pages scoped to the division picked at the top of the sidebar:
 
 | Page | What's there |
 |---|---|
-| Team Rosters | Each team's roster, coaches and stats, and everyone registered in the division |
+| Team Rosters (Stats) | Each team's players with their stats, for everyone; admins get a **Bulk edit team** button that opens the roster editor (numbers, positions, grades, adding and moving players, coaches). Also everyone registered in the division. |
 | Evals | This season's evaluations |
 | Games | Schedule & Results, Import Scoresheets (the game sheet scanner), Manage Games |
 | Stats & Standings | Standings (with a Team balance section below them) and player stats, computed from stored games |
@@ -102,7 +102,7 @@ settings** while it runs (`src/components/DraftSetup.tsx`):
 
 ### Team roster table
 
-- Opens sorted by last name, then first name.
+- This is the admin-only editor behind **Bulk edit team**. It opens sorted by last name, then first name.
 - Click a column header to sort by it, and again to reverse: **#** sorts numerically
   with placeholders like `TBD3` last; **Name** by last then first name; **Position**
   and **Grade** with blanks at the bottom.

@@ -128,7 +128,92 @@ function compareText(a: string, b: string, desc: boolean) {
   return (desc ? -1 : 1) * a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
 }
 
+/** A team's roster with each player's stats, for everyone. Admins also get a
+ * button that opens the editor below it: numbers, names, positions, grades,
+ * adding, moving and removing players, and the team's coaches. */
 export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisionId: number }) {
+  const { user } = useAuth()
+  const [editing, setEditing] = useState(false)
+
+  const { data: roster } = useQuery({ queryKey: ['roster', teamId], queryFn: () => listRoster(teamId) })
+  const { data: divisionStats } = useQuery({
+    queryKey: ['stats', divisionId],
+    queryFn: () => getPlayerStats(divisionId),
+    enabled: !!divisionId,
+  })
+  const teamStats = (divisionStats ?? []).filter((st) => st.team_id === teamId)
+
+  // Everyone on the roster, with zeros until they have a stat -- then any
+  // number that has stats but isn't on the roster. Most points first; ties
+  // stay in the roster's last-name order.
+  const blank = { goals: 0, assists: 0, points: 0, penalties: 0, shootout_goals: 0, shootout_misses: 0 }
+  const rows = [
+    ...(roster ?? []).map((entry) => ({
+      key: `r${entry.id}`,
+      number: entry.number,
+      name: entry.name,
+      ...(teamStats.find((st) => st.number === entry.number) ?? blank),
+    })),
+    ...teamStats
+      .filter((st) => !(roster ?? []).some((entry) => entry.number === st.number))
+      .map((st) => ({ ...st, key: `s${st.number}` })),
+  ]
+    .map((row, index) => ({ ...row, index }))
+    .sort((x, y) => y.points - x.points || x.index - y.index)
+
+  return (
+    <Stack>
+      <Group justify="space-between" align="flex-end">
+        <Title order={4}>Player Stats</Title>
+        {user?.is_admin && (
+          <Button variant={editing ? 'filled' : 'default'} onClick={() => setEditing((open) => !open)}>
+            {editing ? 'Done editing' : 'Bulk edit team'}
+          </Button>
+        )}
+      </Group>
+      {roster && rows.length === 0 ? (
+        <Text size="sm" c="dimmed">
+          No players on this team yet.
+        </Text>
+      ) : (
+        <Table striped highlightOnHover>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>#</Table.Th>
+              <Table.Th>Name</Table.Th>
+              <Table.Th ta="right">G</Table.Th>
+              <Table.Th ta="right">A</Table.Th>
+              <Table.Th ta="right">PTS</Table.Th>
+              <Table.Th ta="right">PIM</Table.Th>
+              <Table.Th ta="right">SO Made</Table.Th>
+              <Table.Th ta="right">SO Missed</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {rows.map((row) => (
+              <Table.Tr key={row.key}>
+                <Table.Td>{row.number}</Table.Td>
+                <Table.Td>{row.name}</Table.Td>
+                <Table.Td ta="right">{row.goals}</Table.Td>
+                <Table.Td ta="right">{row.assists}</Table.Td>
+                <Table.Td ta="right">
+                  <b>{row.points}</b>
+                </Table.Td>
+                <Table.Td ta="right">{row.penalties}</Table.Td>
+                <Table.Td ta="right">{row.shootout_goals}</Table.Td>
+                <Table.Td ta="right">{row.shootout_misses}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      )}
+
+      {user?.is_admin && editing && <TeamRosterEditor teamId={teamId} divisionId={divisionId} />}
+    </Stack>
+  )
+}
+
+function TeamRosterEditor({ teamId, divisionId }: { teamId: number; divisionId: number }) {
   const { user } = useAuth()
   const queryClient = useQueryClient()
 
@@ -157,13 +242,6 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
     queryKey: ['roster', teamId],
     queryFn: () => listRoster(teamId),
   })
-
-  const { data: divisionStats } = useQuery({
-    queryKey: ['stats', divisionId],
-    queryFn: () => getPlayerStats(divisionId),
-    enabled: !!divisionId,
-  })
-  const statsForTeam = (divisionStats ?? []).filter((s) => s.team_id === teamId)
 
   const { data: allPlayers } = useQuery({
     queryKey: ['players'],
@@ -433,44 +511,6 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
         Coaches
       </Title>
       <CoachManager teamId={teamId} />
-
-      <Title order={4} mt="md">
-        Player Stats
-      </Title>
-      {statsForTeam.length === 0 ? (
-        <Text size="sm" c="dimmed">
-          No stats recorded yet for this team.
-        </Text>
-      ) : (
-        <Table striped highlightOnHover>
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>#</Table.Th>
-              <Table.Th>Name</Table.Th>
-              <Table.Th>G</Table.Th>
-              <Table.Th>A</Table.Th>
-              <Table.Th>PTS</Table.Th>
-              <Table.Th>PIM</Table.Th>
-              <Table.Th>SO Made</Table.Th>
-              <Table.Th>SO Missed</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {statsForTeam.map((s, i) => (
-              <Table.Tr key={i}>
-                <Table.Td>{s.number}</Table.Td>
-                <Table.Td>{s.name}</Table.Td>
-                <Table.Td>{s.goals}</Table.Td>
-                <Table.Td>{s.assists}</Table.Td>
-                <Table.Td>{s.points}</Table.Td>
-                <Table.Td>{s.penalties}</Table.Td>
-                <Table.Td>{s.shootout_goals}</Table.Td>
-                <Table.Td>{s.shootout_misses}</Table.Td>
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
-      )}
 
       <Modal opened={editEntry != null} onClose={() => setEditEntry(null)} title="Edit roster entry">
         <Stack>

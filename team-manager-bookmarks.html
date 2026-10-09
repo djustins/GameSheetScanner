@@ -1,0 +1,75 @@
+<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<!-- This is an automatically generated file.
+     It will be read and overwritten.
+     DO NOT EDIT! -->
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks</H1>
+<DL><p>
+    <DT><H3>Team Manager — Admin</H3>
+    <DL><p>
+        <DT><H3>1. The app</H3>
+        <DL><p>
+            <DT><A HREF="https://tptm.io/">Team Manager — the app everyone uses (sign in here)</A>
+            <DD>The React app, hosted on Vercel. Rosters, games, stats, draft.
+            <DT><A HREF="https://tptm.io/account">My Account — name, password, API tokens, sync schedule</A>
+            <DD>Admins also set how often the league site is synced here, and can Sync now.
+            <DT><A HREF="https://tptm.io/admin/email">Email — write to parents and coaches, see what was sent</A>
+            <DD>Admin only. Shows who will and won't be reached before sending.
+            <DT><A HREF="https://tptm.io/admin/users">User Management — accounts, roles, set-password links</A>
+            <DD>Admin only. Create users, assign roles, email a set-password link.
+            <DT><A HREF="https://tptm.io/admin/usage">Usage — who signed in and which pages they opened</A>
+            <DD>Admin only. Counted on the server, so ad blockers don't affect it.
+            <DT><A HREF="https://tptm.io/roster-management">Roster Management — draft, mock draft, requests, trades</A>
+            <DD>Draft room, play-with requests, trades and move history, unplaced players.
+            <DT><A HREF="https://tptm.io/games">Games — schedule, scan scoresheets, fix games</A>
+            <DD>Import Scoresheets is the game sheet scanner.
+        </DL><p>
+        <DT><H3>2. Hosting</H3>
+        <DL><p>
+            <DT><A HREF="https://dashboard.render.com/">Render — runs the API (restart, settings, logs)</A>
+            <DD>Service "gamesheetscanner-api". Environment tab holds DATABASE_URL, ANTHROPIC_API_KEY, RESEND_API_KEY, EMAIL_FROM, APP_URL. Manual Deploy restarts it.
+            <DT><A HREF="https://gamesheetscanner-api.onrender.com/docs">API docs — every endpoint, try them in the browser</A>
+            <DD>Also a quick check that the API is awake (free plan sleeps when idle; first load can take a minute).
+            <DT><A HREF="https://vercel.com/dashboard">Vercel — hosts the app at tptm.io (deploys, domain)</A>
+            <DD>Project "frontend". Rebuilds on every push to main.
+            <DT><A HREF="https://vercel.com/dashboard">Vercel Analytics — visitors, countries, devices (open the project, then Analytics)</A>
+            <DD>Needs enabling once per project. Undercounts when ad blockers are on; use the app's Usage page for exact numbers.
+            <DT><A HREF="https://console.aiven.io/">Aiven — the Postgres database (status, power, backups, allowed IPs)</A>
+            <DD>Service "game-sheet-scanner-db". Check here first if the database seems down.
+            <DT><A HREF="https://share.streamlit.io/">Streamlit Cloud — the old app, being retired (delete after Oct 21, 2026)</A>
+            <DD>Kept as a fallback for two weeks after the switch to the React app.
+        </DL><p>
+        <DT><H3>3. Code and automation (GitHub)</H3>
+        <DL><p>
+            <DT><A HREF="https://github.com/djustins/GameSheetScanner">GitHub — the project's code and READMEs</A>
+            <DD>Pushing to main deploys both the app (Vercel) and the API (Render).
+            <DT><A HREF="https://github.com/djustins/GameSheetScanner/actions/workflows/nightly-league-sync.yml">GitHub Actions — the hourly league sync job (history, Run workflow)</A>
+            <DD>Runs at :15 each hour. Use "Run workflow" for a fresh run, not "Re-run jobs".
+            <DT><A HREF="https://github.com/djustins/GameSheetScanner/settings/secrets/actions">GitHub secrets — API_BASE_URL and LEAGUE_SYNC_TOKEN for the sync job</A>
+            <DD>The token comes from My Account in the app. The API address can be a secret or a variable.
+            <DT><A HREF="https://github.com/djustins/GameSheetScanner/commits/main">GitHub — recent changes (commit history)</A>
+            <DD>Every change made to the app, newest first.
+        </DL><p>
+        <DT><H3>4. Email (Resend)</H3>
+        <DL><p>
+            <DT><A HREF="https://resend.com/emails">Resend — every email sent, delivered or bounced</A>
+            <DD>Check here when someone says they didn't get an email.
+            <DT><A HREF="https://resend.com/domains">Resend — the tptm.io sending domain and its DNS records</A>
+            <DD>Must show "verified" for mail to send.
+            <DT><A HREF="https://resend.com/api-keys">Resend — API keys (create, revoke)</A>
+            <DD>The key in use is RESEND_API_KEY on Render. Free plan: 100 emails a day, 3,000 a month.
+        </DL><p>
+        <DT><H3>5. Outside services</H3>
+        <DL><p>
+            <DT><A HREF="https://teampgh-statsandstandings.web.app/schedule">League stats site — where scores and stats are synced from</A>
+            <DD>The sync reads this site's data hourly. If a game is wrong here, it will be wrong in the app.
+            <DT><A HREF="https://console.anthropic.com/">Anthropic Console — the key and billing for reading scoresheets</A>
+            <DD>ANTHROPIC_API_KEY on Render. Each scanned sheet costs a little; usage and limits are here.
+            <DT><A HREF="https://studio.youtube.com/">YouTube Studio — the "Latest updates" video linked from Home</A>
+            <DD>The video must be Unlisted or Public for users to watch it.
+            <DT><A HREF="https://www.teampgh.com/">Team Pittsburgh Ball Hockey — the league's public website</A>
+            <DD>The league's own site and branding.
+        </DL><p>
+    </DL><p>
+</DL><p>

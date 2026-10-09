@@ -29,7 +29,9 @@ beyond trusted, already-vetted league admins/coaches.
 """
 
 import json
+import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anthropic
@@ -100,10 +102,27 @@ class ContactRedactingRoute(APIRoute):
         return route_handler
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """On startup, bring the database's schema up to date (core.init_db runs
+    schema_postgres.sql, which is written to be re-run safely). The Streamlit
+    app used to be what did this; with it retired, a deploy that adds a table
+    or column would otherwise leave every request touching it failing -- as
+    happened when the usage log shipped and every login broke. A failure here
+    is logged, not fatal: an API on yesterday's schema beats no API."""
+    if DATABASE_URL:
+        try:
+            core.init_db(DATABASE_URL).close()
+        except Exception:
+            logging.getLogger("uvicorn.error").exception("Could not bring the database schema up to date")
+    yield
+
+
 app = FastAPI(
     title="GameSheetScanner API",
     description="Programmatic access to the same league data the Streamlit app manages.",
     version="1.0.0",
+    lifespan=_lifespan,
 )
 # Must be set before any route is declared below -- each @app.get/... uses
 # the router's route_class at declaration time.
@@ -137,10 +156,8 @@ bearer_security = HTTPBearer(auto_error=False)
 def get_conn():
     """One plain connection per request (see core.connect) — psycopg2
     connections aren't safe to share across concurrently-handled requests,
-    and init_db's one-time schema/migration work is assumed already done
-    (by app.py's own startup, or a one-off `python -c "import
-    game_sheet_core as core; core.init_db(...)"` against a brand new
-    database before this service's first request)."""
+    and init_db's schema/migration work was already done once at startup
+    (see _lifespan)."""
     conn = core.connect(DATABASE_URL)
     try:
         yield conn
@@ -251,7 +268,10 @@ def login(body: LoginRequest, conn=Depends(get_conn)) -> dict:
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
     _, raw_token = core.create_api_token(conn, user["id"], "Login")
-    core.record_usage(conn, user["id"], "login")
+    try:
+        core.record_usage(conn, user["id"], "login")
+    except Exception:  # counting a sign-in must never be what stops one
+        logging.getLogger("uvicorn.error").exception("Could not record the sign-in")
     return {"token": raw_token, "user": _public_user(user)}
 
 
@@ -267,7 +287,10 @@ class PageView(BaseModel):
 @app.post("/me/page-views", status_code=status.HTTP_204_NO_CONTENT, tags=["meta"])
 def api_record_page_view(body: PageView, conn=Depends(get_conn), user=Depends(get_current_user)):
     """The React app calls this each time the signed-in user opens a page."""
-    core.record_usage(conn, user["id"], "page", body.path)
+    try:
+        core.record_usage(conn, user["id"], "page", body.path)
+    except Exception:
+        logging.getLogger("uvicorn.error").exception("Could not record the page view")
 
 
 @app.get("/usage", tags=["users"])

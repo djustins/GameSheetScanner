@@ -5,7 +5,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createToken, listTokens, revokeToken } from '../api/tokens'
 import { ApiError } from '../api/client'
 
-export function ApiTokensPage() {
+/** `embedded`: shown as a section of My Account rather than as its own page. */
+export function ApiTokensPage({ embedded = false }: { embedded?: boolean }) {
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [newToken, setNewToken] = useState<string | null>(null)
@@ -36,7 +37,7 @@ export function ApiTokensPage() {
 
   return (
     <Stack maw={700}>
-      <Title order={2}>API Tokens</Title>
+      <Title order={embedded ? 4 : 2}>API Tokens</Title>
       <Text size="sm" c="dimmed">
         A long-lived alternative to your email/password for a script or integration — sent as{' '}
         <Code>Authorization: Bearer &lt;token&gt;</Code>.

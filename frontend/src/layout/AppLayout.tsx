@@ -119,11 +119,19 @@ export function AppLayout() {
             </Badge>
           </Group>
           <Group wrap="nowrap">
-            <Text size="sm" c="dimmed" visibleFrom="sm">
-              {user?.display_name}
-            </Text>
-            <Text size="sm" c="var(--app-heading)" style={{ cursor: 'pointer' }} onClick={() => navigate('/tokens')}>
-              API Tokens
+            {user?.is_admin && (
+              <Text
+                size="sm"
+                c="var(--app-heading)"
+                style={{ cursor: 'pointer' }}
+                visibleFrom="sm"
+                onClick={() => navigate('/admin/email')}
+              >
+                Email
+              </Text>
+            )}
+            <Text size="sm" c="var(--app-heading)" style={{ cursor: 'pointer' }} onClick={() => navigate('/account')}>
+              {user?.display_name || 'My Account'}
             </Text>
             <Text size="sm" c="var(--app-heading)" style={{ cursor: 'pointer' }} onClick={logout}>
               Log out

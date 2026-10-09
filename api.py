@@ -253,6 +253,37 @@ def whoami(user: dict = Depends(get_current_user)) -> dict:
     return _public_user(user)
 
 
+class ProfileUpdate(BaseModel):
+    display_name: str
+
+
+@app.patch("/me", tags=["meta"])
+def api_update_my_profile(body: ProfileUpdate, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    """Changes your own display name (the My Account page)."""
+    if not body.display_name.strip():
+        raise HTTPException(status_code=422, detail="Your name can't be blank.")
+    core.update_user(conn, user["id"], display_name=body.display_name)
+    return _public_user({**user, "display_name": body.display_name.strip()})
+
+
+class MyPasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.put("/me/password", status_code=status.HTTP_204_NO_CONTENT, tags=["meta"])
+def api_change_my_password(body: MyPasswordChange, conn=Depends(get_conn), user=Depends(get_current_user)):
+    """Changes your own password. The current one has to be given, so a
+    signed-in browser left open isn't enough to take over the account."""
+    if core.verify_login(conn, user["email"], body.current_password) is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="That isn't your current password.")
+    if len(body.new_password) < mailer.MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=422, detail=f"Choose a password of at least {mailer.MIN_PASSWORD_LENGTH} characters."
+        )
+    core.set_user_password(conn, user["id"], body.new_password)
+
+
 class LoginRequest(BaseModel):
     email: str
     password: str

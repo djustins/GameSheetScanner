@@ -7,6 +7,8 @@ interface AuthContextValue {
   loading: boolean
   login: (email: string, password: string) => Promise<void>
   logout: () => void
+  // Re-reads the signed-in user, e.g. after they change their own name.
+  refreshUser: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
@@ -37,7 +39,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }
 
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>
+  async function refreshUser() {
+    setUser(await fetchCurrentUser())
+  }
+
+  return (
+    <AuthContext.Provider value={{ user, loading, login, logout, refreshUser }}>{children}</AuthContext.Provider>
+  )
 }
 
 export function useAuth(): AuthContextValue {

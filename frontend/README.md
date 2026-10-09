@@ -72,6 +72,13 @@ pages scoped to the division picked at the top of the sidebar:
 What a user sees follows their role's pages and read-only setting, the same as in
 the Streamlit app (`src/auth/access.tsx`).
 
+### My Account
+
+Clicking your name at the top right opens **My Account** (`/account`): your sign-in
+email and access, your display name, changing your password (the current one is
+required), and your API tokens. Admins also get a shortcut there, and an **Email**
+link in the header, to the page for emailing parents and coaches.
+
 ### Player photos
 
 A player's profile (the drawer that opens from any player list) has **Upload

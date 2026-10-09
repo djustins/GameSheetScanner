@@ -26,12 +26,12 @@ const ForgotPasswordPage = lazy(() =>
   import('./pages/PasswordPages').then((m) => ({ default: m.ForgotPasswordPage }))
 )
 const ResetPasswordPage = lazy(() => import('./pages/PasswordPages').then((m) => ({ default: m.ResetPasswordPage })))
+const AccountPage = lazy(() => import('./pages/AccountPage').then((m) => ({ default: m.AccountPage })))
 const UsagePage = lazy(() => import('./pages/UsagePage').then((m) => ({ default: m.UsagePage })))
 const UserManagementPage = lazy(() =>
   import('./pages/UserManagementPage').then((m) => ({ default: m.UserManagementPage }))
 )
 const GamesPage = lazy(() => import('./pages/GamesPage').then((m) => ({ default: m.GamesPage })))
-const ApiTokensPage = lazy(() => import('./pages/ApiTokensPage').then((m) => ({ default: m.ApiTokensPage })))
 
 function PageFallback() {
   return (
@@ -72,7 +72,9 @@ function App() {
           <Route path="/requests" element={<Navigate to="/roster-management?tab=requests" replace />} />
           <Route path="/evals" element={<PageAccess pages={['teams']}><EvalsPage /></PageAccess>} />
           <Route path="/games" element={<PageAccess pages={['schedule', 'process', 'edit']}><GamesPage /></PageAccess>} />
-          <Route path="/tokens" element={<ApiTokensPage />} />
+          <Route path="/account" element={<AccountPage />} />
+          {/* API tokens are a section of My Account now. */}
+          <Route path="/tokens" element={<Navigate to="/account" replace />} />
           <Route
             path="/admin/users"
             element={

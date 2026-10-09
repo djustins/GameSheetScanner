@@ -1149,3 +1149,21 @@ def test_player_photo_upload_fetch_replace_and_remove(conn, admin_auth, readonly
     assert client.delete(f"/players/{player_id}/photo", auth=admin_auth).status_code == 204
     assert client.get(f"/players/{player_id}/photo", auth=admin_auth).status_code == 404
     assert core.list_roster(conn, team_id)[0]["photo_version"] is None
+
+
+def test_my_account_change_name_and_password(conn, admin_auth):
+    renamed = client.patch("/me", json={"display_name": "  New Name "}, auth=admin_auth)
+    assert renamed.status_code == 200 and renamed.json()["display_name"] == "New Name"
+    assert client.get("/me", auth=admin_auth).json()["display_name"] == "New Name"
+    assert client.patch("/me", json={"display_name": " "}, auth=admin_auth).status_code == 422
+
+    wrong = client.put("/me/password", json={"current_password": "nope", "new_password": "long-enough-1"}, auth=admin_auth)
+    assert wrong.status_code == 403
+    short = client.put("/me/password", json={"current_password": ADMIN_PASSWORD, "new_password": "short"}, auth=admin_auth)
+    assert short.status_code == 422
+    changed = client.put(
+        "/me/password", json={"current_password": ADMIN_PASSWORD, "new_password": "long-enough-1"}, auth=admin_auth
+    )
+    assert changed.status_code == 204
+    assert client.get("/me", auth=admin_auth).status_code == 401
+    assert client.get("/me", auth=(ADMIN_EMAIL, "long-enough-1")).status_code == 200

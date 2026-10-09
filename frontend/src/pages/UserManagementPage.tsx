@@ -13,6 +13,7 @@ import {
   TextInput,
   Title,
 } from '@mantine/core'
+import { inviteUser } from '../api/email'
 import { notifications } from '@mantine/notifications'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -136,6 +137,14 @@ function UserRow({ rowUser, roles, isSelf, lastAdmin }: { rowUser: User; roles: 
     onError,
   })
 
+  // Their current password keeps working until they use the link.
+  const inviteMutation = useMutation({
+    mutationFn: () => inviteUser(rowUser.id),
+    onSuccess: (result) =>
+      notifications.show({ color: 'green', message: `Link sent to ${result.sent_to}. It works once and lasts 7 days.` }),
+    onError,
+  })
+
   const applyPasswordMutation = useMutation({
     mutationFn: () => setUserPassword(rowUser.id, newPassword!),
     onSuccess: () => {
@@ -186,6 +195,15 @@ function UserRow({ rowUser, roles, isSelf, lastAdmin }: { rowUser: User; roles: 
           <Group>
             <Button loading={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
               Save
+            </Button>
+            <Button
+              variant="outline"
+              loading={inviteMutation.isPending}
+              onClick={() =>
+                confirm(`Email ${rowUser.email} a link to choose their own password?`) && inviteMutation.mutate()
+              }
+            >
+              Email a set-password link
             </Button>
             <Button variant="outline" onClick={() => setNewPassword(generatePassword())}>
               Generate new password

@@ -308,6 +308,49 @@ If a run fails with "… is empty", that name isn't set on this repository, or i
 misspelled. To retry after changing the workflow file, start a new run with **Run
 workflow** — **Re-run jobs** replays the old commit's version of the workflow.
 
+## Email
+
+The app sends email through [Resend](https://resend.com) from an address on the
+league's own domain (`mailer.py`). Four things use it:
+
+- **Messages to parents and coaches** — in the React app, admins open **Email**,
+  pick a division (and optionally teams), tick Parents and/or Coaches, and write a
+  message. The page lists exactly who will get it, and who won't because there's no
+  email on file, before anything is sent. Each person gets their own copy, replies go
+  to the admin who sent it, and **Send a test to me** shows how it will look.
+- **Invitations** — on User Management, **Email a set-password link** sends a user a
+  one-time link (good for 7 days) to choose their own password.
+- **Password resets** — "Forgot your password?" on the sign-in page emails a
+  one-time link (good for 2 hours). It answers the same way whether or not the
+  address has an account.
+- **Automatic notices** — after the nightly league-site sync, the admins get an email
+  listing new games and any that couldn't be saved. Nothing is sent on a night when
+  nothing changed.
+
+Every send is recorded (the **Sent** tab on the Email page, `email_log` in the
+database). Until it's configured the app simply sends nothing: the Email page says
+so, and the reset and invitation links aren't available.
+
+### One-time setup
+
+1. Create a Resend account, then **Domains → Add Domain** for the domain mail will
+   come from (e.g. `tptm.io`). Resend lists a few DNS records; add them wherever the
+   domain's DNS is managed and wait for Resend to show the domain as verified.
+2. **API Keys → Create API Key** (sending access is enough) and copy it.
+3. On Render, in the API service's **Environment** tab, add:
+
+   | Variable | Value |
+   |---|---|
+   | `RESEND_API_KEY` | the key from step 2 |
+   | `EMAIL_FROM` | the from address, e.g. `Team Pittsburgh <noreply@tptm.io>` — must be on the verified domain |
+   | `APP_URL` | the React app's address, e.g. `https://tptm.io` — used for links in emails |
+
+4. Save (Render restarts the API), then open **Email** in the app and send yourself a
+   test.
+
+Resend's free plan allows 100 emails a day and 3,000 a month, counted per recipient;
+a message to a large division can use most of a day's allowance on its own.
+
 ## Running tests
 
 Tests run against `TEST_DATABASE_URL` — a separate *database* on the same Aiven

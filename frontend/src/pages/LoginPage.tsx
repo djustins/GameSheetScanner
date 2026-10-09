@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Alert, Button, Image, Paper, PasswordInput, Stack, TextInput, Title } from '@mantine/core'
-import { useNavigate } from 'react-router-dom'
+import { Alert, Anchor, Button, Image, Paper, PasswordInput, Stack, TextInput, Title } from '@mantine/core'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { ApiError } from '../api/client'
 
@@ -50,6 +50,9 @@ export function LoginPage() {
             <Button type="submit" loading={submitting} fullWidth>
               Log in
             </Button>
+            <Anchor component={Link} to="/forgot-password" size="sm">
+              Forgot your password?
+            </Anchor>
           </Stack>
         </form>
       </Paper>

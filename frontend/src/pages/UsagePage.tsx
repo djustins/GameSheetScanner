@@ -20,6 +20,7 @@ const PAGE_NAMES: Record<string, string> = {
   '/tokens': 'API Tokens',
   '/admin/users': 'User Management',
   '/admin/usage': 'Usage',
+  '/admin/email': 'Email',
 }
 
 const when = (iso: string) =>

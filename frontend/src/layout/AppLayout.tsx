@@ -63,7 +63,7 @@ export function AppLayout() {
 
   const globalItems = (
     user?.is_admin
-      ? [...GLOBAL_NAV_ITEMS, { to: '/admin/users', label: 'User Management' }, { to: '/admin/usage', label: 'Usage' }]
+      ? [...GLOBAL_NAV_ITEMS, { to: '/admin/users', label: 'User Management' }, { to: '/admin/email', label: 'Email' }, { to: '/admin/usage', label: 'Usage' }]
       : GLOBAL_NAV_ITEMS
   ).filter(allowed)
   const scopedItems = SCOPED_NAV_ITEMS.filter(allowed)

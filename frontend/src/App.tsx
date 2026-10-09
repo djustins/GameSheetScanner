@@ -21,6 +21,11 @@ const RosterManagementPage = lazy(() =>
   import('./pages/RosterManagementPage').then((m) => ({ default: m.RosterManagementPage }))
 )
 const EvalsPage = lazy(() => import('./pages/EvalsPage').then((m) => ({ default: m.EvalsPage })))
+const EmailPage = lazy(() => import('./pages/EmailPage').then((m) => ({ default: m.EmailPage })))
+const ForgotPasswordPage = lazy(() =>
+  import('./pages/PasswordPages').then((m) => ({ default: m.ForgotPasswordPage }))
+)
+const ResetPasswordPage = lazy(() => import('./pages/PasswordPages').then((m) => ({ default: m.ResetPasswordPage })))
 const UsagePage = lazy(() => import('./pages/UsagePage').then((m) => ({ default: m.UsagePage })))
 const UserManagementPage = lazy(() =>
   import('./pages/UserManagementPage').then((m) => ({ default: m.UserManagementPage }))
@@ -41,6 +46,8 @@ function App() {
     <Suspense fallback={<PageFallback />}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route
           element={
             <ProtectedRoute>
@@ -71,6 +78,14 @@ function App() {
             element={
               <AdminRoute>
                 <UserManagementPage />
+              </AdminRoute>
+            }
+          />
+          <Route
+            path="/admin/email"
+            element={
+              <AdminRoute>
+                <EmailPage />
               </AdminRoute>
             }
           />

@@ -45,6 +45,7 @@ from pydantic import BaseModel
 
 import game_sheet_core as core
 import league_site_sync
+import mailer
 
 load_dotenv()
 
@@ -1568,11 +1569,114 @@ def api_sync_league_site(
     nightly by .github/workflows/nightly-league-sync.yml with an admin's
     API token; safe to call again at any time."""
     try:
-        return league_site_sync.sync(
+        reports = league_site_sync.sync(
             conn, dry_run=dry_run, refresh_days=None if refresh_all else league_site_sync.REFRESH_DAYS
         )
     except OSError as e:  # the stats site itself is down or unreachable
+        mailer.notify_admins(
+            conn, "League sync failed", f"The nightly sync couldn't read the league stats site:\n\n{e}"
+        )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not read the league site: {e}")
+    # Tell the admins what came in (or what was refused); silent when nothing changed.
+    notice = None if dry_run else mailer.league_sync_notice(reports)
+    if notice:
+        mailer.notify_admins(conn, *notice)
+    return reports
+
+
+# ---------------------------------------------------------------------------
+# Email -- messages to a division's parents and coaches, and the send log.
+# Account emails (invitations, password resets) are with Roles & Users below.
+# ---------------------------------------------------------------------------
+
+@app.get("/email/status", tags=["email"])
+def api_email_status(user=Depends(require_admin)) -> dict:
+    """Whether this server can send email, and from which address."""
+    return {"configured": mailer.is_configured(), "from": mailer.from_address()}
+
+
+class EmailAudience(BaseModel):
+    division_id: int
+    team_ids: list[int] = []   # empty = the whole division
+    parents: bool = True
+    coaches: bool = False
+
+
+@app.post("/email/recipients", tags=["email"])
+def api_email_recipients(body: EmailAudience, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """Who a message to this audience would reach, and who it would miss for
+    want of an email address -- shown before anything is sent."""
+    return mailer.division_recipients(
+        conn, body.division_id, body.team_ids or None, parents=body.parents, coaches=body.coaches
+    )
+
+
+class EmailSend(EmailAudience):
+    subject: str
+    body: str
+    test: bool = False   # send only to yourself, to see how it looks
+
+
+@app.post("/email/send", tags=["email"])
+def api_email_send(body: EmailSend, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """Sends the message to everyone in the audience, one email each, with
+    replies going to the admin who sent it. test=true sends it to that admin
+    alone."""
+    if not body.subject.strip() or not body.body.strip():
+        raise HTTPException(status_code=422, detail="A message needs a subject and some text.")
+    audience = mailer.division_recipients(
+        conn, body.division_id, body.team_ids or None, parents=body.parents, coaches=body.coaches
+    )
+    to = [user["email"]] if body.test else [r["email"] for r in audience["recipients"]]
+    if not to:
+        raise HTTPException(status_code=422, detail="Nobody in that audience has an email address on file.")
+    label = " and ".join(w for w, on in (("parents", body.parents), ("coaches", body.coaches)) if on)
+    teams = {t["id"]: t["name"] for t in core.list_teams(conn, body.division_id)}
+    scope = ", ".join(teams[t] for t in body.team_ids if t in teams) or "whole division"
+    try:
+        return mailer.send(
+            conn, to=to, subject=("[Test] " if body.test else "") + body.subject.strip(), text=body.body.strip(),
+            kind="test" if body.test else "message", sent_by=user["id"], reply_to=user["email"],
+            division_id=body.division_id, audience=f"{label} — {scope}",
+        )
+    except mailer.MailNotConfigured as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+
+
+@app.get("/email/log", tags=["email"])
+def api_email_log(limit: int = 50, conn=Depends(get_conn), user=Depends(require_admin)) -> list[dict]:
+    return mailer.list_email_log(conn, max(1, min(limit, 200)))
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+@app.post("/password-reset/request", status_code=status.HTTP_204_NO_CONTENT, tags=["meta"])
+def api_request_password_reset(body: PasswordResetRequest, request: Request, conn=Depends(get_conn)):
+    """Emails a reset link if this address has an active account. Always
+    answers the same way, so it can't be used to find out who has one."""
+    account = core.get_user_by_email(conn, body.email)
+    if account and account["deleted_at"] is None and mailer.is_configured():
+        if not mailer.recently_sent_token(conn, account["id"]):
+            try:
+                mailer.send_password_link(conn, account, "reset", mailer.app_url(request.headers.get("origin")))
+            except mailer.MailError:
+                logging.getLogger("uvicorn.error").exception("Could not send a password reset email")
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    password: str
+
+
+@app.post("/password-reset/confirm", status_code=status.HTTP_204_NO_CONTENT, tags=["meta"])
+def api_confirm_password_reset(body: PasswordResetConfirm, conn=Depends(get_conn)):
+    """Sets a new password from an emailed link (a reset or an invitation)."""
+    try:
+        mailer.use_password_token(conn, body.token, body.password)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -1651,6 +1755,25 @@ def api_create_user(body: UserCreate, conn=Depends(get_conn), user=Depends(requi
         is_admin=body.is_admin, role_id=body.role_id,
     )
     return core.get_user(conn, user_id)
+
+
+@app.post("/users/{user_id}/invite", tags=["users"])
+def api_invite_user(user_id: int, request: Request, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """Emails this user a link to choose their own password -- for a new
+    account, or anyone who needs back in -- instead of an admin handing one
+    over. The password they have now keeps working until they use the link."""
+    account = core.get_user(conn, user_id)
+    if account is None or account["deleted_at"] is not None:
+        not_found("User not found.")
+    try:
+        result = mailer.send_password_link(
+            conn, account, "invite", mailer.app_url(request.headers.get("origin")), sent_by=user["id"]
+        )
+    except mailer.MailNotConfigured as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+    if result["failed"]:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=result["error"] or "The email wasn't sent.")
+    return {"sent_to": account["email"]}
 
 
 class UserUpdate(BaseModel):

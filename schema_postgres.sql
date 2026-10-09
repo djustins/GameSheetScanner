@@ -436,6 +436,36 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked_at    TEXT
 );
 
+-- Everything the app has emailed (see mailer.py): one row per send, whether
+-- it worked or not. recipients is the list of addresses; body is the text as
+-- written (the API hides it for account emails, whose text holds a sign-in link).
+CREATE TABLE IF NOT EXISTS email_log (
+    id           SERIAL PRIMARY KEY,
+    kind         TEXT NOT NULL,   -- message / test / invite / password_reset / notice
+    sent_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    subject      TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    division_id  INTEGER REFERENCES divisions(id) ON DELETE SET NULL,
+    audience     TEXT,
+    recipients   JSONB NOT NULL DEFAULT '[]',
+    sent         INTEGER NOT NULL DEFAULT 0,
+    failed       INTEGER NOT NULL DEFAULT 0,
+    error        TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One-time links for setting a password: an invitation to a new account, or
+-- a reset of a forgotten one. Only the token's hash is stored.
+CREATE TABLE IF NOT EXISTS password_tokens (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL UNIQUE,
+    purpose     TEXT NOT NULL CHECK (purpose IN ('reset', 'invite')),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- One photo per player, stored already shrunk (the React app scales it to
 -- 400px and re-encodes it as a JPEG before uploading), so a row is a few
 -- tens of kilobytes. updated_at doubles as the photo's version: clients

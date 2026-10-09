@@ -8,6 +8,8 @@ export interface CurrentUser {
   coach_id: number | null
   pages: string[]
   hide_contact_details: boolean
+  // False until they agree to the current user agreement.
+  terms_accepted: boolean
 }
 
 export interface LoginResponse {
@@ -20,6 +22,10 @@ export function login(email: string, password: string): Promise<LoginResponse> {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   })
+}
+
+export function acceptTerms(): Promise<CurrentUser> {
+  return apiFetch<CurrentUser>('/me/accept-terms', { method: 'POST' })
 }
 
 export function updateMyProfile(body: { display_name: string }): Promise<CurrentUser> {

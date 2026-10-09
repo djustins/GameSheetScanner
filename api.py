@@ -243,6 +243,8 @@ def _public_user(user: dict) -> dict:
         "email": user["email"], "display_name": user["display_name"], "is_admin": user["is_admin"],
         "read_only": user["read_only"], "coach_id": user["coach_id"], "pages": user["pages"],
         "hide_contact_details": user["hide_contact_details"],
+        # False until they agree to the current user agreement (POST /me/accept-terms).
+        "terms_accepted": bool(user.get("terms_accepted")),
     }
 
 
@@ -251,6 +253,14 @@ def whoami(user: dict = Depends(get_current_user)) -> dict:
     """Confirms your credentials work and shows what they grant — the
     quickest way to sanity-check an API client's auth setup."""
     return _public_user(user)
+
+
+@app.post("/me/accept-terms", tags=["meta"])
+def api_accept_terms(conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    """Records that you agree to the user agreement the app shows the first
+    time you use it (and again if the agreement changes)."""
+    core.accept_terms(conn, user["id"])
+    return _public_user({**user, "terms_accepted": True})
 
 
 class ProfileUpdate(BaseModel):

@@ -16,6 +16,7 @@ import {
 } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { recordPageView } from '../api/users'
+import { TermsGate } from '../components/TermsGate'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { useAccess } from '../auth/access'
@@ -190,6 +191,7 @@ export function AppLayout() {
         </Box>
       </AppShell.Navbar>
       <AppShell.Main>
+        <TermsGate />
         <Tabs value={activeTab} onChange={(to) => to && navigate(to)} mb="md">
           {/* One row that scrolls sideways on a phone instead of wrapping. */}
           <Tabs.List style={{ flexWrap: 'nowrap', overflowX: 'auto' }}>

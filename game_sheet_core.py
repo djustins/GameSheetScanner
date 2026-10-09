@@ -844,15 +844,33 @@ def _get_role_flags(conn: PGConnection, role_id: int | None) -> tuple[bool, bool
     return (bool(row[0]), bool(row[1])) if row else (False, False)
 
 
+# The user agreement's version. Bump it when the agreement's wording changes
+# in a way people should agree to again (the text lives in the React app's
+# TermsGate component): everyone is then asked once more.
+TERMS_VERSION = 1
+
+
+def accept_terms(conn: PGConnection, user_id: int) -> None:
+    """Records that this user agreed to the current user agreement, now."""
+    conn.execute(
+        "UPDATE users SET terms_version = %s, terms_accepted_at = now() WHERE id = %s", (TERMS_VERSION, user_id)
+    )
+    conn.commit()
+
+
 def list_users(conn: PGConnection, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = conn.execute(
-        f"SELECT id, email, display_name, is_admin, role_id, coach_id, deleted_at FROM users {where} ORDER BY email"
+        f"""SELECT id, email, display_name, is_admin, role_id, coach_id, deleted_at, terms_version, terms_accepted_at
+            FROM users {where} ORDER BY email"""
     ).fetchall()
+    # "terms_accepted": whether they've agreed to the *current* user agreement.
     users = [
         {
             "id": r[0], "email": r[1], "display_name": r[2], "is_admin": bool(r[3]),
             "role_id": r[4], "coach_id": r[5], "deleted_at": r[6],
+            "terms_accepted": r[7] == TERMS_VERSION,
+            "terms_accepted_at": r[8].isoformat() if r[8] else None,
         }
         for r in rows
     ]
@@ -924,8 +942,8 @@ def usage_summary(conn: PGConnection, days: int = 30) -> dict:
 
 def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, email, password_hash, display_name, is_admin, role_id, coach_id, deleted_at "
-        "FROM users WHERE email = %s",
+        "SELECT id, email, password_hash, display_name, is_admin, role_id, coach_id, deleted_at, "
+        "terms_version, terms_accepted_at FROM users WHERE email = %s",
         (email.strip().lower(),),
     ).fetchone()
     if not row:
@@ -933,6 +951,7 @@ def get_user_by_email(conn: PGConnection, email: str) -> dict | None:
     return {
         "id": row[0], "email": row[1], "password_hash": row[2], "display_name": row[3],
         "is_admin": bool(row[4]), "role_id": row[5], "coach_id": row[6], "deleted_at": row[7],
+        "terms_accepted": row[8] == TERMS_VERSION, "terms_accepted_at": row[9].isoformat() if row[9] else None,
     }
 
 

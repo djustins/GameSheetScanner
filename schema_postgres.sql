@@ -436,6 +436,13 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked_at    TEXT
 );
 
+-- The user agreement each person accepts the first time they use the app
+-- (game_sheet_core.TERMS_VERSION; the wording is in the React app's
+-- TermsGate). terms_version is the version they accepted, so changing the
+-- agreement and bumping the version asks everyone again.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;
+
 -- Everything the app has emailed (see mailer.py): one row per send, whether
 -- it worked or not. recipients is the list of addresses; body is the text as
 -- written (the API hides it for account emails, whose text holds a sign-in link).

@@ -1151,6 +1151,20 @@ def test_player_photo_upload_fetch_replace_and_remove(conn, admin_auth, readonly
     assert core.list_roster(conn, team_id)[0]["photo_version"] is None
 
 
+def test_user_agreement_is_recorded_once_accepted(conn, admin_auth):
+    assert client.get("/me", auth=admin_auth).json()["terms_accepted"] is False
+    assert client.post("/me/accept-terms").status_code == 401
+
+    accepted = client.post("/me/accept-terms", auth=admin_auth)
+    assert accepted.status_code == 200 and accepted.json()["terms_accepted"] is True
+    assert client.get("/me", auth=admin_auth).json()["terms_accepted"] is True
+    # A token sign-in sees it too.
+    token = client.post("/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}).json()
+    assert token["user"]["terms_accepted"] is True
+    row = client.get("/users", auth=admin_auth).json()[0]
+    assert row["terms_accepted"] is True and row["terms_accepted_at"]
+
+
 def test_my_account_change_name_and_password(conn, admin_auth):
     renamed = client.patch("/me", json={"display_name": "  New Name "}, auth=admin_auth)
     assert renamed.status_code == 200 and renamed.json()["display_name"] == "New Name"

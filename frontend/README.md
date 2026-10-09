@@ -81,6 +81,16 @@ link in the header, to the page for emailing parents and coaches. Admins also se
 often the league stats site is synced there (**League site sync**), and can run a
 sync on the spot.
 
+### User agreement
+
+The first time someone uses the app, a dialog they can't dismiss
+(`src/components/TermsGate.tsx`) asks them to agree that: the site's software is
+open source, they'll be emailed about administrative matters, and their information
+is not and never will be sold, shared or used for anything but running the league.
+They agree or sign out. Acceptance is recorded per user with a date (shown to
+admins by `GET /users`). To ask everyone again after changing the wording, bump
+`TERMS_VERSION` in `game_sheet_core.py`.
+
 ### Player photos
 
 A player's profile (the drawer that opens from any player list) has **Upload

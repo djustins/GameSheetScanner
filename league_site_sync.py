@@ -33,7 +33,7 @@ nobody on the roster wears is added under the site's name for that player
 import json
 import re
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import game_sheet_core as core
 
@@ -234,6 +234,7 @@ def sync_league(conn, league: dict, fetch=fetch_json, dry_run: bool = False,
     if existing is None and dry_run:
         report["new_division"] = True
     division_id = existing[0] if existing else None if dry_run else core.add_division(conn, year, season, age_group)
+    report["division_id"] = division_id
 
     site_games = fetch(f"league/schedule/{league['_id']}").get("allLeagueGamesArray") or []
     rows = schedule_rows(site_games)
@@ -312,11 +313,98 @@ def sync(conn, league_names: list[str] | None = None, fetch=fetch_json, dry_run:
     """Syncs the site's current leagues -- all of them, or just those named."""
     wanted = {n.strip().lower() for n in league_names or []}
     leagues = fetch("admin/leagues/current").get("currentLeagues") or []
-    return [
-        sync_league(conn, league, fetch=fetch, dry_run=dry_run, refresh_days=refresh_days)
-        for league in leagues
-        if not wanted or league["leagueName"].strip().lower() in wanted
-    ]
+    reports = []
+    for league in leagues:
+        if wanted and league["leagueName"].strip().lower() not in wanted:
+            continue
+        report = sync_league(conn, league, fetch=fetch, dry_run=dry_run, refresh_days=refresh_days)
+        if not dry_run and report.get("division_id") is not None:
+            _mark_synced(conn, report["division_id"])
+        reports.append(report)
+    return reports
+
+
+def _mark_synced(conn, division_id: int) -> None:
+    """Notes that this division was just brought up to date with the league
+    site -- whether or not there was anything new to bring in."""
+    _put_setting(conn, f"league_sync:{division_id}", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+
+def last_synced_at(conn, division_id: int) -> str | None:
+    """When this division was last synced from the league site (an ISO
+    timestamp in UTC), or None if it never has been."""
+    row = conn.execute("SELECT value FROM app_settings WHERE key = %s", (f"league_sync:{division_id}",)).fetchone()
+    return row[0] if row else None
+
+
+# ---------------------------------------------------------------------------
+# The automatic schedule. A GitHub Actions job knocks every hour at a quarter
+# past (.github/workflows/nightly-league-sync.yml); whether that knock turns
+# into a sync is decided here, from a setting admins change in the app.
+# ---------------------------------------------------------------------------
+
+# every_hours: 0 = automatic syncing off; 1/2/3/4/6/12 = that often; 24 = once
+# a day, in the hour `daily_hour` (0-23, Pittsburgh time).
+SCHEDULE_DEFAULT = {"every_hours": 1, "daily_hour": 2}
+SCHEDULE_CHOICES = (0, 1, 2, 3, 4, 6, 12, 24)
+
+
+def get_schedule(conn) -> dict:
+    """{"every_hours", "daily_hour", "last_run"} -- last_run being when the
+    schedule last actually ran a sync (ISO, UTC), or None."""
+    rows = dict(conn.execute(
+        "SELECT key, value FROM app_settings WHERE key IN ('league_sync_schedule', 'league_sync_last_run')"
+    ).fetchall())
+    saved = json.loads(rows["league_sync_schedule"]) if rows.get("league_sync_schedule") else {}
+    return {**SCHEDULE_DEFAULT, **saved, "last_run": rows.get("league_sync_last_run")}
+
+
+def set_schedule(conn, every_hours: int, daily_hour: int | None = None) -> dict:
+    """Raises ValueError for a frequency or hour that isn't offered."""
+    if every_hours not in SCHEDULE_CHOICES:
+        raise ValueError(f"How often must be one of {SCHEDULE_CHOICES}.")
+    daily_hour = get_schedule(conn)["daily_hour"] if daily_hour is None else daily_hour
+    if not 0 <= daily_hour <= 23:
+        raise ValueError("The hour must be between 0 and 23.")
+    _put_setting(conn, "league_sync_schedule", json.dumps({"every_hours": every_hours, "daily_hour": daily_hour}))
+    return get_schedule(conn)
+
+
+def _put_setting(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def scheduled_sync_due(conn) -> tuple[bool, str]:
+    """Whether the hourly knock should run a sync right now, and why or why
+    not. The job's start time drifts by several minutes, so "an hour since
+    the last one" is given ten minutes of slack."""
+    schedule = get_schedule(conn)
+    every = schedule["every_hours"]
+    if every == 0:
+        return False, "Automatic syncing is turned off."
+    hour, hours_since = conn.execute(
+        """SELECT EXTRACT(HOUR FROM now() AT TIME ZONE 'America/New_York')::int,
+                  EXTRACT(EPOCH FROM now() - %s::timestamptz) / 3600""",
+        (schedule["last_run"],),
+    ).fetchone()
+    if every == 24:
+        if hour != schedule["daily_hour"]:
+            return False, f"Set to once a day, in the {schedule['daily_hour']}:00 hour; it's the {hour}:00 hour now."
+        if hours_since is not None and hours_since < 20:
+            return False, "Today's sync has already run."
+        return True, "Daily sync."
+    if hours_since is not None and float(hours_since) < every - 1 / 6:
+        return False, f"Set to every {every} hours; the last one ran {float(hours_since):.1f} hours ago."
+    return True, f"Every {every} hour{'s' if every != 1 else ''}."
+
+
+def mark_scheduled_run(conn) -> None:
+    _put_setting(conn, "league_sync_last_run", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 def format_report(report: dict, dry_run: bool = False) -> str:

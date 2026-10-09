@@ -77,7 +77,9 @@ the Streamlit app (`src/auth/access.tsx`).
 Clicking your name at the top right opens **My Account** (`/account`): your sign-in
 email and access, your display name, changing your password (the current one is
 required), and your API tokens. Admins also get a shortcut there, and an **Email**
-link in the header, to the page for emailing parents and coaches.
+link in the header, to the page for emailing parents and coaches. Admins also set how
+often the league stats site is synced there (**League site sync**), and can run a
+sync on the spot.
 
 ### Player photos
 

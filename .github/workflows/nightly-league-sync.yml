@@ -1,18 +1,23 @@
-# Every night, asks the deployed API to pull the schedule and any newly
-# finished games from the league stats site (teampgh-statsandstandings.web.app)
-# -- see league_site_sync.py and POST /league-site/sync in api.py. The sync
-# itself runs on the API server, which already has database access; this job
-# only makes the request.
+# Every hour at a quarter past, asks the deployed API to pull the schedule and
+# any newly finished games from the league stats site
+# (teampgh-statsandstandings.web.app) -- see league_site_sync.py and POST
+# /league-site/sync in api.py. The sync itself runs on the API server, which
+# already has database access; this job only makes the request.
+#
+# How often a sync really happens is a setting in the app (My Account ->
+# League site sync, for admins): this job always knocks hourly, and the API
+# answers with an empty list when no sync is due. Changing the minute of the
+# hour means changing the cron line below. GitHub starts scheduled jobs late
+# when it is busy, often by several minutes.
 #
 # Needs two repository secrets (Settings -> Secrets and variables -> Actions):
 #   API_BASE_URL       the deployed API's address, e.g. https://<name>.onrender.com
 #   LEAGUE_SYNC_TOKEN  an API token created by an admin on the app's API Tokens page
-name: Nightly league site sync
+name: League site sync
 
 on:
   schedule:
-    # 06:30 UTC = 1:30 or 2:30 am in Pittsburgh, after the night's games are entered.
-    - cron: "30 6 * * *"
+    - cron: "15 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -41,12 +46,14 @@ jobs:
             --output /dev/null "${API_BASE_URL%/}/"
           curl --silent --show-error --fail-with-body --max-time 1500 \
             --request POST --header "Authorization: Bearer $LEAGUE_SYNC_TOKEN" \
-            "${API_BASE_URL%/}/league-site/sync" | tee report.json
+            "${API_BASE_URL%/}/league-site/sync?scheduled=${{ github.event_name == 'schedule' }}" | tee report.json
           echo
           # A game the app refused (e.g. a tie) fails the run, so it gets noticed.
           python3 - <<'EOF'
           import json, sys
           reports = json.load(open("report.json"))
+          if not reports:
+              print("No sync was due (see My Account -> League site sync in the app).")
           for r in reports:
               if r["skipped"]:
                   print(f"{r['league']}: skipped -- {r['skipped']}")

@@ -109,8 +109,13 @@ def test_sync_imports_schedule_games_and_standings_and_is_repeatable(conn):
     core.update_player(conn, teddy, nickname="Teddy")
     core.add_roster_entry(conn, avalanche, "TBD2", "Theodore Davis", player_id=teddy)
 
+    assert league_site_sync.last_synced_at(conn, division_id) is None
+    league_site_sync.sync(conn, fetch=fetch, dry_run=True)
+    assert league_site_sync.last_synced_at(conn, division_id) is None  # a dry run isn't a sync
+
     reports = league_site_sync.sync(conn, fetch=fetch)
     report, skipped = reports
+    assert league_site_sync.last_synced_at(conn, division_id).startswith("20")
     assert skipped["skipped"]  # "Super League" isn't an age group here
     assert report["scheduled"] == 2 and len(report["added"]) == 1 and not report["failed"]
     assert report["numbers_set"] == 2
@@ -133,6 +138,39 @@ def test_sync_imports_schedule_games_and_standings_and_is_repeatable(conn):
     # Past the refresh window, an imported game isn't re-read at all.
     old = league_site_sync.sync(conn, fetch=fetch, refresh_days=-1)[0]
     assert (len(old["added"]), len(old["refreshed"]), old["unchanged"]) == (0, 0, 1)
+
+
+def test_schedule_setting_decides_when_the_hourly_knock_syncs(conn):
+    assert league_site_sync.get_schedule(conn) == {"every_hours": 1, "daily_hour": 2, "last_run": None}
+    assert league_site_sync.scheduled_sync_due(conn)[0] is True
+
+    league_site_sync.mark_scheduled_run(conn)
+    assert league_site_sync.scheduled_sync_due(conn)[0] is False  # it just ran
+    # 55 minutes later, the next hourly knock counts as due despite the drift.
+    conn.execute(
+        "UPDATE app_settings SET value = (now() - interval '55 minutes')::text WHERE key = 'league_sync_last_run'"
+    )
+    assert league_site_sync.scheduled_sync_due(conn)[0] is True
+    league_site_sync.set_schedule(conn, 6)
+    assert league_site_sync.scheduled_sync_due(conn)[0] is False
+
+    league_site_sync.set_schedule(conn, 0)
+    assert league_site_sync.scheduled_sync_due(conn) == (False, "Automatic syncing is turned off.")
+
+    # Once a day: only in the chosen Pittsburgh hour.
+    hour = conn.execute("SELECT EXTRACT(HOUR FROM now() AT TIME ZONE 'America/New_York')::int").fetchone()[0]
+    league_site_sync.set_schedule(conn, 24, (hour + 5) % 24)
+    assert league_site_sync.scheduled_sync_due(conn)[0] is False
+    conn.execute("DELETE FROM app_settings WHERE key = 'league_sync_last_run'")
+    assert league_site_sync.set_schedule(conn, 24, hour)["daily_hour"] == hour
+    assert league_site_sync.scheduled_sync_due(conn)[0] is True
+
+    for bad in ((5, None), (24, 24)):
+        try:
+            league_site_sync.set_schedule(conn, *bad)
+            assert False, f"expected ValueError for {bad}"
+        except ValueError:
+            pass
 
 
 def test_sync_leaves_a_scanned_game_alone_and_dry_run_saves_nothing(conn):

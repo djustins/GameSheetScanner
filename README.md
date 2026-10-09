@@ -286,13 +286,24 @@ python scripts/sync_league_site.py --refresh-all      # re-read every imported g
 It prints one block per league: games added / refreshed / already here / failed,
 how many roster numbers were set, and anything it couldn't resolve.
 
-### Running it nightly
+### Running it automatically
 
 `POST /league-site/sync` on the API (admin only; `?dry_run=true` and
 `?refresh_all=true` are supported) runs the same sync on the API server, which
 already has database access. `.github/workflows/nightly-league-sync.yml` calls it
-every night at 06:30 UTC (1:30 or 2:30 am in Pittsburgh), and fails the run — so
-GitHub emails you — if any game was refused.
+every hour at a quarter past, and fails the run — so GitHub emails you — if any
+game was refused.
+
+How often a sync actually happens is a setting in the React app: admins open **My
+Account → League site sync** and choose every hour (the default), every 2, 3, 4, 6
+or 12 hours, once a day at a chosen hour (Pittsburgh time), or off. The job always
+knocks hourly; the API answers with an empty list when no sync is due. The same
+panel has **Sync now**. Changing the minute of the hour means editing the `cron`
+line in the workflow file, and GitHub often starts scheduled jobs several minutes
+late.
+
+Each team page shows a **Last updated** banner with the time its division was
+last synced (`GET /divisions/{id}/league-sync`).
 
 One-time setup:
 
@@ -302,7 +313,7 @@ One-time setup:
    - `API_BASE_URL` — the deployed API's address, e.g.
      `https://gamesheetscanner-api.onrender.com`, as a repository secret *or*
      variable (the workflow reads either tab)
-3. Test it: **Actions → Nightly league site sync → Run workflow**.
+3. Test it: **Actions → League site sync → Run workflow**. A run started by hand always syncs, whatever the schedule says.
 
 If a run fails with "… is empty", that name isn't set on this repository, or is
 misspelled. To retry after changing the workflow file, start a new run with **Run

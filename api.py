@@ -1591,14 +1591,43 @@ def api_delete_game(game_id: int, conn=Depends(get_conn), user=Depends(require_w
 # League stats site -- pull its schedule and finished games into this app
 # ---------------------------------------------------------------------------
 
+class SyncSchedule(BaseModel):
+    every_hours: int
+    daily_hour: int | None = None
+
+
+@app.get("/league-site/schedule", tags=["games"])
+def api_get_sync_schedule(conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """How often the league site is synced automatically, and when it last was."""
+    return league_site_sync.get_schedule(conn)
+
+
+@app.put("/league-site/schedule", tags=["games"])
+def api_set_sync_schedule(body: SyncSchedule, conn=Depends(get_conn), user=Depends(require_admin)) -> dict:
+    """every_hours: 0 turns automatic syncing off; 1, 2, 3, 4, 6 or 12 syncs
+    that often; 24 syncs once a day in the hour daily_hour (Pittsburgh time)."""
+    try:
+        return league_site_sync.set_schedule(conn, body.every_hours, body.daily_hour)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 @app.post("/league-site/sync", tags=["games"])
 def api_sync_league_site(
-    dry_run: bool = False, refresh_all: bool = False, conn=Depends(get_conn), user=Depends(require_admin)
+    dry_run: bool = False, refresh_all: bool = False, scheduled: bool = False,
+    conn=Depends(get_conn), user=Depends(require_admin),
 ) -> list[dict]:
     """Syncs every current league from teampgh-statsandstandings.web.app
-    (see league_site_sync.py), returning one report per league. Called
-    nightly by .github/workflows/nightly-league-sync.yml with an admin's
-    API token; safe to call again at any time."""
+    (see league_site_sync.py), returning one report per league; safe to call
+    at any time. .github/workflows/nightly-league-sync.yml calls it every
+    hour with scheduled=true, which syncs only when the schedule set in the
+    app says one is due (GET /league-site/schedule) and otherwise returns an
+    empty list."""
+    if scheduled:
+        due, _ = league_site_sync.scheduled_sync_due(conn)
+        if not due:
+            return []
+        league_site_sync.mark_scheduled_run(conn)
     try:
         reports = league_site_sync.sync(
             conn, dry_run=dry_run, refresh_days=None if refresh_all else league_site_sync.REFRESH_DAYS
@@ -1613,6 +1642,13 @@ def api_sync_league_site(
     if notice:
         mailer.notify_admins(conn, *notice)
     return reports
+
+
+@app.get("/divisions/{division_id}/league-sync", tags=["games"])
+def api_league_sync_status(division_id: int, conn=Depends(get_conn), user=Depends(get_current_user)) -> dict:
+    """When this division's games and stats were last brought up to date
+    from the league site; synced_at is null if they never have been."""
+    return {"synced_at": league_site_sync.last_synced_at(conn, division_id)}
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
   ActionIcon,
+  Alert,
   Button,
   Card,
   Group,
@@ -25,7 +26,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getPlayerStats, listDivisionTeams } from '../api/divisions'
+import { getLeagueSync, getPlayerStats, listDivisionTeams } from '../api/divisions'
 import {
   createPlayer,
   getMoveNotes,
@@ -145,6 +146,11 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
     enabled: !!divisionId,
   })
   const teamStats = (divisionStats ?? []).filter((st) => st.team_id === teamId)
+  const { data: leagueSync } = useQuery({
+    queryKey: ['league-sync', divisionId],
+    queryFn: () => getLeagueSync(divisionId),
+    enabled: !!divisionId,
+  })
 
   // Everyone on the roster, with zeros until they have a stat -- then any
   // number that has stats but isn't on the roster. Most points first; ties
@@ -168,6 +174,22 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
 
   return (
     <Stack>
+      {leagueSync?.synced_at && (
+        <Alert color="blue" py="xs" ta="left">
+          Last updated{' '}
+          <b>
+            {new Date(leagueSync.synced_at).toLocaleString(undefined, {
+              weekday: 'long',
+              month: 'long',
+              day: 'numeric',
+              year: 'numeric',
+              hour: 'numeric',
+              minute: '2-digit',
+            })}
+          </b>{' '}
+          from the league stats site.
+        </Alert>
+      )}
       <Group justify="space-between" align="flex-end">
         <Title order={4}>Roster</Title>
         {user?.is_admin && (

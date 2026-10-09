@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import { changeMyPassword, updateMyProfile } from '../api/auth'
 import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import { LeagueSyncSettings } from '../components/LeagueSyncSettings'
 import { ApiTokensPage } from './ApiTokensPage'
 
 const onError = (err: unknown) =>
@@ -100,6 +101,12 @@ export function AccountPage() {
               Open Email
             </Button>
           </Group>
+        </Paper>
+      )}
+
+      {user.is_admin && (
+        <Paper withBorder p="lg" radius="md">
+          <LeagueSyncSettings />
         </Paper>
       )}
 

@@ -63,7 +63,7 @@ pages scoped to the division picked at the top of the sidebar:
 
 | Page | What's there |
 |---|---|
-| Team Rosters (Stats) | Each team's players with their stats, for everyone; admins get a **Bulk edit team** button that opens the roster editor (numbers, positions, grades, adding and moving players, coaches). Also everyone registered in the division. |
+| Team Rosters (Stats) | A tab per team (alphabetical, the first one open), each showing its players as cards with their stats, for everyone; admins get a **Bulk edit team** button that opens the roster editor (numbers, positions, grades, adding and moving players, coaches). Also everyone registered in the division. |
 | Evals | This season's evaluations |
 | Games | Schedule & Results, Import Scoresheets (the game sheet scanner), Manage Games |
 | Stats & Standings | Standings (with a Team balance section below them) and player stats, computed from stored games |

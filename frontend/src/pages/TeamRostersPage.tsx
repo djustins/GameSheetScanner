@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Alert, Select, Stack, Tabs, Title } from '@mantine/core'
+import { Alert, Stack, Tabs, Text, Title } from '@mantine/core'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { listDivisionTeams } from '../api/divisions'
 import { listTeamCoaches } from '../api/teams'
@@ -15,21 +15,23 @@ export function TeamRostersPage() {
   // division-wide Players list is 'teams' (Teams → Players).
   const canRosters = canView('rosters')
   const canPlayers = canView('teams')
-  const [teamId, setTeamId] = useState<string | null>(null)
+  const [pickedTeamId, setPickedTeamId] = useState<string | null>(null)
 
-  const { data: teams } = useQuery({
+  const { data: unsortedTeams } = useQuery({
     queryKey: ['division-teams', workingDivisionId],
     queryFn: () => listDivisionTeams(workingDivisionId!),
     enabled: workingDivisionId != null,
   })
+  // A tab per team in alphabetical order; the first one shows until another is picked.
+  const teams = unsortedTeams && [...unsortedTeams].sort((a, b) => a.name.localeCompare(b.name))
+  const teamId = teams?.some((t) => String(t.id) === pickedTeamId) ? pickedTeamId : teams?.[0] ? String(teams[0].id) : null
 
   const coachQueries = useQueries({
     queries: (teams ?? []).map((t) => ({ queryKey: ['team-coaches', t.id], queryFn: () => listTeamCoaches(t.id) })),
   })
-  // "Team (Coach)", like the Streamlit app's team pickers.
-  const teamLabel = (index: number, name: string) => {
-    const coaches = coachQueries[index]?.data ?? []
-    return `${name} (${coaches.length ? coaches.map((c) => c.name).join(', ') : 'no coach'})`
+  const coachesOf = (id: string | null) => {
+    const coaches = coachQueries[(teams ?? []).findIndex((t) => String(t.id) === id)]?.data ?? []
+    return coaches.length ? coaches.map((c) => c.name).join(', ') : 'No coach assigned'
   }
 
   if (workingDivisionId == null) {
@@ -53,16 +55,24 @@ export function TeamRostersPage() {
         {canRosters && (
           <Tabs.Panel value="rosters" pt="md">
             <Stack>
-              <Select
-                label="Select a team"
-                placeholder={teams && teams.length === 0 ? 'No teams in this division yet' : 'Choose a team'}
-                data={(teams ?? []).map((t, i) => ({ value: String(t.id), label: teamLabel(i, t.name) }))}
-                value={teamId}
-                onChange={setTeamId}
-                disabled={!teams || teams.length === 0}
-                searchable
-              />
-              {teamId && <TeamRosterView key={teamId} teamId={Number(teamId)} divisionId={workingDivisionId} />}
+              {teams && teams.length === 0 && <Alert color="blue">No teams in this division yet.</Alert>}
+              {teamId && (
+                <>
+                  <Tabs variant="pills" value={teamId} onChange={setPickedTeamId}>
+                    <Tabs.List>
+                      {teams!.map((t) => (
+                        <Tabs.Tab key={t.id} value={String(t.id)}>
+                          {t.name}
+                        </Tabs.Tab>
+                      ))}
+                    </Tabs.List>
+                  </Tabs>
+                  <Text size="sm" c="dimmed" ta="left">
+                    Coach: {coachesOf(teamId)}
+                  </Text>
+                  <TeamRosterView key={teamId} teamId={Number(teamId)} divisionId={workingDivisionId} />
+                </>
+              )}
             </Stack>
           </Tabs.Panel>
         )}

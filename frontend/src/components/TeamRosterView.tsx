@@ -2,9 +2,11 @@ import { useState } from 'react'
 import {
   ActionIcon,
   Button,
+  Card,
   Group,
   Modal,
   Select,
+  SimpleGrid,
   Stack,
   Table,
   Text,
@@ -164,7 +166,7 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
   return (
     <Stack>
       <Group justify="space-between" align="flex-end">
-        <Title order={4}>Player Stats</Title>
+        <Title order={4}>Roster</Title>
         {user?.is_admin && (
           <Button variant={editing ? 'filled' : 'default'} onClick={() => setEditing((open) => !open)}>
             {editing ? 'Done editing' : 'Bulk edit team'}
@@ -176,40 +178,65 @@ export function TeamRosterView({ teamId, divisionId }: { teamId: number; divisio
           No players on this team yet.
         </Text>
       ) : (
-        <Table striped highlightOnHover>
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>#</Table.Th>
-              <Table.Th>Name</Table.Th>
-              <Table.Th ta="right">G</Table.Th>
-              <Table.Th ta="right">A</Table.Th>
-              <Table.Th ta="right">PTS</Table.Th>
-              <Table.Th ta="right">PIM</Table.Th>
-              <Table.Th ta="right">SO Made</Table.Th>
-              <Table.Th ta="right">SO Missed</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {rows.map((row) => (
-              <Table.Tr key={row.key}>
-                <Table.Td>{row.number}</Table.Td>
-                <Table.Td>{row.name}</Table.Td>
-                <Table.Td ta="right">{row.goals}</Table.Td>
-                <Table.Td ta="right">{row.assists}</Table.Td>
-                <Table.Td ta="right">
-                  <b>{row.points}</b>
-                </Table.Td>
-                <Table.Td ta="right">{row.penalties}</Table.Td>
-                <Table.Td ta="right">{row.shootout_goals}</Table.Td>
-                <Table.Td ta="right">{row.shootout_misses}</Table.Td>
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
+        <SimpleGrid cols={{ base: 1, xs: 2, md: 3, xl: 4 }} spacing="md">
+          {rows.map(({ key, ...row }) => (
+            <PlayerCard key={key} {...row} />
+          ))}
+        </SimpleGrid>
       )}
 
       {user?.is_admin && editing && <TeamRosterEditor teamId={teamId} divisionId={divisionId} />}
     </Stack>
+  )
+}
+
+// One player on the roster: jersey number and name, points up front, the
+// rest of the stat line underneath.
+function PlayerCard(row: {
+  number: string
+  name: string
+  goals: number
+  assists: number
+  points: number
+  penalties: number
+  shootout_goals: number
+  shootout_misses: number
+}) {
+  const stat = (label: string, value: number | string) => (
+    <div>
+      <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+        {label}
+      </Text>
+      <Text fw={600}>{value}</Text>
+    </div>
+  )
+  return (
+    <Card withBorder radius="md" padding="md" ta="left" bg="var(--app-panel-bg)">
+      <Group justify="space-between" align="flex-start" wrap="nowrap">
+        <div style={{ minWidth: 0 }}>
+          <Text size="sm" fw={700} c="var(--app-heading)">
+            #{row.number}
+          </Text>
+          <Text fw={700} size="lg" lh={1.2} truncate title={row.name}>
+            {row.name}
+          </Text>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <Text fz={28} fw={800} lh={1}>
+            {row.points}
+          </Text>
+          <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+            Pts
+          </Text>
+        </div>
+      </Group>
+      <Group mt="sm" gap="lg">
+        {stat('G', row.goals)}
+        {stat('A', row.assists)}
+        {stat('PIM', row.penalties)}
+        {stat('Shootout', `${row.shootout_goals}/${row.shootout_goals + row.shootout_misses}`)}
+      </Group>
+    </Card>
   )
 }
 
@@ -404,7 +431,7 @@ function TeamRosterEditor({ teamId, divisionId }: { teamId: number; divisionId: 
     <Writable>
     <Stack>
       <ReadOnlyNotice />
-      <Title order={4}>Roster</Title>
+      <Title order={4}>Edit roster</Title>
       <Table striped highlightOnHover>
         <Table.Thead>
           <Table.Tr>
